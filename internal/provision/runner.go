@@ -28,6 +28,7 @@ type Record struct {
 	UpdatedAt         time.Time               `json:"updatedAt"`
 	LastRunner        string                  `json:"lastRunner"`
 	CLIVersion        string                  `json:"cliVersion"`
+	LastError         string                  `json:"lastError,omitempty"`
 	Nodes             map[string]NodeProgress `json:"nodes"`
 }
 
@@ -116,6 +117,10 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 		defer cancel()
 		if err != nil && r.Validate(p) == nil {
 			r.Phase = "interrupted"
+			r.LastError = err.Error()
+			if len(r.LastError) > 4096 {
+				r.LastError = r.LastError[:4096]
+			}
 			r.UpdatedAt = time.Now().UTC()
 			if saveErr := store.Save(cleanup, r, owner); saveErr != nil {
 				err = errors.Join(err, fmt.Errorf("save interruption: %w", saveErr))
@@ -132,6 +137,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	r.LastRunner = owner
 	r.CLIVersion = version
 	r.Phase = "provisioning"
+	r.LastError = ""
 	save := func() error { r.UpdatedAt = time.Now().UTC(); return store.Save(ctx, r, owner) }
 	if err = save(); err != nil {
 		return

@@ -131,6 +131,9 @@ func reconcile(p Plan, r *Record, live map[string]types.Instance, waitForVisibil
 				continue
 			}
 			if node.Phase != "pending" {
+				node.EC2State = "unknown"
+				node.ObservedAt = time.Now().UTC()
+				r.Nodes[t.Name] = node
 				return fmt.Errorf("target %s has recorded launch intent but no visible instance; outcome unknown, no automatic relaunch (retry reconciliation after EC2 propagation)", t.Name)
 			}
 			continue

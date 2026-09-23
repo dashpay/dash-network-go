@@ -117,7 +117,7 @@ func TestLostLaunchResponseReconcilesBeforeContinuing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Requests) != 2 || r.Phase != "compute-ready" {
+	if len(c.Requests) != 2 || r.Phase != "compute-ready" || r.LastError != "" {
 		t.Fatal("lost response produced duplicate/missing resources")
 	}
 }
@@ -131,6 +131,9 @@ func TestUnknownLaunchWithoutVisibleInstanceNeverRetries(t *testing.T) {
 	_, err := run(context.Background(), p, c, s, "runner-2")
 	if err == nil || !strings.Contains(err.Error(), "no automatic relaunch") || len(c.Requests) != 0 {
 		t.Fatal("uncertain launch automatically retried", err)
+	}
+	if s.record.LastError == "" || s.record.Nodes[p.Targets[0].Name].EC2State != "unknown" {
+		t.Fatal("uncertain target or diagnostic lost from shared journal")
 	}
 	if len(s.record.Nodes) != 2 || s.record.Nodes[p.Targets[1].Name].Phase != "pending" {
 		t.Fatal("unattempted target disappeared")

@@ -54,6 +54,9 @@ aws --profile YOUR_PROFILE --region YOUR_REGION dynamodb create-table \
   --billing-mode PAY_PER_REQUEST \
   --deletion-protection-enabled
 
+aws --profile YOUR_PROFILE --region YOUR_REGION dynamodb wait table-exists \
+  --table-name dashnet-operations
+
 aws --profile YOUR_PROFILE --region YOUR_REGION dynamodb update-continuous-backups \
   --table-name dashnet-operations \
   --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true
@@ -90,7 +93,9 @@ dashnet operation --plan out/lab-ec2-plan.json --profile YOUR_PROFILE
 
 `provision` repeats account/AMI/placement checks, acquires the shared claim, checks
 **the whole live scope** before the first launch, and journals each launch intent
-before sending it. Instances and volumes get `dashnet:managed-by`, network,
+before sending it. Interrupted records retain a bounded `lastError`, runner ID,
+and every target with observation timestamps for inspection from another machine.
+Instances and volumes get `dashnet:managed-by`, network,
 generation, plan, node, and role tags, alongside the configured discovery tag.
 A legacy/unmanaged instance under the same network tag blocks provisioning; the
 command never adopts it. Identity, ownership, placement, type, key pair, security
