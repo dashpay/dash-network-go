@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -53,6 +54,10 @@ func (d Dynamo) Verify(ctx context.Context, p provision.Plan) error {
 	}
 	return errors.New("journal Network partition key must be a string")
 }
+func number(n int64) types.AttributeValue {
+	return &types.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
+}
+
 func str(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
 func value(item map[string]types.AttributeValue, k string) string {
 	v, ok := item[k].(*types.AttributeValueMemberS)
@@ -100,6 +105,10 @@ func decode(item map[string]types.AttributeValue, p provision.Plan) (provision.R
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return r, errors.New("trailing journal payload")
 	}
+	revision, ok := item["Revision"].(*types.AttributeValueMemberN)
+	if !ok || revision.Value != strconv.FormatInt(r.Revision, 10) {
+		return r, errors.New("journal revision mismatch")
+	}
 	return r, r.Validate(p)
 }
 
@@ -129,6 +138,7 @@ func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (pr
 	item["PlanID"] = str(p.ID)
 	item["Data"] = str(data)
 	item["Owner"] = str(owner)
+	item["Revision"] = number(0)
 	_, err = d.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(d.Table), Item: item, ConditionExpression: aws.String("attribute_not_exists(#network)"), ExpressionAttributeNames: map[string]string{"#network": "Network"}})
 	if err == nil {
 		return r, nil
@@ -159,13 +169,16 @@ func (d Dynamo) Save(ctx context.Context, r provision.Record, owner string) erro
 	if owner == "" {
 		return errors.New("empty runner ID")
 	}
+	if r.Revision < 1 {
+		return errors.New("save requires the next journal revision")
+	}
 	data, err := encode(r)
 	if err != nil {
 		return err
 	}
-	_, err = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner)}})
+	_, err = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner AND #revision = :previous"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner", "#revision": "Revision"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner), ":next": number(r.Revision), ":previous": number(r.Revision - 1)}})
 	if conditional(err) {
-		return errors.New("lost runner ownership; journal write refused")
+		return errors.New("runner ownership or journal revision changed; stale write refused")
 	}
 	return err
 }

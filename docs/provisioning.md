@@ -143,7 +143,9 @@ dashnet operation-unlock --plan out/lab-ec2-plan.json \
 ```
 
 Unlock is a conditional update, not journal deletion. A changed owner/plan makes
-it fail. All journal writes and releases are owner-conditional. This prevents a
+it fail. All journal writes and releases are owner-conditional. Checkpoint writes also
+compare a monotonic revision, preventing delayed same-runner retries from
+overwriting newer progress. This prevents a
 stale runner from changing state, **not** an already-issued EC2 API request from
 completing. There is no claim that DynamoDB fencing fences EC2 itself. The stopped
 runner prerequisite matters. Never unlock just because a job appears slow.

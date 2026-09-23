@@ -21,6 +21,7 @@ type NodeProgress struct {
 type Record struct {
 	APIVersion        string                  `json:"apiVersion"`
 	Kind              string                  `json:"kind"`
+	Revision          int64                   `json:"revision"`
 	Plan              Plan                    `json:"plan"`
 	Phase             string                  `json:"phase"`
 	ApplicationHealth string                  `json:"applicationHealth"`
@@ -45,7 +46,7 @@ func (r Record) Validate(p Plan) error {
 	if err := r.Plan.Validate(); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(r.Plan, p) || r.APIVersion != p.APIVersion || r.Kind != "EC2ProvisionOperation" || r.ApplicationHealth != "unknown" || len(r.Nodes) != len(p.Targets) || r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() {
+	if r.Revision < 0 || !reflect.DeepEqual(r.Plan, p) || r.APIVersion != p.APIVersion || r.Kind != "EC2ProvisionOperation" || r.ApplicationHealth != "unknown" || len(r.Nodes) != len(p.Targets) || r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() {
 		return errors.New("operation journal identity, schema, or target set mismatch")
 	}
 	switch r.Phase {
@@ -83,6 +84,8 @@ func (r Record) Validate(p Plan) error {
 // Failed or cancelled work retains its record; it is never rolled back implicitly.
 // Acquire errors are ambiguous: a lost response may have left a claim. Never
 // blindly release after a failed Acquire. Inspect the caller's printed runner ID.
+// Save requires the next revision, atomically conditional on its predecessor: a
+// delayed retry from this same owner must not regress newer target checkpoints.
 type Store interface {
 	Acquire(context.Context, Plan, string) (Record, error)
 	Save(context.Context, Record, string) error
@@ -122,6 +125,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 				r.LastError = r.LastError[:4096]
 			}
 			r.UpdatedAt = time.Now().UTC()
+			r.Revision++
 			if saveErr := store.Save(cleanup, r, owner); saveErr != nil {
 				err = errors.Join(err, fmt.Errorf("save interruption: %w", saveErr))
 			}
@@ -138,7 +142,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	r.CLIVersion = version
 	r.Phase = "provisioning"
 	r.LastError = ""
-	save := func() error { r.UpdatedAt = time.Now().UTC(); return store.Save(ctx, r, owner) }
+	save := func() error { r.UpdatedAt = time.Now().UTC(); r.Revision++; return store.Save(ctx, r, owner) }
 	if err = save(); err != nil {
 		return
 	}

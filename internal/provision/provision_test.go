@@ -49,6 +49,9 @@ func (s *memoryStore) Save(_ context.Context, r Record, o string) error {
 	if o != s.owner {
 		return errors.New("lost owner")
 	}
+	if r.Revision != s.record.Revision+1 {
+		return errors.New("stale revision")
+	}
 	if s.failSave != nil {
 		if err := s.failSave(r); err != nil {
 			return err

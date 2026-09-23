@@ -76,8 +76,17 @@ func (d *database) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _
 			return nil, &types.ConditionalCheckFailedException{}
 		}
 		d.item["Owner"] = str(owner)
-	case "SET #data = :data", "REMOVE #owner":
-		if aws.ToString(in.ConditionExpression) != "#plan = :plan AND #owner = :owner" {
+	case "SET #data = :data, #revision = :next", "REMOVE #owner":
+		expected := "#plan = :plan AND #owner = :owner"
+		if aws.ToString(in.UpdateExpression) != "REMOVE #owner" {
+			expected += " AND #revision = :previous"
+			actual, ok := d.item["Revision"].(*types.AttributeValueMemberN)
+			previous, prevOK := in.ExpressionAttributeValues[":previous"].(*types.AttributeValueMemberN)
+			if !ok || !prevOK || actual.Value != previous.Value {
+				return nil, &types.ConditionalCheckFailedException{}
+			}
+		}
+		if aws.ToString(in.ConditionExpression) != expected {
 			return nil, errors.New("unconditional save/release")
 		}
 		if owner != value(d.item, "Owner") {
@@ -87,6 +96,7 @@ func (d *database) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _
 			delete(d.item, "Owner")
 		} else {
 			d.item["Data"] = in.ExpressionAttributeValues[":data"]
+			d.item["Revision"] = in.ExpressionAttributeValues[":next"]
 			d.saves++
 		}
 	default:
@@ -121,6 +131,7 @@ func TestConditionalClaimSaveRecoveryAndStaleOwner(t *testing.T) {
 		t.Fatal("simultaneous claim succeeded")
 	}
 	r.Phase = "provisioning"
+	r.Revision++
 	if err = d.Save(ctx, r, "first"); err != nil {
 		t.Fatal(err)
 	}
@@ -227,5 +238,33 @@ func TestJournalTableScopeAndSchema(t *testing.T) {
 				t.Fatal("invalid table accepted")
 			}
 		})
+	}
+}
+
+func TestDelayedSameOwnerCheckpointCannotRegressProgress(t *testing.T) {
+	d, _, p := setup(t)
+	ctx := context.Background()
+	r, err := d.Acquire(ctx, p, "runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Phase = "provisioning"
+	r.Revision++
+	if err = d.Save(ctx, r, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	old := r
+	r.Phase = "interrupted"
+	r.LastError = "preserve this newer diagnostic"
+	r.Revision++
+	if err = d.Save(ctx, r, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Save(ctx, old, "runner"); err == nil {
+		t.Fatal("delayed checkpoint regressed journal")
+	}
+	current, _, err := d.Read(ctx, p)
+	if err != nil || current.Revision != 2 || current.LastError != r.LastError {
+		t.Fatal("newer progress was lost", err)
 	}
 }
