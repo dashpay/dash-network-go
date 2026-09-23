@@ -23,9 +23,12 @@ flowchart LR
 ```
 
 Boxes denote responsibilities, not a requirement for separate microservices.
-The current code implements only intent, artifact resolution, plan previews,
-read-only EC2 inventory, and a public projection. Node execution, the durable
-journal, distributed locks, UI integration, and authentication are future work.
+The current code implements intent, artifact resolution, plan previews, read-only
+EC2 inventory, and a public projection, plus the first mutating **EC2-only** stage.
+That stage uses explicit existing networking, owner-pinned AMIs, a DynamoDB journal
+and non-expiring runner claims, and per-target launch reconciliation. Node
+execution, chain lifecycle, UI integration, and authentication remain future work.
+See [provisioning and recovery](provisioning.md) for the exact boundary.
 
 ## Three kinds of state
 
@@ -75,11 +78,16 @@ views while replacing single-network inventory/name-keyed state. Existing
 unmerged/live status adaptations must be inspected and preserved before changing
 its implementation.
 
-## Execution requirements before an apply command
+## Execution boundaries
 
-The executor needs explicit ownership and scope checks, a shared network lock,
-durable per-target progress, verified SSH or another authenticated node transport,
-and replay-safe operations. Funding and registration retries must inspect actual
+The EC2 stage implements ownership/scope checks, shared exclusion, and durable
+per-target progress. Its journal is one immutable create operation per network,
+not yet a full lifecycle/event-history store. A launch with an uncertain outcome
+is reconciled, never blindly resubmitted. Shared state does not magically fence
+in-flight EC2 API calls; forced claim release requires a stopped runner.
+
+A full-network executor still needs verified SSH or another authenticated node
+transport and replay-safe chain operations. Funding and registration retries must inspect actual
 transactions before submitting duplicates. No arbitrary shell input from a UI.
 
 Platform-only operations must verify unchanged Core identity/process/configuration

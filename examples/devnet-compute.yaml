@@ -1,0 +1,43 @@
+# EC2-stage example only. These IDs are placeholders, not usable infrastructure.
+# Copy privately, select a trusted prepared Linux AMI and existing networking.
+apiVersion: dash.network/v1alpha1
+kind: Network
+metadata:
+  name: devnet-compute-example
+  displayName: Disposable compute example
+  description: Example footprint only; all cloud IDs are placeholders. This does not
+    bootstrap a Dash network.
+  visibility: private
+chain:
+  type: devnet
+  generation: 1
+aws:
+  accountId: '123456789012'
+  region: us-west-2
+  networkTagKey: DashNetwork
+  provision:
+    stateTable: dashnet-operations
+    vpcId: vpc-00000001
+    subnetId: subnet-00000001
+    securityGroupIds:
+    - sg-00000001
+    keyName: YOUR_EMERGENCY_SSH_KEY
+    publicIpv4: false
+    rootVolumeGiB: 100
+    amis:
+      arm64:
+        id: ami-00000001
+        ownerId: '123456789012'
+nodes:
+- name: validators
+  role: validator
+  count: 1
+  architecture: arm64
+  instanceType: t4g.large
+images:
+  core: docker.io/dashpay/dashd:23
+  drive: docker.io/dashpay/drive:4.2.0-beta.3
+  dapi: docker.io/dashpay/rs-dapi:4.2.0-beta.3
+  tenderdash: docker.io/dashpay/tenderdash:1.8.0
+  gateway: docker.io/dashpay/envoy:1.39.0-impr.1
+  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.3

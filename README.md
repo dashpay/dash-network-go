@@ -3,11 +3,12 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
-**Current milestone: read-only planning and discovery.** You can validate network
-intent, resolve image tags into architecture-checked digests, produce scoped
-plans, discover tagged EC2 instances, and export explicitly public status data.
-There is deliberately no `apply`, `create`, `reset`, or `destroy` command yet.
-An intent plan is not an executable deployment or evidence of a healthy network.
+**Current milestone: planning, discovery, and resumable EC2 provisioning.**
+Validate intent, pin image artifacts, preview scoped changes, discover EC2, and
+export explicitly public status data. The new `provision` command creates devnet
+**compute only** using direct AWS APIs and a shared DynamoDB journal/runner claim.
+It does not bootstrap Core/Platform or deploy a working Dash network. There is
+still no `apply`, reset, destroy, or upgrade executor. EC2 running is not health.
 
 ## Quick start
 
@@ -78,6 +79,32 @@ roles are reported as unknown, not inferred from an instance name.
 EC2 `running` is **not** application health. This snapshot explicitly reports
 `applicationHealth: unknown` until node and protocol probes are implemented.
 
+## Resumable EC2 provisioning
+
+See the [human command and recovery guide](docs/provisioning.md) and
+[small compute example](examples/devnet-compute.yaml). Provisioning is devnet-only,
+uses explicit existing networking/AMIs, and requires the exact reviewed plan ID:
+
+```sh
+# Real AWS IDs and an existing state table are required; read-only preflight.
+bin/dashnet provision-plan --network networks/devnet-lab.yaml \
+  --profile YOUR_AWS_PROFILE --out out/lab-ec2-plan.json
+
+# Creates billable instances and writes shared operation state.
+bin/dashnet provision --plan out/lab-ec2-plan.json --confirm PLAN_ID \
+  --profile YOUR_AWS_PROFILE
+
+# Inspect or resume from any authorized machine using the same plan.
+bin/dashnet operation --plan out/lab-ec2-plan.json --profile YOUR_AWS_PROFILE
+```
+
+Normal retries reconcile existing instances. Lost-response ambiguity never causes
+a blind relaunch. Claims do not expire automatically; a crashed runner requires
+explicit stopped-runner recovery. A changed generation/plan cannot bypass the
+existing operation. Root volumes are retained on termination; there is no
+automatic cleanup/rollback yet. **This slice is fake-client tested, not live-launch
+verified.** No node transport, services, or chain health checks are implemented.
+
 ## Public and operator data
 
 ```sh
@@ -101,7 +128,7 @@ Public projection is not a substitute for backend authorization.
 
 All `--out` files are mode 0600, atomically published, and never overwritten.
 Choose a new name for each resolution, plan, or observation. These local artifacts
-are not the future distributed operation journal or network lock.
+are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
 
 ## GitHub Actions
 
@@ -112,9 +139,8 @@ are not the future distributed operation journal or network lock.
   and preview a scoped operation. Publishes the lock and plan plus a job summary.
   Registry access is anonymous; there is no cloud role or mutation step.
 
-The manual workflow becomes available on the default branch after merge. It is
-not labeled deployment: real execution workflows will arrive with the executor,
-shared locking, recovery semantics, and health verification. Do not upload private
+The manual workflow runs from the default branch. It is not labeled deployment: network execution workflows will arrive with
+node/bootstrap execution, scoped OIDC, and health verification. Do not upload private
 inventory or configuration as artifacts of this public repository.
 
 ## Development
@@ -132,6 +158,7 @@ build directory before running Go tests.
 The tests exercise cross-account/scope refusal, failed pagination, immutable
 multiarch resolution, mismatched architecture advertisements, lock drift,
 Platform/Core boundaries, private/public separation, observation freshness,
-and artifact preservation.
+artifact preservation, exclusive runner claims, uncertain-launch reconciliation,
+interrupted checkpoints, footprint drift, and cancellation without target loss.
 
 See [architecture](docs/architecture.md) and [the implementation roadmap](docs/roadmap.md).
