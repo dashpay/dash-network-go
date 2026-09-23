@@ -35,12 +35,19 @@ Usage:
   dashnet operation --plan ec2-plan.json [--profile name]
   dashnet operation-unlock --plan ec2-plan.json --expected-owner RUNNER_ID
                           --confirm-runner-stopped [--profile name]
+  dashnet bootstrap-plan --compute-plan ec2-plan.json --lock release.lock.json
+                         [--ssh-user ubuntu] [--ssh-port 22] [--address private]
+                         [--out bootstrap-plan.json]
+  dashnet bootstrap --plan bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID
+                    --ssh-key PATH --known-hosts PATH [--profile name]
+                    [--timeout 30m] [--out hosts-ready.json]
   dashnet version
 
 Planning and discovery are read-only. Provision creates EC2 instances and durable
 DynamoDB state: devnet compute only, NOT a working Dash network. operation-unlock
 changes a runner claim and requires the previous runner to be stopped first.
-No apply, reset, destroy, node bootstrap, or upgrade executor exists yet.
+Bootstrap installs/verifies Docker and pulls locked images on owned Ubuntu 24.04
+hosts; it does not start Core/Platform. No apply, reset, destroy or upgrade yet.
 Image availability and EC2 running are not proof of application health.
 JSON is written to stdout unless --out is given; files are private (0600),
 atomic, and never overwritten. Status is operator data unless --public is used.
@@ -56,6 +63,8 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
+	case "bootstrap-plan", "bootstrap":
+		return runBootstrap(ctx, args, out, stderr, version)
 	case "provision-plan", "provision", "operation", "operation-unlock":
 		return runProvision(ctx, args, out, stderr, version)
 	case "validate", "resolve", "plan", "inventory", "status":

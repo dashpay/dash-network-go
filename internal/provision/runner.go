@@ -31,6 +31,7 @@ type Record struct {
 	CLIVersion        string                  `json:"cliVersion"`
 	LastError         string                  `json:"lastError,omitempty"`
 	Nodes             map[string]NodeProgress `json:"nodes"`
+	Bootstrap         *BootstrapProgress      `json:"bootstrap,omitempty"`
 }
 
 func NewRecord(p Plan) Record {
@@ -76,7 +77,7 @@ func (r Record) Validate(p Plan) error {
 			return errors.New("invalid target phase")
 		}
 	}
-	return nil
+	return r.validateBootstrap(p)
 }
 
 // Store serializes CLI and Actions through a non-expiring owner claim. The same

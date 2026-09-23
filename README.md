@@ -3,11 +3,12 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
-**Current milestone: planning, discovery, and resumable EC2 provisioning.**
+**Current milestone: planning, EC2 provisioning, and authenticated host bootstrap.**
 Validate intent, pin image artifacts, preview scoped changes, discover EC2, and
 export explicitly public status data. The new `provision` command creates devnet
 **compute only** using direct AWS APIs and a shared DynamoDB journal/runner claim.
-It does not bootstrap Core/Platform or deploy a working Dash network. There is
+`bootstrap` now prepares owned Ubuntu 24.04 hosts and digest-pinned images.
+Neither command starts Core/Platform or deploys a working Dash network. There is
 still no `apply`, reset, destroy, or upgrade executor. EC2 running is not health.
 
 ## Quick start
@@ -103,7 +104,29 @@ a blind relaunch. Claims do not expire automatically; a crashed runner requires
 explicit stopped-runner recovery. A changed generation/plan cannot bypass the
 existing operation. Root volumes are retained on termination; there is no
 automatic cleanup/rollback yet. **This slice is fake-client tested, not live-launch
-verified.** No node transport, services, or chain health checks are implemented.
+verified.** Application services and chain health checks remain unimplemented.
+
+## Authenticated node bootstrap
+
+The [bootstrap and recovery guide](docs/bootstrap.md) describes the next stage:
+
+```sh
+dashnet bootstrap-plan --compute-plan out/lab-ec2-plan.json \
+  --lock out/lab.lock.json --out out/lab-bootstrap-plan.json
+dashnet bootstrap --plan out/lab-bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID \
+  --ssh-key /secure/deployment-key --known-hosts /secure/lab-known-hosts \
+  --profile YOUR_AWS_PROFILE
+```
+
+It verifies instance-scoped SSH host keys and IMDSv2 identity, checks every host
+before mutation, prepares Docker/Compose, and caches role-specific pinned images.
+Runtime installation uses signed Ubuntu distro repositories; prebaked runtimes
+skip it. Shared and host-side locks protect interrupted-run recovery. No Dash
+containers start, and `hosts-ready` is **not** application health.
+
+The same `operation` command shows per-host bootstrap progress. Trust enrollment
+is currently manual; no insecure host-key learning fallback exists. SSH identities
+stay local. This stage is integration-tested, **not live-node verified**.
 
 ## Public and operator data
 
@@ -133,8 +156,9 @@ are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
 ## GitHub Actions
 
 - **CI:** formatting, module integrity, vet, race-tested unit/integration tests,
-  example validation, and four platform binaries. Tests use an in-process OCI
-  registry and fake AWS clients; they need no cloud credentials or running nodes.
+  example validation, four platform binaries, and an isolated Ubuntu recipe smoke
+  test. Tests use an in-process OCI registry, fake AWS clients, and loopback SSH;
+  the recipe fixture mocks metadata/packages/Docker. No live cloud access.
 - **Plan network (read-only):** manually resolve the checked-in example images
   and preview a scoped operation. Publishes the lock and plan plus a job summary.
   Registry access is anonymous; there is no cloud role or mutation step.
@@ -159,6 +183,7 @@ The tests exercise cross-account/scope refusal, failed pagination, immutable
 multiarch resolution, mismatched architecture advertisements, lock drift,
 Platform/Core boundaries, private/public separation, observation freshness,
 artifact preservation, exclusive runner claims, uncertain-launch reconciliation,
-interrupted checkpoints, footprint drift, and cancellation without target loss.
+interrupted checkpoints, footprint drift, strict SSH host trust, bounded output,
+host preparation/readback, and cancellation without target loss.
 
 See [architecture](docs/architecture.md) and [the implementation roadmap](docs/roadmap.md).

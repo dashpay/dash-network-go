@@ -24,10 +24,14 @@ flowchart LR
 
 Boxes denote responsibilities, not a requirement for separate microservices.
 The current code implements intent, artifact resolution, plan previews, read-only
-EC2 inventory, and a public projection, plus the first mutating **EC2-only** stage.
+EC2 inventory, and a public projection, plus EC2 provisioning and authenticated
+host bootstrap.
 That stage uses explicit existing networking, owner-pinned AMIs, a DynamoDB journal
-and non-expiring runner claims, and per-target launch reconciliation. Node
-execution, chain lifecycle, UI integration, and authentication remain future work.
+and non-expiring runner claims, and per-target launch reconciliation. The additive
+bootstrap stage shares that
+claim and journal, verifies SSH/instance identity, and prepares runtime/images
+without starting containers. Chain lifecycle, UI integration and web
+authentication remain future work.
 See [provisioning and recovery](provisioning.md) for the exact boundary.
 
 ## Three kinds of state
@@ -86,8 +90,12 @@ not yet a full lifecycle/event-history store. A launch with an uncertain outcome
 is reconciled, never blindly resubmitted. Shared state does not magically fence
 in-flight EC2 API calls; forced claim release requires a stopped runner.
 
-A full-network executor still needs verified SSH or another authenticated node
-transport and replay-safe chain operations. Funding and registration retries must inspect actual
+Verified SSH now uses explicit instance-scoped known_hosts trust and a local
+identity, with a second IMDSv2 identity check. The bootstrap recipe is hashed into
+the plan, rejects existing containers, and uses host-side flock plus fresh probes
+for interruption recovery. See [bootstrap](bootstrap.md) for its precise limits.
+A full-network executor still needs replay-safe chain operations. Funding and
+registration retries must inspect actual
 transactions before submitting duplicates. No arbitrary shell input from a UI.
 
 Platform-only operations must verify unchanged Core identity/process/configuration

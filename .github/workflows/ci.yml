@@ -45,10 +45,26 @@ jobs:
             echo 'Provisioning accepted missing explicit intent'
             exit 1
           fi
+          if bin/dashnet bootstrap; then
+            echo 'Bootstrap accepted missing plan and trusted host identity'
+            exit 1
+          fi
           if bin/dashnet apply; then
             echo 'An unimplemented mutation command unexpectedly succeeded'
             exit 1
           fi
+
+  bootstrap-recipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Execute bootstrap recipe in disposable Ubuntu (mocked AWS and Docker)
+        run: |
+          docker build -t dashnet-recipe-test -f internal/bootstrap/testdata/Dockerfile .
+          docker run --rm --network none dashnet-recipe-test
 
   binaries:
     runs-on: ubuntu-latest
