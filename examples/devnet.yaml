@@ -1,0 +1,45 @@
+apiVersion: dash.network/v1alpha1
+kind: Network
+metadata:
+  name: devnet-example
+  displayName: Example development network
+  description: Example intent, not a running network. Replace the AWS account before discovery.
+  visibility: private
+chain:
+  type: devnet
+  generation: 1
+aws:
+  accountId: "123456789012"
+  region: us-west-2
+  # Legacy deploy resources use DashNetwork; new tags can be chosen explicitly.
+  networkTagKey: DashNetwork
+nodes:
+  - name: validators
+    role: validator
+    count: 13
+    architecture: arm64
+    instanceType: t4g.large
+  - name: seeds
+    role: seed
+    count: 1
+    architecture: arm64
+    instanceType: t4g.small
+  - name: wallet
+    role: wallet
+    count: 1
+    architecture: arm64
+    instanceType: t4g.small
+  - name: miner
+    role: miner
+    count: 1
+    architecture: arm64
+    instanceType: t4g.small
+# These are explicit candidates, not a declaration of tested compatibility.
+# resolve records immutable index + per-architecture manifest digests.
+images:
+  core: docker.io/dashpay/dashd:23
+  drive: docker.io/dashpay/drive:4.2.0-beta.3
+  dapi: docker.io/dashpay/rs-dapi:4.2.0-beta.3
+  tenderdash: docker.io/dashpay/tenderdash:1.8.0
+  gateway: docker.io/dashpay/envoy:1.39.0-impr.1
+  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.3

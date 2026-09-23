@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Formatting
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Module integrity
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Tests and race detector
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Examples and command boundary
+        run: |
+          go build -trimpath -o bin/dashnet ./cmd/dashnet
+          bin/dashnet validate --network examples/devnet.yaml
+          bin/dashnet validate --network examples/testnet.yaml
+          if bin/dashnet apply; then
+            echo 'An unimplemented mutation command unexpectedly succeeded'
+            exit 1
+          fi
+
+  binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [linux, darwin]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build standalone executable
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p out
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA}" -o "out/dashnet-${GOOS}-${GOARCH}" ./cmd/dashnet
+          cd out
+          sha256sum "dashnet-${GOOS}-${GOARCH}" > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dashnet-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error

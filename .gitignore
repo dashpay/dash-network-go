@@ -1,0 +1,8 @@
+/bin/
+/out/
+/coverage.out
+/networks/
+*.lock.json
+*.inventory.json
+.env
+.DS_Store
