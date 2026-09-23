@@ -21,7 +21,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/status"
 )
 
-const Help = `dashnet — independent Dash network planning and discovery
+const Help = `dashnet — independent Dash network planning, discovery, and EC2 provisioning
 
 Usage:
   dashnet validate  --network network.yaml
@@ -30,11 +30,18 @@ Usage:
                     --operation create|upgrade --scope all|platform|core|tenderdash [--out plan.json]
   dashnet inventory --network network.yaml [--profile name] [--out inventory.json]
   dashnet status    --inventory inventory.json [--public] [--max-age 5m] [--out status.json]
+  dashnet provision-plan --network network.yaml [--profile name] --out ec2-plan.json
+  dashnet provision --plan ec2-plan.json --confirm PLAN_ID [--profile name]
+  dashnet operation --plan ec2-plan.json [--profile name]
+  dashnet operation-unlock --plan ec2-plan.json --expected-owner RUNNER_ID
+                          --confirm-runner-stopped [--profile name]
   dashnet version
 
-All current commands are read-only against cloud resources and nodes.
-Plans are intent previews, not executable deployments. No apply, reset, or
-destroy command exists yet. Image availability is not proof of compatibility.
+Planning and discovery are read-only. Provision creates EC2 instances and durable
+DynamoDB state: devnet compute only, NOT a working Dash network. operation-unlock
+changes a runner claim and requires the previous runner to be stopped first.
+No apply, reset, destroy, node bootstrap, or upgrade executor exists yet.
+Image availability and EC2 running are not proof of application health.
 JSON is written to stdout unless --out is given; files are private (0600),
 atomic, and never overwritten. Status is operator data unless --public is used.
 `
@@ -49,9 +56,11 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
+	case "provision-plan", "provision", "operation", "operation-unlock":
+		return runProvision(ctx, args, out, stderr, version)
 	case "validate", "resolve", "plan", "inventory", "status":
 	default:
-		return fmt.Errorf("unknown command %q; run dashnet help (execution commands are not implemented)", args[0])
+		return fmt.Errorf("unknown command %q; run dashnet help (full network deployment is not implemented)", args[0])
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)

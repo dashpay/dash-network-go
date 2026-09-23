@@ -43,9 +43,28 @@ type Chain struct {
 }
 
 type AWS struct {
-	AccountID     string `json:"accountId" yaml:"accountId"`
-	Region        string `json:"region" yaml:"region"`
-	NetworkTagKey string `json:"networkTagKey" yaml:"networkTagKey"`
+	AccountID     string     `json:"accountId" yaml:"accountId"`
+	Region        string     `json:"region" yaml:"region"`
+	NetworkTagKey string     `json:"networkTagKey" yaml:"networkTagKey"`
+	Provision     *Provision `json:"provision,omitempty" yaml:"provision,omitempty"`
+}
+
+// Provision is an explicit EC2 footprint inside existing networking. It is not
+// a general infrastructure language and contains no credentials or user-data.
+type Provision struct {
+	StateTable       string         `json:"stateTable" yaml:"stateTable"`
+	VPCID            string         `json:"vpcId" yaml:"vpcId"`
+	SubnetID         string         `json:"subnetId" yaml:"subnetId"`
+	SecurityGroupIDs []string       `json:"securityGroupIds" yaml:"securityGroupIds"`
+	KeyName          string         `json:"keyName" yaml:"keyName"`
+	PublicIPv4       bool           `json:"publicIpv4" yaml:"publicIpv4"`
+	RootVolumeGiB    int32          `json:"rootVolumeGiB" yaml:"rootVolumeGiB"`
+	AMIs             map[string]AMI `json:"amis" yaml:"amis"`
+}
+
+type AMI struct {
+	ID      string `json:"id" yaml:"id"`
+	OwnerID string `json:"ownerId" yaml:"ownerId"`
 }
 
 type NodeGroup struct {
@@ -154,6 +173,11 @@ func (n Network) Validate() error {
 	}
 	if total > 1000 {
 		return errors.New("network exceeds the initial 1000-node limit")
+	}
+	if n.AWS.Provision != nil {
+		if err := n.ValidateProvision(); err != nil {
+			return err
+		}
 	}
 	if len(n.Images) != len(Components) {
 		return fmt.Errorf("images must define exactly these components: %s", strings.Join(Components, ", "))

@@ -1,6 +1,6 @@
 # Implementation roadmap
 
-## 1. Planning and discovery — this change
+## 1. Planning and discovery — implemented
 
 - Strict network definitions and explicit cloud/network identity.
 - Anonymous OCI resolution to index and architecture-specific manifest digests.
@@ -14,11 +14,23 @@
 This milestone cannot deploy or upgrade a network. Tests prove the behavior above,
 not consensus readiness or a successful infrastructure lifecycle.
 
-## 2. One real devnet lifecycle
+## 2. One real devnet lifecycle — in progress
+
+Implemented first slice (not live AWS-proved):
+
+- Read-only EC2 footprint planning with explicit subnet/security groups/key pair,
+  owner-pinned architecture-checked AMIs, and per-target launch identity.
+- Direct EC2 creation, durable DynamoDB journal, non-expiring shared runner claims,
+  conditional recovery, and reconciliation after lost responses/checkpoints.
+- EC2-running verification for every target; application health stays unknown.
+- Failure-path tests and a human provisioning/recovery runbook.
+
+Remaining:
 
 - Complete a concrete topology/genesis contract, AMI/runtime preparation, and
-  direct AWS resource creation with ownership tags and idempotency tokens.
-- Implement the shared journal/lock and a small, named-stage runner.
+  the remaining network infrastructure beyond existing-VPC EC2 placement.
+- Extend the single-stage journal into reviewed lifecycle transitions/history;
+  implement an evidence-backed repair path for unobserved/rejected launch intent.
 - Implement node transport/configuration, Core start, funding/registration,
   Platform start, and health checks. Retain published container packaging initially.
 - Implement account/network-scoped cleanup and interrupted-operation recovery.
