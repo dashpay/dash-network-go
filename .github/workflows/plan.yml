@@ -1,0 +1,64 @@
+name: Plan network (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Checked-in example intent (no private configuration)
+        type: choice
+        options: [devnet, testnet]
+        required: true
+      operation:
+        description: Intent to preview; create is devnet-only
+        type: choice
+        options: [upgrade, create]
+        required: true
+      scope:
+        description: Components to include (create requires all)
+        type: choice
+        options: [platform, tenderdash, core, all]
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Resolve artifacts and preview intent
+        env:
+          NETWORK: ${{ inputs.network }}
+          OPERATION: ${{ inputs.operation }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          case "$NETWORK" in devnet|testnet) ;; *) exit 1 ;; esac
+          mkdir -p out
+          go build -trimpath -o bin/dashnet ./cmd/dashnet
+          bin/dashnet validate --network "examples/${NETWORK}.yaml"
+          bin/dashnet resolve --network "examples/${NETWORK}.yaml" --out out/release.lock.json
+          bin/dashnet plan --network "examples/${NETWORK}.yaml" --lock out/release.lock.json --operation "$OPERATION" --scope "$SCOPE" --out out/plan.json
+          {
+            echo '## Read-only network plan'
+            echo ''
+            echo 'No AWS credentials were used. No infrastructure or nodes were changed.'
+            echo 'Artifact availability is verified; runtime compatibility is not.'
+            echo ''
+            echo '```json'
+            cat out/plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: network-plan-${{ github.run_id }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error

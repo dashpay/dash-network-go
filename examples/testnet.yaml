@@ -1,0 +1,27 @@
+apiVersion: dash.network/v1alpha1
+kind: Network
+metadata:
+  name: testnet
+  displayName: Dash testnet managed infrastructure
+  description: Example managed-node intent, not authority over the public network.
+  visibility: public
+chain:
+  type: testnet
+  generation: 1
+aws:
+  accountId: "123456789012"
+  region: us-west-2
+  networkTagKey: DashNetwork
+nodes:
+  - name: managed-validators
+    role: validator
+    count: 1
+    architecture: arm64
+    instanceType: t4g.large
+images:
+  core: docker.io/dashpay/dashd:23
+  drive: docker.io/dashpay/drive:4.2.0-beta.3
+  dapi: docker.io/dashpay/rs-dapi:4.2.0-beta.3
+  tenderdash: docker.io/dashpay/tenderdash:1.8.0
+  gateway: docker.io/dashpay/envoy:1.39.0-impr.1
+  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.3
