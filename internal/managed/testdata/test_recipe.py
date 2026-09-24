@@ -24,12 +24,13 @@ class RecipeTest(unittest.TestCase):
         # Conversion must not mutate the original inspected object either.
         self.assertNotIn('NoCopy',container['HostConfig']['Mounts'][0]['VolumeOptions'])
 
-    def test_unsupported_selinux_mount_is_not_silently_adopted(self):
+    def test_legacy_selinux_flags_and_anonymous_volume_are_preserved(self):
         container=dict(Id='a'*64,Config={},NetworkSettings=dict(Networks={}),HostConfig={},
-                       Mounts=[dict(Type='bind',Source='/config',Destination='/config',RW=False,Mode='ro,Z')])
+                       Mounts=[dict(Type='bind',Source='/config',Destination='/config',RW=False,Mode='ro,Z'),
+                               dict(Type='volume',Name='actual-anonymous',Destination='/data',RW=True,Mode='')])
         w=worker.Worker(dict(fleet=dict(metadata=dict(name='fixture')),target={}))
-        with self.assertRaisesRegex(worker.Failure,'unsupported-selinux-mount'):
-            w.recipe(container)
+        self.assertEqual(w.recipe(container)['HostConfig']['Binds'],
+                         ['/config:/config:Z,ro','actual-anonymous:/data:nocopy,rw'])
 
 
 if __name__=='__main__':unittest.main()

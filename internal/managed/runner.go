@@ -58,7 +58,7 @@ func (r Runner) report(s string) {
 func (r Runner) health(ctx context.Context, s Snapshot) (Health, error) {
 	w := r.Window
 	if w == 0 {
-		w = 90 * time.Second
+		w = 4 * time.Minute
 	}
 	return Doctor(ctx, s, r.Remote, w, r.wait)
 }

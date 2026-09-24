@@ -77,11 +77,11 @@ dashnet managed-plan --snapshot snapshot.json --operation upgrade \
 
 dashnet managed-upgrade --plan change.json --confirm PLAN_ID \
   --ssh-key /secure/key --known-hosts /secure/known_hosts --profile OPS \
-  --observation-window 90s --timeout 110m --out upgraded.json
+  --observation-window 4m --timeout 110m --out upgraded.json
 
 dashnet managed-doctor --snapshot snapshot.json \
   --ssh-key /secure/key --known-hosts /secure/known_hosts --profile OPS \
-  --observation-window 90s --timeout 10m --out health.json
+  --observation-window 4m --timeout 10m --out health.json
 ```
 
 Take a fresh `managed-import` snapshot before planning a later operation so its
@@ -116,6 +116,12 @@ images or change configuration. Its independent process does not honor the new
 journal claim. No assertion of exclusive control over other tools is made.
 
 ## Failure and quorum policy
+
+Choose an observation window longer than the network's idle-block interval.
+The managed default is four minutes: current Moutai emits empty blocks every
+three minutes, so a 90-second sample can report no progress on a healthy idle
+network. The gate still requires actual advancement; it does not reinterpret an
+unchanged height as healthy. Actions exposes the same observation-window input.
 
 The network journal records the pending target before withdrawal. On-host
 write-ahead state records each selected container's original configuration and

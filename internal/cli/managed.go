@@ -32,7 +32,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC")
 	fs.StringVar(&output, "out", "", "new private JSON output")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "bounded operation deadline")
-	fs.DurationVar(&window, "observation-window", 90*time.Second, "health observation gap")
+	fs.DurationVar(&window, "observation-window", 4*time.Minute, "health observation gap; longer than the network's idle block interval")
 	switch command {
 	case "managed-import", "managed-operation", "managed-unlock":
 		fs.StringVar(&manifestPath, "manifest", "", "explicit existing-network JSON manifest")
@@ -66,7 +66,8 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		}
 		return e
 	}
-	if fs.NArg() != 0 || timeout <= 0 || window <= 0 || window >= timeout {
+	healthOperation := command == "managed-doctor" || command == "managed-upgrade" || command == "managed-deploy"
+	if fs.NArg() != 0 || timeout <= 0 || window <= 0 || (healthOperation && window >= timeout) {
 		return errors.New("named arguments and positive bounded observation/timeout required")
 	}
 	if needsSSH && (key == "" || hosts == "") {

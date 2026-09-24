@@ -39,6 +39,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='dashnet-managed-contract-') as tmp:
         root=Path(tmp);prefix=root.name
         network=prefix+'-net';volume=prefix+'-state'
+        volumes=[volume]
         run=lambda args:subprocess.check_output(args,stderr=subprocess.STDOUT,timeout=60)
         run(['docker','network','create',network]);run(['docker','volume','create',volume])
         names={c:prefix+'-'+c for c in ['core','tenderdash','drive']}
@@ -46,12 +47,18 @@ def main():
         (root/'dash.conf').write_text('private-fixture-password=never-export\n')
         try:
             for c,name in list(names.items())+[('companion',companion)]:
-                run(['docker','run','-d','--name',name,'--network',network,'--network-alias',c,
+                args=['docker','run','-d','--name',name,'--network',network,'--network-alias',c,
                      '--restart','unless-stopped','--label','com.docker.compose.project=legacy',
-                     '--label','com.docker.compose.service='+c,'--mount','type=volume,src='+volume+',dst=/state',
-                     '--mount','type=bind,src='+str(root/'dash.conf')+',dst=/config/dash.conf,readonly',
-                     '-e','RPC_PASSWORD=private-fixture-password',before,'sh','-c','trap "exit 0" TERM; while :; do sleep 1; done'])
+                     '--label','com.docker.compose.service='+c,'--mount','type=volume,src='+volume+',dst=/state']
+                if c=='tenderdash':
+                    args+=['-v',str(root/'dash.conf')+':/config/dash.conf:ro,Z','-v','/anonymous']
+                else:args+=['--mount','type=bind,src='+str(root/'dash.conf')+',dst=/config/dash.conf,readonly']
+                args+=['-e','RPC_PASSWORD=private-fixture-password',before,'sh','-c','trap "exit 0" TERM; while :; do sleep 1; done']
+                run(args)
+                if c=='tenderdash':
+                    volumes.extend(m['Name'] for m in engine.inspect(name)['Mounts'] if m['Destination']=='/anonymous')
             run(['docker','exec',names['core'],'sh','-c','printf durable-state > /state/sentinel'])
+            run(['docker','exec',names['tenderdash'],'sh','-c','printf anonymous-state > /anonymous/sentinel'])
             q=dict(action='observe',fleetId='a'*64,fleet=dict(metadata=dict(name='devnet-fixture'),coreNetwork='devnet-fixture',chainType='devnet'),
                    target=dict(instanceId='i-'+'1'*17,architecture='amd64',role='validator',containers=names))
             w=Fixture(q,engine,root/'managed')
@@ -80,6 +87,9 @@ def main():
             assert result['companions']==initial['companions'],'companion changed'
             assert result['filesHash']==initial['filesHash'],'configuration changed'
             assert run(['docker','exec',names['tenderdash'],'cat','/state/sentinel'])==b'durable-state'
+            assert run(['docker','exec',names['tenderdash'],'cat','/anonymous/sentinel'])==b'anonymous-state'
+            bind=next(m for m in engine.inspect(names['tenderdash'])['Mounts'] if m['Destination']=='/config/dash.conf')
+            assert not bind['RW'] and 'Z' in bind['Mode'].split(','),'legacy relabel/read-only flags lost'
             assert engine.inspect(names['tenderdash'])['Config']['Env']==engine.inspect(names['core'])['Config']['Env']
             assert 'private-fixture-password' not in json.dumps(result)
             # Deploy restores an explicitly stopped captured workload, not a new
@@ -92,7 +102,7 @@ def main():
         finally:
             for name in [*names.values(),companion]:
                 subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-            subprocess.run(['docker','volume','rm',volume],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            subprocess.run(['docker','volume','rm',*volumes],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             subprocess.run(['docker','network','rm',network],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 if __name__=='__main__':main()

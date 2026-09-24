@@ -144,7 +144,7 @@ class Worker:
         # existing sources. Docker must not silently allocate fresh state.
         require(not host.get('AutoRemove') and not host.get('VolumesFrom') and not host.get('Links'), 'unsupported-container-lifecycle')
         require(not host.get('NetworkMode', '').startswith(('container:', 'service:')), 'unsupported-network-mode')
-        mounts = []
+        mounts, binds = [], []
         declared = {m['Target']:m for m in (host.get('Mounts') or [])}
         for m in c['Mounts']:
             original = declared.get(m['Destination'])
@@ -156,19 +156,32 @@ class Worker:
                 else:require(m['Destination'] in (host.get('Tmpfs') or {}),'unsupported-tmpfs')
                 continue
             require(m['Type'] in ['bind', 'volume'], 'unsupported-mount-type')
+            source=m.get('Name') if m['Type']=='volume' else m['Source']
+            if original is None:
+                # Keep legacy -v flags (including testnet's SELinux :Z).
+                # Realized names make anonymous volumes explicit as well.
+                require(source and ':' not in source and ':' not in m['Destination'],'unsupported-legacy-mount-path')
+                options={x for x in (m.get('Mode') or '').split(',') if x}
+                options.discard('rw');options.discard('ro')
+                options.add('rw' if m['RW'] else 'ro')
+                if m['Type']=='volume':options.add('nocopy')
+                binds.append(source+':'+m['Destination']+':'+','.join(sorted(options)))
+                continue
             # Keep subpaths, recursive read-only settings and driver options
-            # from API mounts. Legacy -v SELinux relabeling cannot be represented
-            # by this adapter: refuse it rather than silently dropping the flag.
-            require(not set((m.get('Mode') or '').split(',')) & {'z','Z'},'unsupported-selinux-mount')
-            value=copy.deepcopy(original) if original else {}
-            require(not original or original['Type']==m['Type'],'mount-type-changed')
+            # from API mounts rather than reconstructing only their sources.
+            value=copy.deepcopy(original)
+            require(original['Type']==m['Type'],'mount-type-changed')
             value.update(Type=m['Type'], Source=m.get('Name') if m['Type']=='volume' else m['Source'],
                          Target=m['Destination'], ReadOnly=not m['RW'])
             if m['Type']=='bind':
-                value.setdefault('BindOptions',{})['Propagation']=m.get('Propagation') or 'rprivate'
-            else:value.setdefault('VolumeOptions',{})['NoCopy']=True
+                value['BindOptions']=dict(value.get('BindOptions') or {})
+                value['BindOptions']['Propagation']=m.get('Propagation') or 'rprivate'
+            else:
+                value['VolumeOptions']=dict(value.get('VolumeOptions') or {})
+                value['VolumeOptions']['NoCopy']=True
             mounts.append(value)
-        host['Binds'] = None; host['Mounts'] = sorted(mounts, key=lambda m: m['Target'])
+        host['Binds'] = sorted(binds) or None
+        host['Mounts'] = sorted(mounts, key=lambda m: m['Target'])
         # Endpoint runtime IDs/IPs are not configuration. Preserve configured
         # IPAM, stable aliases and driver options, not the old container ID alias.
         endpoints = {}
@@ -374,6 +387,9 @@ class Worker:
                 mounts=[]
                 for m in marker['recipes'][k]['HostConfig']['Mounts']:
                     if m['Type']=='bind':mounts.append(dict(Type='bind',Source=m['Source'],Destination=m['Target']))
+                for bind in marker['recipes'][k]['HostConfig'].get('Binds') or []:
+                    source,target,_=bind.split(':',2)
+                    if source.startswith('/'):mounts.append(dict(Type='bind',Source=source,Destination=target))
                 file_sources[k]=dict(Mounts=mounts)
                 continue
             a=self.summary(c)

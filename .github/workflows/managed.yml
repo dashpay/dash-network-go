@@ -26,6 +26,10 @@ on:
         type: choice
         options: [platform, tenderdash, core, all]
         default: platform
+      observation_window:
+        description: Health gap, longer than the network idle-block interval
+        type: string
+        default: 4m
 permissions:
   contents: read
   id-token: write
@@ -70,6 +74,7 @@ jobs:
           PLAN_OPERATION: ${{ inputs.plan_operation }}
           SCOPE: ${{ inputs.scope }}
           CONFIRM: ${{ inputs.confirm }}
+          OBSERVATION_WINDOW: ${{ inputs.observation_window }}
           BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
           SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
         run: |
@@ -79,7 +84,8 @@ jobs:
           work=$(mktemp -d "$RUNNER_TEMP/dashnet-existing.XXXXXXXX")
           trap 'rm -rf -- "$work"' EXIT
           base="s3://$BUCKET/managed/$NETWORK"
-          args=(--out "$work/result.json" --timeout 110m)
+          [[ "$OBSERVATION_WINDOW" =~ ^[1-9][0-9]*(s|m)$ ]]
+          args=(--out "$work/result.json" --timeout 110m --observation-window "$OBSERVATION_WINDOW")
           case "$OPERATION" in
             import|operation) artifact=existing.json; input=--manifest ;;
             enroll|plan|doctor) artifact=snapshot.json; input=--snapshot ;;
