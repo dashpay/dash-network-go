@@ -8,6 +8,7 @@ import copy
 import datetime
 import fcntl
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -212,6 +213,37 @@ class Worker:
         require(set(selected) == set(expected), 'missing-selected-container')
         return selected, companions
 
+    def configuration_digest(self, path):
+        data = path.read_bytes()
+        # Dashmate renders fresh rpcauth salts even for read-only core-cli
+        # commands. Normalize ONLY after verifying each HMAC against the
+        # named profile's on-host credential. A changed user/password or any
+        # other byte still changes the fingerprint; credentials never leave.
+        if (path.name == 'dash.conf' and path.parent.name == 'core'
+                and path.parents[2].name == '.dashmate'):
+            source = path.parents[2] / 'config.json'
+            if source.exists():
+                require(source.is_file() and not source.is_symlink()
+                        and source.stat().st_size <= 2*1024*1024, 'rpc-auth-source')
+                profiles = json.loads(source.read_text())
+                users = profiles['configs'][path.parents[1].name]['core']['rpc']['users']
+                lines = []
+                for line in data.decode().splitlines(keepends=True):
+                    if line.startswith('rpcauth='):
+                        entry = line[len('rpcauth='):].strip()
+                        user, auth = entry.split(':', 1)
+                        salt, digest = auth.split('$', 1)
+                        password = users.get(user, {}).get('password')
+                        require(isinstance(password, str) and bool(password), 'rpc-auth-source')
+                        verified = hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()
+                        require(hmac.compare_digest(verified, digest), 'rpc-auth-source-mismatch')
+                        identity = fingerprint(['dashnet-rpcauth-v1', user, password])
+                        ending = '\r\n' if line.endswith('\r\n') else ('\n' if line.endswith('\n') else '')
+                        line = 'rpcauth=' + user + ':verified-credential-' + identity + ending
+                    lines.append(line)
+                data = ''.join(lines).encode()
+        return hashlib.sha256(data).hexdigest()
+
     def files_hash(self, selected):
         files = {}
         for c in selected.values():
@@ -226,7 +258,7 @@ class Worker:
                     if p.is_dir():continue
                     require(not p.is_symlink() and p.is_file() and p.stat().st_size<=2*1024*1024,'unsupported-config-file')
                     if p.name.endswith('.lock') or p.name=='priv_validator_state.json':continue
-                    files[str(p)]=hashlib.sha256(p.read_bytes()).hexdigest()
+                    files[str(p)]=self.configuration_digest(p)
         require(len(files)<=200,'configuration-file-count')
         return fingerprint(files)
 

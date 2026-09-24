@@ -93,7 +93,15 @@ if [[ "$mode" == apply ]]; then
     [[ -z $(docker ps -aq) ]]
     stage=image-pull
     for image in "$@"; do
-        docker pull --platform "linux/$arch" "$image" >>"$log" 2>&1
+        pulled=false
+        for attempt in 1 2 3; do
+            if docker pull --platform "linux/$arch" "$image" >>"$log" 2>&1; then
+                pulled=true
+                break
+            fi
+            if [[ "$attempt" != 3 ]]; then sleep "$((attempt * 2))"; fi
+        done
+        [[ "$pulled" == true ]]
     done
 fi
 stage=runtime-verify

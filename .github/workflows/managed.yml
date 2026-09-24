@@ -1,4 +1,5 @@
 name: Operate existing Moutai or managed testnet
+run-name: '${{ inputs.network }} / ${{ inputs.operation }} / ${{ inputs.request_id }}'
 on:
   workflow_dispatch:
     inputs:
@@ -30,6 +31,10 @@ on:
         description: Health gap, longer than the network idle-block interval
         type: string
         default: 4m
+      request_id:
+        description: Optional console correlation UUID; not an authorization token
+        type: string
+        required: false
 permissions:
   contents: read
   id-token: write
