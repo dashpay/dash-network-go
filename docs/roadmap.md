@@ -67,7 +67,10 @@ Remaining:
 - Existing Moutai/testnet adapters now support explicit authenticated import and
   enrollment, captured-workload deployment/recovery and scoped image upgrades.
   See [managed networks](managed-networks.md); live management remains unproved.
-  Additional testnet-node provisioning/registration remains unimplemented.
+  Fresh Core fullnode allocations now support joining an existing testnet/devnet
+  with public chain/checkpoint capture, immutable host plans and shared recovery
+  state. Real Core container CI proves join/replay, not a live full-chain AWS sync.
+  Additional existing-network EvoNode registration remains unimplemented.
 - Configure and live-prove the implemented Actions entry point; add explicit
   live workflow proof for the implemented upgrade entry point through the same
   CLI and shared state/locks.
@@ -75,6 +78,12 @@ Remaining:
   reset or destruction inside an upgrade operation.
 
 ## 4. Status integration
+
+The companion [status PR #6](https://github.com/dashpay/status/pull/6) implements
+the public/operator console, permission boundaries, private workflow dispatch
+journal and independent CLI collection. Browser fixtures pass; a private preview
+uses real Moutai/testnet observations. Production GitHub login, operator grants,
+real console-to-privileged-workflow dispatch and public cutover remain pending.
 
 - Multi-network public read-only and authenticated operational views fed by independent health collection and durable
   operation events; extend beyond validators to the managed service topology.

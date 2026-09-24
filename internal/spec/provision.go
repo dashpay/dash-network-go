@@ -16,6 +16,9 @@ func (n Network) ValidateProvision() error {
 		return errors.New("aws.provision is required for EC2 provisioning")
 	}
 	if n.Chain.Type == "testnet" {
+		if !strings.HasPrefix(n.Metadata.Name, "testnet-") {
+			return errors.New("new testnet hosts require a distinct testnet- allocation name, never the existing testnet journal")
+		}
 		for _, g := range n.Nodes {
 			if g.Role != "fullnode" {
 				return errors.New("new testnet allocations currently support Core fullnodes only; use a separate allocation name and join plan")

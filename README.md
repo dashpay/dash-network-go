@@ -13,9 +13,12 @@ Use the [complete lifecycle/runbook](docs/lifecycle.md) and
 [13-validator + wallet example](examples/devnet-lifecycle.yaml).
 The [operator-assisted AWS proof](docs/validation-2026-09-24.md) covered 13 validators,
 interruption, stop/resume, DAPI and complete scoped cleanup. [Image upgrades](docs/upgrades.md)
-support owned devnets with Core preserved; live version-to-version upgrades remain
-unproved. No testnet mutation, existing-network adoption, reset or generalized
-destroy executor is exposed yet.
+support owned devnets with Core preserved. Existing Moutai/testnet workloads have
+an explicit [import/enrollment/management path](docs/managed-networks.md), and new
+[Core fullnodes can join an existing chain](docs/join-existing-chain.md). A fresh
+AWS version-upgrade proof is in progress; do not infer compatibility from CI.
+Protocol migrations, adding existing-network EvoNodes, resets and generalized
+destroy remain unimplemented.
 
 ## Quick start
 
@@ -89,8 +92,10 @@ EC2 `running` is **not** application health. This snapshot explicitly reports
 ## Resumable EC2 provisioning
 
 See the [human command and recovery guide](docs/provisioning.md) and
-[small compute example](examples/devnet-compute.yaml). Provisioning is devnet-only,
-uses explicit existing networking/AMIs, and requires the exact reviewed plan ID:
+[small compute example](examples/devnet-compute.yaml). Provisioning uses explicit
+existing networking/AMIs and requires the exact reviewed plan ID. Devnets support
+the native lifecycle; testnet allocations are restricted to fresh Core fullnodes
+using the existing-chain join path:
 
 ```sh
 # Real AWS IDs and an existing state table are required; read-only preflight.
@@ -170,9 +175,9 @@ counts, observation source/time, and staleness. It never includes instance IDs,
 addresses, account IDs, raw tags, or internal errors. Display name and description
 are operator-authored public copy; do not put private information in them.
 
-This is the data boundary for the future public showcase and authenticated
-operator interface in [`dashpay/status`](https://github.com/dashpay/status).
-**This repository does not yet serve a web UI or implement authentication.**
+The public showcase and authenticated operator interface are implemented
+separately in [`dashpay/status` PR #6](https://github.com/dashpay/status/pull/6).
+**This CLI repository does not serve a web UI or implement browser authentication.**
 Public projection is not a substitute for backend authorization.
 
 All `--out` files are mode 0600, atomically published, and never overwritten.
@@ -193,6 +198,11 @@ are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
   using OIDC, reviewed private plans, explicit plan confirmation and the same CLI.
   Private reports stay in S3/DynamoDB, never public Actions artifacts. Inert until
   separately configured; see [setup](docs/lifecycle.md#github-actions-execution).
+- **Existing networks:** separate Moutai/testnet environment policies, reviewed
+  enrollment and management inputs; see [managed operations](docs/managed-networks.md).
+- **New Core fullnodes:** the allocation workflow includes existing-chain join
+  planning/execution, with a separate protected testnet allocation environment.
+  This does not register a new validator or expand an enrolled fleet implicitly.
 - **Container contracts:** real Core wallet/registration/recovery and real
   Tenderdash/Envoy/DAPI configuration/TLS/gRPC; no AWS access or fleet-health claim.
 

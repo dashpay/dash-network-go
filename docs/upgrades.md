@@ -59,6 +59,11 @@ resolved again during a resumed operation.
 5. Under the host lock, verify ownership, exact Core process ID/start time/config,
    current images and unchanged service identities. Edit only image fields in the
    existing Platform Compose document; do not regenerate configuration or keys.
+   A Drive change gracefully stops Tenderdash before the ABCI disconnect, waits
+   for Drive's ABCI listener, then starts Tenderdash. Its unchanged-image container
+   and state are preserved; its process is intentionally restarted. Stop/start
+   intent is recorded before each action for lost-response recovery. Unplanned
+   automatic restarts still fail the post-upgrade gate.
 6. Reconcile that same node after a lost response. Never withdraw a second node
    until the whole fleet passes advancing consensus, common-height block, DAPI,
    membership/protocol and Core/unselected-service preservation checks.

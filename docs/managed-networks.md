@@ -30,7 +30,11 @@ Core and the Dashmate helper; it selects Drive, Tenderdash, DAPI and gateway whe
 present. Ancillary rate-limit/metrics/Tor containers are preserved, not recreated.
 Seed-only Tenderdash containers are explicit targets, not silently omitted.
 
-**Not implemented:** provisioning/registration of additional testnet nodes,
+New **Core fullnode** allocations can join testnet or Moutai through the separate
+[existing-chain join path](join-existing-chain.md). They never copy validator
+identities, mine, register collateral, or silently expand this managed fleet.
+
+**Not implemented:** adding/registering additional existing-network validators,
 configuration/schema/protocol migration, resets, automatic downgrade or abandoning
 an unfinished operation. These remain requirements/adapter work, not claims hidden
 behind the word "deploy". Existing executors and the dashboard must expose these
@@ -109,6 +113,14 @@ when Core is outside scope. Core upgrades preserve configuration/genesis and
 require readiness after the expected process replacement. Live protocol changes
 stop verification; migrated data is never blindly downgraded.
 
+Drive is Tenderdash's ABCI dependency. Replacing Drive deliberately stops the
+selected Tenderdash process before disconnecting ABCI, then starts it after the
+replacement's listener is ready. The same-image Tenderdash container, data and
+configuration are retained; this is an expected process restart, not a promise
+that every unchanged-image process remains uninterrupted. The durable host marker
+allows replay after a lost stop/start response. Core and companion services remain
+outside this dependency restart. Unsupported listener/network layouts fail closed.
+
 After enrollment, operate selected workloads through this manager. The original
 Dashmate files are preserved, **not rewritten to the latest manager image pins**;
 running legacy Dashmate/Compose deployment commands concurrently can revert
@@ -155,9 +167,11 @@ Artifacts are private under `managed/<network>/`: `existing.json`, reviewed
 outputs are **not automatically promoted** into privileged input artifacts.
 Public Actions logs only show coarse stage names and success/failure.
 
-The authenticated dashboard will dispatch these same workflows and show their
+The authenticated dashboard dispatches these same workflows and shows their
 capability/health limits. Public visitors get an allowlisted read-only projection,
-not raw imported snapshots. UI/authentication are not part of this implementation.
+not raw imported snapshots. UI/authentication are in the companion
+[status PR #6](https://github.com/dashpay/status/pull/6); real login requires an
+operator-owned GitHub application and explicit per-network grants.
 
 ## Evidence boundary
 
