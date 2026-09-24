@@ -6,6 +6,14 @@ from test_worker import request
 from test_join import JoinWorker
 
 class NewNode(JoinWorker):
+ # The fixture simulates two hosts on one Docker daemon. Hide only the exact
+ # peer fixture from this simulated host's inventory, never arbitrary workloads.
+ peer_container=''
+ def docker(self,*args,**kwargs):
+  value=super().docker(*args,**kwargs)
+  if args==('container','ls','-a','--format','{{.Names}}'):
+   value='\n'.join(n for n in value.decode().splitlines() if n!=self.peer_container).encode()
+  return value
  def verify_instance(self):self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
 
 def root_at(base,name,q):
@@ -27,7 +35,7 @@ def main():
    public={'llmqchainlocks','llmqinstantsenddip0024','llmqplatform','llmqmnhf','minimumdifficultyblocks','highsubsidyblocks','highsubsidyfactor','powtargetspacing'}
    options=[x for x in source.core_config().splitlines() if x.partition('=')[0] in public]
    n['join']=dict(chainType='devnet',coreNetwork=info['chain'],genesis=source.rpc('getblockhash',[1]),checkpointHeight=height,checkpointHash=source.rpc('getblockhash',[height]),peers=['127.0.0.1:20001'],options=options)
-   joining=NewNode(n,root_at(base,'new',n),base/'join-lock')
+   joining=NewNode(n,root_at(base,'new',n),base/'join-lock');joining.peer_container=source.container_name('core')
    joining.execute();deadline=time.monotonic()+100
    while True:
     n['action']='join-status';o=joining.execute()['core']
