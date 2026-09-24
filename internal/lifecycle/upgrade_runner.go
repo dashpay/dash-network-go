@@ -18,6 +18,15 @@ func preservedCore(c *node.Core, b provision.Preservation) bool {
 	return c != nil && c.ContainerID == b.CoreID && c.StartedAt == b.CoreStarted && c.ConfigSHA256 == b.CoreConfig && c.Genesis == b.CoreGenesis
 }
 
+func missingUpgradeObservation(message, target string, problems []string) error {
+	if len(problems) > 0 {
+		// sample() already sanitizes remote failures. Retain those reasons so
+		// an operator can distinguish a failed RPC from a failed SSH connection.
+		return fmt.Errorf("%s at %s: %s", message, target, strings.Join(problems, "; "))
+	}
+	return fmt.Errorf("%s at %s", message, target)
+}
+
 func upgradeEvidence(p Plan, record provision.Record, observed map[string]samples, pending string) (map[string]provision.Preservation, error) {
 	baseline := map[string]provision.Preservation{}
 	known := map[string]bool{}
@@ -27,7 +36,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 	for _, t := range p.Targets {
 		s := observed[t.Name]
 		if s.core == nil || s.core.Genesis != record.Deployment.CoreGenesis {
-			return nil, fmt.Errorf("missing/mismatched Core at %s", t.Name)
+			return nil, missingUpgradeObservation("missing/mismatched Core", t.Name, s.problems)
 		}
 		if _, err := time.Parse(time.RFC3339Nano, s.core.StartedAt); err != nil {
 			return nil, fmt.Errorf("missing Core process start evidence at %s", t.Name)
@@ -43,7 +52,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 					baseline[t.Name] = b
 					continue
 				}
-				return nil, fmt.Errorf("Platform observation missing at %s", t.Name)
+				return nil, missingUpgradeObservation("Platform observation missing", t.Name, s.problems)
 			}
 			if x.Protocol != p.InitialProtocolVersion || len(x.Validators) != 12 {
 				return nil, fmt.Errorf("unsupported live protocol or quorum size at %s", t.Name)

@@ -204,4 +204,18 @@ Retain the exact executable for resume. A later main revision with a changed
 recipe refuses the old plan; recover with the cached matching binary locally
 (or a separately reviewed workflow pinned to that binary), never by rewriting IDs.
 Dashboard or GitHub availability is not required for the terminal path. No OIDC
-role, environment secret, bucket, network or dashboard was configured by this PR.
+role or environment for existing Moutai/testnet is implicitly provisioned. The
+disposable acceptance proof uses separate, temporary authority; it is not a
+production workflow credential.
+
+### OIDC subject format
+
+Inspect `gh api repos/dashpay/dash-network-go/actions/oidc/customization/sub`
+before writing IAM trust. This repository currently uses GitHub's immutable
+owner/repository subject: `sub_claim_prefix` is
+`repo:dashpay@11511719/dash-network-go@1384209245`. An environment job appends
+`:environment:ENVIRONMENT_NAME`. The older name-only `repo:dashpay/dash-network-go`
+subject does not match this repository. Bind the exact observed prefix and
+protected environment, with audience `sts.amazonaws.com`; never use a broad
+repository/organization wildcard to get past a failed authentication. Never print
+the raw OIDC token. Check these settings again if authority is deliberately moved.

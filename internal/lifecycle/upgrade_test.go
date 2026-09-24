@@ -112,6 +112,30 @@ func callsFor(f *fakeRemote, action string) int {
 	return n
 }
 
+func TestUpgradeMissingObservationRetainsSafeFailureReason(t *testing.T) {
+	f := upgradeSetup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	observed := f.runner.sample(ctx, f.plan, f.store.record, 0)
+	target := f.plan.Validators()[4].Name
+	s := observed[target]
+	s.platform = nil
+	s.problems = []string{"Platform: node platform-status:dapi-unavailable; raw output withheld"}
+	observed[target] = s
+	_, err := upgradeEvidence(f.plan, f.store.record, observed, "")
+	if err == nil || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), s.problems[0]) {
+		t.Fatalf("missing useful sanitized preflight cause: %v", err)
+	}
+	// The exact unfinished target is still recoverable; a missing observation
+	// on an unrelated node must not receive the same exception.
+	if _, err := upgradeEvidence(f.plan, f.store.record, observed, target); err != nil {
+		t.Fatal("pending target cannot be reconciled", err)
+	}
+	if _, err := upgradeEvidence(f.plan, f.store.record, observed, f.plan.Validators()[0].Name); err == nil {
+		t.Fatal("unrelated missing target was ignored")
+	}
+}
+
 func TestUpgradeOneValidatorAtATimeAndRetainedRuntime(t *testing.T) {
 	for _, scope := range []string{"platform", "tenderdash"} {
 		t.Run(scope, func(t *testing.T) {
