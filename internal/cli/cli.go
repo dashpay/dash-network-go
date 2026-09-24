@@ -41,13 +41,20 @@ Usage:
   dashnet bootstrap --plan bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID
                     --ssh-key PATH --known-hosts PATH [--profile name]
                     [--timeout 30m] [--out hosts-ready.json]
+  dashnet deployment-plan --bootstrap-plan bootstrap-plan.json --protocol VERSION --out deployment.json
+  dashnet deploy --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
+  dashnet doctor --plan deployment.json --ssh-key PATH --known-hosts PATH [--timeout 3m]
+  dashnet stop --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet version
 
 Planning and discovery are read-only. Provision creates EC2 instances and durable
 DynamoDB state: devnet compute only, NOT a working Dash network. operation-unlock
 changes a runner claim and requires the previous runner to be stopped first.
 Bootstrap installs/verifies Docker and pulls locked images on owned Ubuntu 24.04
-hosts; it does not start Core/Platform. No apply, reset, destroy or upgrade yet.
+hosts; it does not start Core/Platform. Deploy runs the owned devnet lifecycle.
+Stop halts owned containers, preserving disks, wallet/validator identities and
+AWS resources (billing continues). Doctor is read-only and exits nonzero for
+unhealthy/unknown targets. No reset, destroy or testnet mutation yet.
 Image availability and EC2 running are not proof of application health.
 JSON is written to stdout unless --out is given; files are private (0600),
 atomic, and never overwritten. Status is operator data unless --public is used.
@@ -63,13 +70,15 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
+	case "deployment-plan", "deploy", "doctor", "stop":
+		return runLifecycle(ctx, args, out, stderr, version)
 	case "bootstrap-plan", "bootstrap":
 		return runBootstrap(ctx, args, out, stderr, version)
 	case "provision-plan", "provision", "operation", "operation-unlock":
 		return runProvision(ctx, args, out, stderr, version)
 	case "validate", "resolve", "plan", "inventory", "status":
 	default:
-		return fmt.Errorf("unknown command %q; run dashnet help (full network deployment is not implemented)", args[0])
+		return fmt.Errorf("unknown command %q; run dashnet help (see help for supported scoped operations)", args[0])
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)

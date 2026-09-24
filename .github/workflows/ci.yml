@@ -35,6 +35,8 @@ jobs:
         run: go vet ./...
       - name: Tests and race detector
         run: go test -race -coverprofile=coverage.out ./...
+      - name: Node worker failure-path tests
+        run: python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'
       - name: Examples and command boundary
         run: |
           go build -trimpath -o bin/dashnet ./cmd/dashnet
@@ -65,6 +67,20 @@ jobs:
         run: |
           docker build -t dashnet-recipe-test -f internal/bootstrap/testdata/Dockerfile .
           docker run --rm --network none dashnet-recipe-test
+
+  core-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Resolve real Core image once and exercise wallet/registration recovery
+        run: |
+          set -euo pipefail
+          docker pull dashpay/dashd:23
+          image=$(docker image inspect dashpay/dashd:23 --format '{{index .RepoDigests 0}}')
+          sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
 
   binaries:
     runs-on: ubuntu-latest
