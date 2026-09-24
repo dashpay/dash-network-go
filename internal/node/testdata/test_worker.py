@@ -2,6 +2,7 @@ import base64
 import copy
 import importlib.util
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,10 @@ spec = importlib.util.spec_from_file_location(
 )
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
+
+observer_scope = vars(worker).copy()
+exec((Path(__file__).parents[1] / "observer.py").read_text(), observer_scope)
+Observer = observer_scope["ReadOnlyWorker"]
 
 
 def request():
@@ -113,6 +118,43 @@ class Registration(worker.Worker):
 
 
 class Tests(unittest.TestCase):
+    def test_tenderdash_bare_and_jsonrpc_enveloped_reads(self):
+        class Response:
+            def __init__(self, value):
+                self.raw = json.dumps(value).encode()
+
+            def open(self, url, timeout):
+                return io.BytesIO(self.raw)
+
+        status = dict(node_info={}, sync_info=dict(latest_block_height="32"),
+                      validator_info={})
+        block = dict(block_id=dict(hash="a" * 64), block={})
+        for cls in [worker.Worker, Observer]:
+            w = cls(request())
+            for method, result in [("status", status), ("block?height=32", block)]:
+                for value in [result, dict(jsonrpc="2.0", result=result),
+                              dict(result=result, error=None)]:
+                    w.opener = Response(value)
+                    self.assertEqual(w.tenderdash(method), result)
+            for value in [[], {}, dict(error={}), dict(error=False),
+                          dict(error=dict(code=-1)), dict(result=None),
+                          dict(result=status, error=dict(code=-1)),
+                          dict(sync_info="not an object"),
+                          dict(result=status, padding="x" * 1024 * 1024)]:
+                w.opener = Response(value)
+                with self.assertRaises(worker.Failure):
+                    w.tenderdash("status")
+
+    def test_read_only_adapter_refuses_every_mutating_action(self):
+        for action in ["core-start", "core-finalize", "wallet", "identity",
+                       "fund", "register", "activate", "mine-start",
+                       "platform-start", "stop"]:
+            q = request()
+            q["action"] = action
+            w = Observer(q)
+            with self.assertRaisesRegex(worker.Failure, "observation-only"):
+                w.execute()
+
     def test_activation_uses_core23_update_rpc_and_verifies_readback(self):
         class Sporks(worker.Worker):
             active = {"SPORK_17_QUORUM_DKG_ENABLED": False,

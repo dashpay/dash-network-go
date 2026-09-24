@@ -32,7 +32,24 @@ import (
 //go:embed worker.py
 var recipe string
 
+//go:embed observer.py
+var observer string
+
 func RecipeDigest() string { s := sha256.Sum256([]byte(recipe)); return hex.EncodeToString(s[:]) }
+
+func ObservationDigest() string {
+	s := sha256.Sum256([]byte(observer))
+	return hex.EncodeToString(s[:])
+}
+
+func workerScript(action string) string {
+	if action == "inspect" || action == "core-status" || action == "platform-status" {
+		// Do not execute the original entry point until the observation-only
+		// capability guard and compatible RPC reader have been installed.
+		return "__name__ = 'dashnet_observation'\n" + recipe + "\n" + observer + "\nmain()\n"
+	}
+	return recipe
+}
 
 type Target struct {
 	Name         string            `json:"name"`
@@ -206,7 +223,7 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	}
 	var compressed bytes.Buffer
 	z := zlib.NewWriter(&compressed)
-	_, _ = z.Write([]byte(recipe))
+	_, _ = z.Write([]byte(workerScript(q.Action)))
 	_ = z.Close()
 	command := "/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root /usr/bin/python3 -c \"import base64,zlib;exec(zlib.decompress(base64.b64decode('" + base64.StdEncoding.EncodeToString(compressed.Bytes()) + "')))\""
 	if r.Access.User != "root" {

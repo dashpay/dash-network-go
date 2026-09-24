@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,29 @@ func (f fakeSSH) Run(_ context.Context, e transport.Endpoint, c, s string) ([]by
 }
 func target() Target {
 	return Target{Name: "validator-1", Role: "validator", Architecture: "arm64", InstanceID: "i-12345678", SSHAddress: "10.0.0.2", PeerAddress: "10.0.0.2"}
+}
+
+func TestObservationEntryPointCannotExecuteMutation(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("Python worker contract runs in CI")
+	}
+	v := target()
+	v.Images = []bootstrap.Image{}
+	q := Request{Target: v, Action: "core-start", Context: Context{PlanID: strings.Repeat("a", 64), ComputePlanID: strings.Repeat("b", 64), Ports: DefaultPorts}}
+	input, err := json.Marshal(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(python, "-c", workerScript("platform-status"))
+	command.Stdin = strings.NewReader(string(input))
+	out, err := command.Output()
+	if err == nil || !strings.Contains(string(out), "preflight:observation-only") {
+		t.Fatal("observation adapter reached the original mutable entry point", string(out), err)
+	}
+	if workerScript("core-start") != recipe {
+		t.Fatal("mutation recipe was altered by observation dispatch")
+	}
 }
 func TestPrivateIdentityOnlyOnStdin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

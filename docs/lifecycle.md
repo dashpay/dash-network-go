@@ -144,6 +144,13 @@ rechecks the fleet, restores the same identities/registrations and retains genes
 Do not regenerate a deployment plan or change generation to bypass an interruption.
 Address/instance, image, identity or genesis drift fails closed.
 
+Read-only requests use a separately guarded observation adapter. Compatible RPC
+response decoding can be repaired while retaining the exact original mutation
+recipe in a reviewed recovery build. The adapter refuses every mutation action;
+it cannot configure, register, start or stop services. Retain that build's source
+revisions, recipe hash and executable checksum alongside the original plan.
+This is not permission to replace a bound mutation recipe or edit plan IDs.
+
 To halt this tool's owned containers while preserving recovery data:
 
 ```sh

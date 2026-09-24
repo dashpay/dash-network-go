@@ -1039,11 +1039,24 @@ class Worker:
             "http://127.0.0.1:" + str(self.ports["platformRPC"]) + "/" + method,
             timeout=15,
         ) as response:
-            value = json.loads(response.read(1024 * 1024))
+            raw = response.read(1024 * 1024 + 1)
+        self.require(len(raw) <= 1024 * 1024, "tenderdash-response-size")
+        value = json.loads(raw)
         self.require(
-            "result" in value and "error" not in value, "tenderdash-rpc-failed"
+            isinstance(value, dict) and value.get("error") is None,
+            "tenderdash-rpc-failed",
         )
-        return value["result"]
+        # Tenderdash 1.8 GET endpoints return bare objects; JSON-RPC callers and
+        # earlier endpoints may wrap the same object in a result envelope.
+        result = value.get("result", value)
+        fields = {"status": ["node_info", "sync_info", "validator_info"],
+                  "block": ["block_id", "block"]}.get(method.split("?", 1)[0])
+        self.require(
+            fields is not None and isinstance(result, dict)
+            and all(isinstance(result.get(key), dict) for key in fields),
+            "tenderdash-response-shape",
+        )
+        return result
 
     def dapi_status(self):
         # Exercise the real TLS -> HTTP/2 -> gRPC -> DAPI -> Drive/TD path.
