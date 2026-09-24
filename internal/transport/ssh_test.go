@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -235,7 +236,28 @@ func TestSSHOutputBoundsAndExitStatus(t *testing.T) {
 			if kind == "failure" && !strings.Contains(err.Error(), "42") {
 				t.Fatal(err)
 			}
+			if kind == "cancel" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("cancellation misreported as connectivity failure", err)
+			}
 		})
+	}
+}
+
+func TestSSHCancelledBeforeConnection(t *testing.T) {
+	host, _ := key(t)
+	client, path := key(t)
+	e, calls := server(t, host, client, func(ch ssh.Channel, command string) {
+		t.Error("cancelled operation reached the server")
+	})
+	remote, err := NewSSH("ubuntu", path, knownFile(t, e, host.PublicKey(), "trusted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	cancel()
+	_, err = remote.Run(ctx, e, "safe", "")
+	if !errors.Is(err, context.Canceled) || calls.Load() != 0 {
+		t.Fatal("cancelled controller must not be reported as a routing failure", err)
 	}
 }
 func TestSSHKeyPermissionsAndDeadline(t *testing.T) {

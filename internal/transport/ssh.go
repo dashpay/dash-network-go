@@ -131,9 +131,15 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	if !ok {
 		return nil, errors.New("SSH commands require a context deadline")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	address := net.JoinHostPort(e.Address, strconv.Itoa(e.Port))
 	conn, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", address)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("SSH connection failed (check routing and port)")
 	}
 	defer conn.Close()
@@ -157,6 +163,9 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	}
 	remote, channels, requests, err := ssh.NewClientConn(conn, alias, &config)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("SSH handshake failed (verify instance host key and login identity)")
 	}
 	_ = conn.SetDeadline(deadline)
@@ -164,6 +173,9 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("SSH session creation failed")
 	}
 	defer session.Close()
