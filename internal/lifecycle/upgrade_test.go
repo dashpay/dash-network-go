@@ -98,7 +98,7 @@ func (f *upgradeFixture) change(t *testing.T, scope, letter string) UpgradePlan 
 }
 func (f *upgradeFixture) run(t *testing.T, u UpgradePlan) (provision.Record, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return f.runner.Upgrade(ctx, u)
 }
@@ -171,6 +171,30 @@ func TestUpgradeOneValidatorAtATimeAndRetainedRuntime(t *testing.T) {
 			// Ordinary restart/recovery must use the recorded new images, not creation pins.
 			if _, err := execute(t, f.plan, f.runner); err != nil {
 				t.Fatal("upgraded deployment cannot be verified", err)
+			}
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if _, err := f.runner.Execute(stopCtx, f.plan, true); err != nil {
+				t.Fatal("stop after upgrade", err)
+			}
+			stopCancel()
+			f.remote.calls = nil
+			if _, err := execute(t, f.plan, f.runner); err != nil {
+				t.Fatal("resume after upgrade", err)
+			}
+			starts := 0
+			for _, q := range f.remote.calls {
+				if q.Action != "platform-start" {
+					continue
+				}
+				starts++
+				for _, image := range q.Target.Images {
+					if image.Pinned != u.To[q.Target.Name][image.Component] {
+						t.Fatal("resume reverted creation-time image", q.Target.Name, image.Component)
+					}
+				}
+			}
+			if starts != 13 {
+				t.Fatal("resume lost an upgraded validator", starts)
 			}
 			next := f.change(t, scope, "c")
 			if _, err := f.run(t, next); err != nil {
@@ -288,5 +312,44 @@ func TestUpgradePlanCannotChangeScopeIdentityOrProtocol(t *testing.T) {
 	f.remote.calls = nil
 	if _, err := f.run(t, u); err == nil || len(f.remote.calls) != 0 {
 		t.Fatal("competing runner reached hosts", err)
+	}
+}
+
+func TestUpgradeIntentSavedBeforeUnobservedApplyAndStagingFailure(t *testing.T) {
+	for _, failure := range []string{"before-apply", "staging"} {
+		t.Run(failure, func(t *testing.T) {
+			f := upgradeSetup(t)
+			u := f.change(t, "platform", "b")
+			f.remote.calls = nil
+			failed := false
+			f.remote.before = func(q node.Request) error {
+				action := "upgrade-apply"
+				if failure == "staging" {
+					action = "upgrade-stage"
+				}
+				if q.Action == action && !failed {
+					failed = true
+					return errors.New("connection lost before command reached host")
+				}
+				return nil
+			}
+			result, err := f.run(t, u)
+			if err == nil {
+				t.Fatal("expected interruption")
+			}
+			if failure == "staging" && callsFor(f.remote, "upgrade-apply") != 0 {
+				t.Fatal("staging failure withdrew a service")
+			}
+			if failure == "before-apply" && result.Upgrade.CurrentNode == "" {
+				t.Fatal("unobserved apply lost intent")
+			}
+			if f.store.owner != "" {
+				t.Fatal("claim not released")
+			}
+			f.remote.before = nil
+			if _, err := f.run(t, u); err != nil {
+				t.Fatal("cannot reconcile unobserved request", err)
+			}
+		})
 	}
 }

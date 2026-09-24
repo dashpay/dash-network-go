@@ -120,3 +120,23 @@ func TestRemoteRejectsIdentityMismatchAndRawErrorOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeEntryPointCannotExecuteLifecycleMutation(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("Python contract runs in CI")
+	}
+	v := target()
+	v.Images = []bootstrap.Image{}
+	q := Request{Target: v, Action: "stop", Context: Context{PlanID: strings.Repeat("a", 64), ComputePlanID: strings.Repeat("b", 64), Ports: DefaultPorts}}
+	input, err := json.Marshal(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(python, "-c", workerScript("upgrade-apply"))
+	command.Stdin = strings.NewReader(string(input))
+	out, err := command.Output()
+	if err == nil || !strings.Contains(string(out), "preflight:upgrade-action-refused") {
+		t.Fatal("upgrade adapter reached arbitrary lifecycle entry point", string(out), err)
+	}
+}

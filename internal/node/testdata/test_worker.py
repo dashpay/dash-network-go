@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "worker", Path(__file__).parents[1] / "worker.py"
@@ -148,12 +149,37 @@ class Tests(unittest.TestCase):
     def test_read_only_adapter_refuses_every_mutating_action(self):
         for action in ["core-start", "core-finalize", "wallet", "identity",
                        "fund", "register", "activate", "mine-start",
-                       "platform-start", "stop"]:
+                       "platform-start", "stop", "upgrade-stage", "upgrade-apply"]:
             q = request()
             q["action"] = action
             w = Observer(q)
             with self.assertRaisesRegex(worker.Failure, "observation-only"):
                 w.execute()
+
+    def test_observer_reports_live_protocol_and_complete_membership(self):
+        class Response:
+            def __init__(self, value):
+                self.raw = json.dumps(value).encode()
+
+            def open(self, url, timeout):
+                return io.BytesIO(self.raw)
+
+        w = Observer(request())
+        w.tenderdash = lambda method: dict(node_info=dict(protocol_version=dict(app="14")))
+        value = dict(quorum_type=107, total="2", validators=[
+            dict(pro_tx_hash="A" * 64, voting_power="100"),
+            dict(pro_tx_hash="B" * 64, voting_power="100")])
+        with patch.object(worker.Worker, "platform_status", return_value={}):
+            for wrapped in [value, dict(result=value)]:
+                w.opener = Response(wrapped)
+                observed = w.platform_status()
+                self.assertEqual(observed["protocol"], 14)
+                self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
+            for invalid in [dict(value, total="3"), dict(value, quorum_type=101),
+                            dict(error=dict(code=-1)), []]:
+                w.opener = Response(invalid)
+                with self.assertRaises(worker.Failure):
+                    w.platform_status()
 
     def test_activation_uses_core23_update_rpc_and_verifies_readback(self):
         class Sporks(worker.Worker):
