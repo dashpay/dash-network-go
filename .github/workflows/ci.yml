@@ -1,4 +1,5 @@
 name: CI
+run-name: "${{ inputs.proof_operation || 'checks' }} / ${{ inputs.proof_request_id || github.sha }}"
 
 on:
   pull_request:
@@ -9,10 +10,14 @@ on:
       proof_operation:
         description: Temporary isolated AWS acceptance; requires separately scoped environment
         type: choice
-        options: [none, doctor, upgrade]
+        options: [none, doctor, upgrade, upgrade-interrupt]
         default: none
       proof_plan_id:
         description: Exact reviewed upgrade plan ID; required for upgrade
+        type: string
+        required: false
+      proof_request_id:
+        description: Unique acceptance request correlation ID
         type: string
         required: false
 
@@ -53,6 +58,7 @@ jobs:
           PROOF_SSH_KEY: ${{ secrets.DASHNET_PROOF_SSH_KEY }}
         run: bash .github/scripts/aws-acceptance.sh
   check:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -112,6 +118,7 @@ jobs:
           fi
 
   bootstrap-recipe:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -124,6 +131,7 @@ jobs:
           docker run --rm --network none dashnet-recipe-test
 
   core-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -140,6 +148,7 @@ jobs:
           sudo env CORE_IMAGE="$image" DRIVE_IMAGE="$drive" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
 
   platform-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -160,6 +169,7 @@ jobs:
           sudo env PLATFORM_IMAGES="$images" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/platform_contract.py
 
   upgrade-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -176,6 +186,7 @@ jobs:
           sudo env UPGRADE_FROM="$before" UPGRADE_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/upgrade_contract.py
 
   managed-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -192,6 +203,7 @@ jobs:
           sudo env MANAGED_FROM="$before" MANAGED_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/managed/testdata/contract.py
 
   binaries:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
