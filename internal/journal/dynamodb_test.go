@@ -79,10 +79,12 @@ func (d *database) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _
 	case "SET #data = :data, #revision = :next", "REMOVE #owner":
 		expected := "#plan = :plan AND #owner = :owner"
 		if aws.ToString(in.UpdateExpression) != "REMOVE #owner" {
-			expected += " AND #revision = :previous"
+			expected += " AND (#revision = :previous OR (#revision = :next AND #data = :data))"
 			actual, ok := d.item["Revision"].(*types.AttributeValueMemberN)
 			previous, prevOK := in.ExpressionAttributeValues[":previous"].(*types.AttributeValueMemberN)
-			if !ok || !prevOK || actual.Value != previous.Value {
+			next, nextOK := in.ExpressionAttributeValues[":next"].(*types.AttributeValueMemberN)
+			samePayload := value(d.item, "Data") == value(in.ExpressionAttributeValues, ":data")
+			if !ok || !prevOK || !nextOK || !(actual.Value == previous.Value || actual.Value == next.Value && samePayload) {
 				return nil, &types.ConditionalCheckFailedException{}
 			}
 		}
@@ -266,6 +268,37 @@ func TestDelayedSameOwnerCheckpointCannotRegressProgress(t *testing.T) {
 	current, _, err := d.Read(ctx, p)
 	if err != nil || current.Revision != 2 || current.LastError != r.LastError {
 		t.Fatal("newer progress was lost", err)
+	}
+}
+
+func TestSameCheckpointCanBeRetriedAfterLostAcknowledgement(t *testing.T) {
+	d, _, p := setup(t)
+	ctx := context.Background()
+	r, err := d.Acquire(ctx, p, "runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Phase = "provisioning"
+	r.Revision++
+	if err = d.Save(ctx, r, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	// The write may have committed before its response was lost. The SDK must
+	// be able to retry these exact bytes without advancing/regressing state.
+	if err = d.Save(ctx, r, "runner"); err != nil {
+		t.Fatal("identical checkpoint retry was mistaken for a stale write", err)
+	}
+	changed := r
+	changed.LastError = "different bytes at the same revision"
+	if err = d.Save(ctx, changed, "runner"); err == nil {
+		t.Fatal("same revision with different data overwrote accepted state")
+	}
+	if err = d.Save(ctx, r, "another-runner"); err == nil {
+		t.Fatal("identical payload bypassed runner ownership")
+	}
+	current, owner, err := d.Read(ctx, p)
+	if err != nil || current.Revision != 1 || current.LastError != "" || owner != "runner" {
+		t.Fatal("retry changed the accepted checkpoint", err)
 	}
 }
 
