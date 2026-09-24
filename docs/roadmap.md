@@ -30,15 +30,23 @@ Implemented first slice (not live AWS-proved):
   verified interrupted-run resume; no service starts. Loopback SSH and disposable
   recipe integration tests plus a human bootstrap runbook. Not live-node proved.
 
+Implemented lifecycle increment (not live-fleet proved):
+
+- Exact-host immutable devnet plans; Core, wallet/validator identities, signed
+  pre-broadcast registrations, persistent collateral locks and native Platform.
+- Quorum/ChainLock gates, independent two-sample health with DAPI and common-height
+  block comparison; interrupted resume and explicit stop preserving data.
+- Protected Actions entry point, private evidence output, human recovery runbook,
+  fake-cloud failure tests and real-container contracts.
+
 Remaining:
 
 - Complete a concrete topology/genesis contract, AMI/runtime preparation, and
   the remaining network infrastructure beyond existing-VPC EC2 placement.
 - Extend the single-stage journal into reviewed lifecycle transitions/history;
   implement an evidence-backed repair path for unobserved/rejected launch intent.
-- Automate trusted host-key enrollment and implement node configuration, Core
-  start, funding/registration,
-  Platform start, and health checks. Retain published container packaging initially.
+- Automate trusted host-key enrollment; prove the implemented chain lifecycle
+  on authorized real infrastructure, including quorum formation and Platform.
 - Implement account/network-scoped cleanup and interrupted-operation recovery.
 - Prove create, resume, and destroy on an explicitly authorized disposable devnet.
   Preserve a record for every intended target, including unreachable ones.
@@ -49,7 +57,8 @@ Remaining:
   state to make plans executable.
 - Prove Platform-only, Tenderdash-only, and Core-only changes preserve unselected
   components. Test existing-state upgrades separately from fresh-network startup.
-- Add Actions execution using the same released CLI and shared state/locks.
+- Configure and live-prove the implemented Actions entry point; add explicit
+  existing-state upgrade execution through the same CLI and shared state/locks.
 - Configure devnet and managed-testnet roles/policies separately; no implicit
   reset or destruction inside an upgrade operation.
 

@@ -1,0 +1,110 @@
+name: Operate managed devnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Exact devnet name in the private, reviewed operations bundle
+        required: true
+        type: string
+      operation:
+        description: Run/resume a reviewed lifecycle operation
+        required: true
+        type: choice
+        options: [provision, bootstrap, deploy, doctor, stop]
+      confirm:
+        description: Exact plan SHA256 for this action (doctor ignores this)
+        required: false
+        type: string
+
+# This workflow is inert until the protected environment and scoped OIDC role,
+# runner, private artifact bucket, and separately verified SSH trust are configured.
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: operate-${{ inputs.network }}
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    if: github.ref == 'refs/heads/main'
+    environment: devnet-operations
+    runs-on: ${{ vars.DASHNET_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Validate inputs and build trusted revision
+        env:
+          NETWORK: ${{ inputs.network }}
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
+          REGION: ${{ vars.DASHNET_AWS_REGION }}
+          ROLE: ${{ secrets.DASHNET_AWS_ROLE }}
+        run: |
+          set -euo pipefail
+          [[ "$NETWORK" =~ ^devnet-[a-z0-9][a-z0-9-]{0,35}$ ]]
+          [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          test -n "$REGION" && test -n "$ROLE"
+          go build -trimpath -ldflags "-X main.version=$GITHUB_SHA" -o bin/dashnet ./cmd/dashnet
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ secrets.DASHNET_AWS_ROLE }}
+          aws-region: ${{ vars.DASHNET_AWS_REGION }}
+          role-session-name: dashnet-${{ github.run_id }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+      - name: Execute exact reviewed plan
+        env:
+          NETWORK: ${{ inputs.network }}
+          OPERATION: ${{ inputs.operation }}
+          CONFIRM: ${{ inputs.confirm }}
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
+          SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/dashnet.XXXXXXXX")
+          trap 'rm -rf -- "$work"' EXIT
+          case "$OPERATION" in
+            provision) plan=ec2-plan.json ;;
+            bootstrap) plan=bootstrap-plan.json ;;
+            deploy|doctor|stop) plan=deployment.json ;;
+            *) exit 1 ;;
+          esac
+          aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/$plan" "$work/plan.json"
+          # Prevent a bundle stored under one name from targeting another network.
+          actual=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("bootstrap",p).get("compute",p).get("network",{}).get("metadata",{}).get("name",""))' "$work/plan.json")
+          test "$actual" = "$NETWORK"
+          args=(--plan "$work/plan.json" --out "$work/result.json")
+          if [[ "$OPERATION" != doctor ]]; then
+            [[ "$CONFIRM" =~ ^[0-9a-f]{64}$ ]]
+            args+=(--confirm "$CONFIRM")
+          fi
+          if [[ "$OPERATION" != provision ]]; then
+            test -n "$SSH_KEY"
+            printf '%s\n' "$SSH_KEY" > "$work/key"
+            unset SSH_KEY
+            aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/known_hosts" "$work/known_hosts"
+            args+=(--ssh-key "$work/key" --known-hosts "$work/known_hosts")
+          fi
+          code=0
+          # Only an exact stage-name allowlist reaches this public repo's logs.
+          bin/dashnet "$OPERATION" "${args[@]}" > "$work/stdout.log" \
+            2> >(tee "$work/operator.log" | awk '/^(preflight|core-start|identities|core-finalize|registrations|quorums|platform-start|health|ready|stopping|stopped)$/ {print; fflush()}') || code=$?
+          wait
+          aws s3 cp --only-show-errors "$work/operator.log" "s3://$BUCKET/operations/$NETWORK/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          if [[ -s "$work/result.json" ]]; then
+            aws s3 cp --only-show-errors "$work/result.json" "s3://$BUCKET/operations/$NETWORK/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          fi
+          {
+            echo '## Managed devnet operation'
+            printf 'Network: `%s` · action: `%s` · exit: `%s`\n' "$NETWORK" "$OPERATION" "$code"
+            echo 'Private observations remain in the operations bucket and journal, not public Actions artifacts.'
+            echo 'A successful operation is a point-in-time result; doctor provides fresh health evidence.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"

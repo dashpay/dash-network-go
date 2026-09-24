@@ -3,13 +3,16 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
-**Current milestone: planning, EC2 provisioning, and authenticated host bootstrap.**
-Validate intent, pin image artifacts, preview scoped changes, discover EC2, and
-export explicitly public status data. The new `provision` command creates devnet
-**compute only** using direct AWS APIs and a shared DynamoDB journal/runner claim.
-`bootstrap` now prepares owned Ubuntu 24.04 hosts and digest-pinned images.
-Neither command starts Core/Platform or deploys a working Dash network. There is
-still no `apply`, reset, destroy, or upgrade executor. EC2 running is not health.
+**Current milestone: integrated devnet lifecycle (not live-fleet proved).**
+The CLI plans/provisions EC2, prepares owned Ubuntu hosts, starts Core, funds and
+registers EvoNodes, starts Platform, and runs independent health gates. It has
+inspect/resume and explicit stop-preserving-data commands, backed by a shared
+DynamoDB journal/runner claim. No AI session is required.
+
+Use the [complete lifecycle/runbook](docs/lifecycle.md) and
+[13-validator + wallet example](examples/devnet-lifecycle.yaml).
+No testnet mutation, existing-network adoption, upgrade, reset or destroy executor
+is exposed yet. Real-container contract tests are not proof of a running AWS fleet.
 
 ## Quick start
 
@@ -78,7 +81,7 @@ changing its resources. New `dashnet:role` tags are read when present; absent
 roles are reported as unknown, not inferred from an instance name.
 
 EC2 `running` is **not** application health. This snapshot explicitly reports
-`applicationHealth: unknown` until node and protocol probes are implemented.
+`applicationHealth: unknown`; `doctor` provides independent node/protocol probes.
 
 ## Resumable EC2 provisioning
 
@@ -103,8 +106,9 @@ Normal retries reconcile existing instances. Lost-response ambiguity never cause
 a blind relaunch. Claims do not expire automatically; a crashed runner requires
 explicit stopped-runner recovery. A changed generation/plan cannot bypass the
 existing operation. Root volumes are retained on termination; there is no
-automatic cleanup/rollback yet. **This slice is fake-client tested, not live-launch
-verified.** Application services and chain health checks remain unimplemented.
+automatic cleanup/rollback yet. **EC2 launch remains fake-client tested, not live-launch verified.** The next
+commands implement application services; their evidence boundary is documented
+separately in the lifecycle guide.
 
 ## Authenticated node bootstrap
 
@@ -127,6 +131,14 @@ containers start, and `hosts-ready` is **not** application health.
 The same `operation` command shows per-host bootstrap progress. Trust enrollment
 is currently manual; no insecure host-key learning fallback exists. SSH identities
 stay local. This stage is integration-tested, **not live-node verified**.
+
+## Complete devnet execution
+
+After bootstrap, `deployment-plan` binds exact instances and immutable genesis.
+`deploy` starts/resumes the chain lifecycle; `doctor` independently checks every
+node and exits nonzero for unknown/degraded health. `stop` verifies owned services
+are stopped and preserves all state (EC2 billing continues). See
+[commands, compatibility assumptions and recovery](docs/lifecycle.md).
 
 ## Public and operator data
 
@@ -163,9 +175,12 @@ are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
   and preview a scoped operation. Publishes the lock and plan plus a job summary.
   Registry access is anonymous; there is no cloud role or mutation step.
 
-The manual workflow runs from the default branch. It is not labeled deployment: network execution workflows will arrive with
-node/bootstrap execution, scoped OIDC, and health verification. Do not upload private
-inventory or configuration as artifacts of this public repository.
+- **Operate managed devnet:** main-branch-only, protected-environment execution
+  using OIDC, reviewed private plans, explicit plan confirmation and the same CLI.
+  Private reports stay in S3/DynamoDB, never public Actions artifacts. Inert until
+  separately configured; see [setup](docs/lifecycle.md#github-actions-execution).
+- **Container contracts:** real Core wallet/registration/recovery and real
+  Tenderdash/Envoy/DAPI configuration/TLS/gRPC; no AWS access or fleet-health claim.
 
 ## Development
 
@@ -173,6 +188,7 @@ inventory or configuration as artifacts of this public repository.
 go test ./...
 go test -race ./...
 go vet ./...
+python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'
 gofmt -w cmd internal
 ```
 
