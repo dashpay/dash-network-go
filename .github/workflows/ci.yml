@@ -98,7 +98,7 @@ jobs:
           bin/dashnet validate --network examples/testnet.yaml
           bin/dashnet validate --network examples/devnet-compute.yaml
           bin/dashnet validate --network examples/devnet-lifecycle.yaml
-          for command in deployment-plan deploy doctor stop host-trust upgrade-plan upgrade managed-import managed-enroll managed-plan managed-deploy managed-upgrade managed-doctor managed-operation managed-unlock; do
+          for command in join-plan join deployment-plan deploy doctor stop host-trust upgrade-plan upgrade managed-import managed-enroll managed-plan managed-deploy managed-upgrade managed-doctor managed-operation managed-unlock; do
             if bin/dashnet "$command"; then
               echo "$command accepted missing explicit intent"
               exit 1
@@ -146,6 +146,7 @@ jobs:
           docker pull dashpay/drive:4.2.0-beta.3
           drive=$(docker image inspect dashpay/drive:4.2.0-beta.3 --format '{{index .RepoDigests 0}}')
           sudo env CORE_IMAGE="$image" DRIVE_IMAGE="$drive" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
+          sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
 
   platform-contract:
     if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'

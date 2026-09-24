@@ -31,6 +31,27 @@ class RecipeTest(unittest.TestCase):
             source.write_text(json.dumps({'configs':{'testnet':{'core':{'rpc':{'users':{'fixture':{'password':'wrong'}}}}}}}))
             with self.assertRaises(worker.Failure):w.configuration_digest(path)
 
+    def test_join_profile_exports_only_public_chain_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'dash.conf'
+            path.write_text('devnet=source\nrpcpassword=private-rpc\nsporkkey=private-key\nmasternodeblsprivkey=private-bls\n[devnet]\nport=20001\npowtargetspacing=10\n')
+            q=dict(fleet=dict(metadata=dict(name='source'),chainType='devnet',coreNetwork='devnet-source'),target=dict(instanceId='i-00000001',address='10.0.0.1'))
+            w=worker.Worker(q)
+            c=dict(State=dict(Running=True),HostConfig=dict(NetworkMode='host'),Mounts=[dict(Source=str(path),Destination='/dash/dash.conf')])
+            w.containers=lambda:({'core':c},{})
+            def rpc(selected,method,*args):
+                if method=='getblockchaininfo':return dict(chain='devnet-source',blocks=100,initialblockdownload=False)
+                if method=='getbestchainlock':return dict(height=99)
+                if method=='getblockhash':return 'a'*64
+                raise AssertionError(method)
+            w.rpc=rpc
+            result=w.join_profile()['join']
+            self.assertEqual(result['options'],['powtargetspacing=10'])
+            self.assertEqual(result['checkpointHeight'],94)
+            self.assertNotIn('private',json.dumps(result))
+            path.write_text(path.read_text()+'includeconf=/private/other.conf\n')
+            with self.assertRaisesRegex(worker.Failure,'unsupported-chain-override'):w.join_profile()
+
     def test_unrecognized_core_config_retains_exact_byte_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'dash.conf';path.write_text('rpcauth=opaque\n')

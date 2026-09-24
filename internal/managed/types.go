@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
+	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -141,6 +142,7 @@ type Chain struct {
 	DAPIHealthy      bool             `json:"dapiHealthy"`
 }
 type Observation struct {
+	Join            *node.CoreJoin       `json:"join,omitempty"`
 	InstanceID      string               `json:"instanceId"`
 	At              time.Time            `json:"at"`
 	Components      map[string]Container `json:"components"`

@@ -19,6 +19,7 @@ type NodeProgress struct {
 }
 
 type Record struct {
+	Join              *JoinProgress           `json:"join,omitempty"`
 	APIVersion        string                  `json:"apiVersion"`
 	Kind              string                  `json:"kind"`
 	Revision          int64                   `json:"revision"`
@@ -84,6 +85,9 @@ func (r Record) Validate(p Plan) error {
 		return err
 	}
 	if err := r.validateDeployment(p); err != nil {
+		return err
+	}
+	if err := r.validateJoin(p); err != nil {
 		return err
 	}
 	return r.validateUpgrade(p)

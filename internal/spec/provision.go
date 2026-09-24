@@ -15,8 +15,12 @@ func (n Network) ValidateProvision() error {
 	if p == nil {
 		return errors.New("aws.provision is required for EC2 provisioning")
 	}
-	if n.Chain.Type != "devnet" {
-		return errors.New("EC2 provisioning currently supports devnets only")
+	if n.Chain.Type == "testnet" {
+		for _, g := range n.Nodes {
+			if g.Role != "fullnode" {
+				return errors.New("new testnet allocations currently support Core fullnodes only; use a separate allocation name and join plan")
+			}
+		}
 	}
 	if n.AWS.NetworkTagKey == "Name" || strings.HasPrefix(n.AWS.NetworkTagKey, "dashnet:") || strings.HasPrefix(strings.ToLower(n.AWS.NetworkTagKey), "aws:") || strings.ContainsAny(n.AWS.NetworkTagKey, "?\\") {
 		return errors.New("provisioning network tag key conflicts with reserved tags or wildcard syntax")

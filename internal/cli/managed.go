@@ -29,12 +29,16 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	var manifestPath, snapshotPath, planPath, key, hosts, profile, output, confirm, scope, operation, choicesPath, expectedOwner string
 	var timeout, window time.Duration
 	var stopped bool
+	var source string
+	if command == "managed-join-profile" {
+		fs.StringVar(&source, "source", "", "exact existing source node name; public chain parameters only")
+	}
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC")
 	fs.StringVar(&output, "out", "", "new private JSON output")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "bounded operation deadline")
 	fs.DurationVar(&window, "observation-window", 4*time.Minute, "health observation gap; longer than the network's idle block interval")
 	switch command {
-	case "managed-import", "managed-operation", "managed-unlock":
+	case "managed-import", "managed-operation", "managed-unlock", "managed-join-profile":
 		fs.StringVar(&manifestPath, "manifest", "", "explicit existing-network JSON manifest")
 	case "managed-enroll", "managed-plan", "managed-doctor":
 		fs.StringVar(&snapshotPath, "snapshot", "", "complete existing-state snapshot")
@@ -140,6 +144,24 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 			return e
 		}
 		remote = managed.Remote{SSH: ssh}
+	}
+	if command == "managed-join-profile" {
+		for _, target := range f.Targets {
+			if target.Name == source {
+				observed, err := remote.Call(ctx, managed.Request{Fleet: f, FleetID: f.ID(), Target: target, Action: "join-profile"})
+				if err != nil {
+					return err
+				}
+				if observed.Join == nil {
+					return errors.New("source did not return a chain contract")
+				}
+				if err = observed.Join.Validate(); err != nil {
+					return err
+				}
+				return emit(out, output, observed.Join)
+			}
+		}
+		return errors.New("--source must name an explicit Core target in the manifest")
 	}
 	if command == "managed-import" {
 		s = managed.Observe(ctx, f, remote, 0)

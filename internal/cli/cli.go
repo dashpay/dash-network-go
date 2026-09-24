@@ -57,10 +57,13 @@ Usage:
   dashnet managed-doctor --snapshot snapshot.json --ssh-key PATH --known-hosts PATH
   dashnet managed-operation --manifest existing.json
   dashnet managed-unlock --manifest existing.json --expected-owner RUNNER_ID --confirm-runner-stopped
+  dashnet managed-join-profile --manifest existing.json --source NODE --ssh-key PATH --known-hosts PATH --out chain.json
+  dashnet join-plan --bootstrap-plan fullnodes-bootstrap.json --chain existing-chain.json --out join.json
+  dashnet join --plan join.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet version
 
 Planning and discovery are read-only. Provision creates EC2 instances and durable
-DynamoDB state: devnet compute only, NOT a working Dash network. operation-unlock
+DynamoDB state: devnet compute or testnet fullnode allocations, NOT a working network. operation-unlock
 changes a runner claim and requires the previous runner to be stopped first.
 Bootstrap installs/verifies Docker and pulls locked images on owned Ubuntu 24.04
 hosts; it does not start Core/Platform. Deploy runs the owned devnet lifecycle.
@@ -68,7 +71,8 @@ Stop halts owned containers, preserving disks, wallet/validator identities and
 AWS resources (billing continues). Doctor is read-only and exits nonzero for
 unhealthy/unknown targets. Managed commands enroll and operate explicit existing devnet/testnet workloads.
 Managed deploy restores captured containers/images; upgrade changes pinned images.
-No reset, destroy, new managed-testnet node provisioning or protocol migration yet.
+Join deploys fresh Core fullnodes onto a reviewed existing devnet/testnet chain.
+No new existing-network validator registration, reset, destroy or protocol migration yet.
 Image availability and EC2 running are not proof of application health.
 JSON is written to stdout unless --out is given; files are private (0600),
 atomic, and never overwritten. Status is operator data unless --public is used.
@@ -84,7 +88,9 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
-	case "managed-import", "managed-enroll", "managed-plan", "managed-deploy", "managed-upgrade", "managed-doctor", "managed-operation", "managed-unlock":
+	case "join-plan", "join":
+		return runJoin(ctx, args, out, stderr)
+	case "managed-join-profile", "managed-import", "managed-enroll", "managed-plan", "managed-deploy", "managed-upgrade", "managed-doctor", "managed-operation", "managed-unlock":
 		return runManaged(ctx, args, out, stderr)
 	case "host-trust":
 		return runTrust(ctx, args, out, stderr)

@@ -483,11 +483,36 @@ class Worker:
         marker['phase']='complete';self.atomic('operation.json',marker)
         return actual
 
+    def join_profile(self):
+        selected,_=self.containers();require('core' in selected,'source-core-required')
+        core=selected['core'];require(core['State']['Running'],'source-core-stopped')
+        info=self.rpc(selected,'getblockchaininfo');require(info['chain']==self.f['coreNetwork'] and not info['initialblockdownload'],'source-core-not-synced')
+        height=min(self.rpc(selected,'getbestchainlock')['height'],info['blocks']-6);require(height>=2,'confirmed-checkpoint-required')
+        paths=[m['Source'] for m in core['Mounts'] if m['Destination'].endswith('/dash.conf')]
+        require(len(paths)==1,'core-config-mount');path=Path(paths[0]);require(path.is_file() and not path.is_symlink() and path.stat().st_size<2*1024*1024,'core-config-file')
+        allowed={'sporkaddr','llmqchainlocks','llmqinstantsend','llmqinstantsenddip0024','llmqplatform','llmqmnhf','minimumdifficultyblocks','highsubsidyblocks','highsubsidyfactor','powtargetspacing'}
+        options=[];port=19999 if self.f['chainType']=='testnet' else 20001;section='';section_wanted='test' if self.f['chainType']=='testnet' else 'devnet'
+        for line in path.read_text().splitlines():
+            line=line.strip()
+            if not line or line.startswith(('#',';')):continue
+            if line.startswith('['):section=line[1:-1];continue
+            if section not in ['',section_wanted]:continue
+            k,sep,v=line.partition('=');k=k.strip();v=v.strip()
+            require(k not in ['includeconf','vbparams','dip3params','budgetparams'],'unsupported-chain-override')
+            if k in allowed:
+                require(self.f['chainType']=='devnet','unexpected-testnet-chain-override');options.append(k+'='+v)
+            if k=='port':port=int(v)
+        hostport=port if core['HostConfig']['NetworkMode']=='host' else self.port(core,port)
+        j=dict(chainType=self.f['chainType'],coreNetwork=info['chain'],genesis=self.rpc(selected,'getblockhash',1 if self.f['chainType']=='devnet' else 0),checkpointHeight=height,
+               checkpointHash=self.rpc(selected,'getblockhash',height),peers=[self.t['address']+':'+str(hostport)],options=options)
+        return dict(instanceId=self.t['instanceId'],join=j)
+
     def execute(self):
-        require(self.q['action'] in ['observe','enroll','stage','apply'],'action-refused')
+        require(self.q['action'] in ['observe','join-profile','enroll','stage','apply'],'action-refused')
         self.identity()
         if self.engine is None:self.engine=Engine()
         if self.q['action']=='observe':return self.observe()
+        if self.q['action']=='join-profile':return self.join_profile()
         self.root.mkdir(mode=0o700,parents=True,exist_ok=True)
         with open('/run/dashnet-managed.lock','a') as lock:
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)

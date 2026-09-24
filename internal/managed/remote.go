@@ -62,7 +62,7 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 		return Observation{}, errors.New("target outside fleet")
 	}
 	switch q.Action {
-	case "observe":
+	case "observe", "join-profile":
 	case "enroll":
 		if q.Expected == nil {
 			return Observation{}, errors.New("enrollment baseline required")

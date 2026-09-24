@@ -43,6 +43,9 @@ func ObservationDigest() string {
 }
 
 func workerScript(action string) string {
+	if action == "join-start" || action == "join-status" {
+		return "__name__ = 'dashnet_join'\n" + recipe + "\n" + joinRecipe + "\nmain()\n"
+	}
 	if action == "upgrade-stage" || action == "upgrade-apply" {
 		return "__name__ = 'dashnet_upgrade'\n" + recipe + "\n" + observer + "\n" + upgradeRecipe + "\nmain()\n"
 	}
@@ -117,6 +120,7 @@ type Peer struct {
 	ProTxHash         string `json:"proTxHash,omitempty"`
 }
 type Request struct {
+	Join                  *CoreJoin    `json:"join,omitempty"`
 	Context               Context      `json:"context"`
 	Target                Target       `json:"target"`
 	Action                string       `json:"action"`
@@ -141,6 +145,7 @@ type Mining struct {
 	Restarts    int    `json:"restarts"`
 }
 type Core struct {
+	CheckpointHash  string         `json:"checkpointHash,omitempty"`
 	StartedAt       string         `json:"startedAt,omitempty"`
 	Mining          *Mining        `json:"mining,omitempty"`
 	Genesis         string         `json:"genesis"`
@@ -205,7 +210,11 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return Observation{}, errors.New("node operation requires a deadline")
 	}
-	if !actions[q.Action] {
+	if q.Action == "join-start" || q.Action == "join-status" {
+		if err := q.validateJoin(); err != nil {
+			return Observation{}, err
+		}
+	} else if !actions[q.Action] {
 		if q.Action != "upgrade-stage" && q.Action != "upgrade-apply" {
 			return Observation{}, errors.New("unsupported node action")
 		}

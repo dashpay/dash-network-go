@@ -118,6 +118,9 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if err = prior.Validate(p.Bootstrap.Compute); err != nil {
 		return
 	}
+	if prior.Join != nil {
+		return result, errors.New("allocation belongs to an existing chain join, not genesis lifecycle")
+	}
 	if prior.Upgrade != nil && prior.Upgrade.Phase != "complete" {
 		return result, errors.New("unfinished upgrade owns runtime intent; resume that upgrade before deploy/stop")
 	}
