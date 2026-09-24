@@ -7,6 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -15,10 +20,6 @@ import (
 	"github.com/dashpay/dash-network-go/internal/managed"
 	"github.com/dashpay/dash-network-go/internal/release"
 	"github.com/dashpay/dash-network-go/internal/transport"
-	"io"
-	"os"
-	"strings"
-	"time"
 )
 
 func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error {

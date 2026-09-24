@@ -82,6 +82,16 @@ views while replacing single-network inventory/name-keyed state. Existing
 unmerged/live status adaptations must be inspected and preserved before changing
 its implementation.
 
+## Existing Moutai and managed testnet
+
+The [existing-state path](managed-networks.md) imports explicit AWS/container
+bindings, enrolls them without recreation, and operates their captured workloads
+through the same CLI/Actions execution model. Public observation stays read-only;
+both networks are intended to have authenticated deploy/upgrade/recovery controls.
+It does not infer a fresh devnet genesis for testnet, regenerate operator keys or
+silently reset databases. Existing-state deployment/restoration is implemented;
+provisioning additional testnet nodes remains separate work.
+
 ## Execution boundaries
 
 The EC2 stage implements ownership/scope checks, shared exclusion, and durable

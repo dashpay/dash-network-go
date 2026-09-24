@@ -164,6 +164,14 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			if err = Preserved(p.Snapshot.Nodes[t.Name], current.Nodes[t.Name], selected); err != nil {
 				return record, fmt.Errorf("%s preflight: %w", t.Name, err)
 			}
+			// A stopped workload may change running/start counters, not ownership.
+			// Reject same-name replacements before staging anything on any host.
+			for _, c := range selected {
+				before, now := p.Snapshot.Nodes[t.Name].Components[c], current.Nodes[t.Name].Components[c]
+				if before.ID != now.ID || before.ImageID != now.ImageID {
+					return record, fmt.Errorf("%s/%s: deployment source was replaced", t.Name, c)
+				}
+			}
 		}
 		if p.Operation == "upgrade" {
 			h, e := r.health(ctx, p.Snapshot)

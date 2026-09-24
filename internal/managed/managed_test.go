@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -12,10 +17,6 @@ import (
 	"github.com/dashpay/dash-network-go/internal/journal"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/dashpay/dash-network-go/internal/testutil"
-	"strings"
-	"sync"
-	"testing"
-	"time"
 )
 
 func clone[T any](v T) T  { b, _ := json.Marshal(v); var out T; _ = json.Unmarshal(b, &out); return out }
@@ -359,6 +360,34 @@ func TestManagedDeployRestoresStoppedImagesAndRejectsStalePlan(t *testing.T) {
 		t.Fatal("old intent overwrote current runtime")
 	}
 }
+
+func TestManagedDeployRejectsReplacedSourceBeforeAnyStaging(t *testing.T) {
+	s, r, m, b := setup(t)
+	enroll(t, s, r)
+	p, err := Build(s, "deploy", "platform", "", pins(s, "platform", "a"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Place drift on the final host so earlier hosts cannot be partially restored.
+	name := s.Fleet.Targets[len(s.Fleet.Targets)-1].Name
+	o := b.nodes[name]
+	v := o.Components["tenderdash"]
+	v.ID = h64("foreign same-name replacement")
+	v.Running = false
+	o.Components["tenderdash"] = v
+	b.nodes[name] = o
+	start := len(b.calls)
+	ctx, cancel := deadline()
+	defer cancel()
+	if _, err = r.Execute(ctx, p); err == nil || m.r.OperationID != "" {
+		t.Fatal("replacement was adopted or operation started", err)
+	}
+	for _, q := range b.calls[start:] {
+		if q.Action != "observe" {
+			t.Fatal("started mutating despite a replaced source")
+		}
+	}
+}
 func TestManagedSnapshotAndPlanValidation(t *testing.T) {
 	s, _, _, _ := setup(t)
 	p, e := Build(s, "upgrade", "platform", "", pins(s, "platform", "b"), time.Now())
@@ -376,5 +405,32 @@ func TestManagedSnapshotAndPlanValidation(t *testing.T) {
 	s.ID = hash(s)
 	if s.Complete() == nil {
 		t.Fatal("unknown target accepted")
+	}
+}
+
+func TestCoreUpgradeDoesNotPermitNativeTorRestart(t *testing.T) {
+	base := Observation{NativeProcesses: map[string]string{"dashd:123": "old-core", "tor:456": "unchanged"}}
+	current := clone(base)
+	current.NativeProcesses["dashd:123"] = "new-core"
+	if e := Preserved(base, current, []string{"core"}); e != nil {
+		t.Fatal(e)
+	}
+	current.NativeProcesses["tor:456"] = "restarted"
+	if Preserved(base, current, []string{"core"}) == nil {
+		t.Fatal("Core scope also permitted Tor restart")
+	}
+}
+func TestReadOnlyImportPreservesUnknownTarget(t *testing.T) {
+	s, r, _, b := setup(t)
+	b.fail = "observe"
+	b.failOnce = true
+	ctx, c := deadline()
+	defer c()
+	observed := Observe(ctx, s.Fleet, r.Remote, 0)
+	if len(observed.Nodes) != 13 || observed.Complete() == nil {
+		t.Fatal("unknown target silently dropped")
+	}
+	if observed.Validate() != nil {
+		t.Fatal("partial evidence could not be retained")
 	}
 }

@@ -145,13 +145,28 @@ class Worker:
         require(not host.get('AutoRemove') and not host.get('VolumesFrom') and not host.get('Links'), 'unsupported-container-lifecycle')
         require(not host.get('NetworkMode', '').startswith(('container:', 'service:')), 'unsupported-network-mode')
         mounts = []
+        declared = {m['Target']:m for m in (host.get('Mounts') or [])}
         for m in c['Mounts']:
-            if m['Type'] == 'tmpfs': continue
+            original = declared.get(m['Destination'])
+            if m['Type'] == 'tmpfs':
+                # Do not turn an API-configured memory mount into a disk path.
+                if original:
+                    require(original['Type']=='tmpfs','mount-type-changed')
+                    mounts.append(copy.deepcopy(original))
+                else:require(m['Destination'] in (host.get('Tmpfs') or {}),'unsupported-tmpfs')
+                continue
             require(m['Type'] in ['bind', 'volume'], 'unsupported-mount-type')
-            value = dict(Type=m['Type'], Source=m.get('Name') if m['Type']=='volume' else m['Source'],
+            # Keep subpaths, recursive read-only settings and driver options
+            # from API mounts. Legacy -v SELinux relabeling cannot be represented
+            # by this adapter: refuse it rather than silently dropping the flag.
+            require(not set((m.get('Mode') or '').split(',')) & {'z','Z'},'unsupported-selinux-mount')
+            value=copy.deepcopy(original) if original else {}
+            require(not original or original['Type']==m['Type'],'mount-type-changed')
+            value.update(Type=m['Type'], Source=m.get('Name') if m['Type']=='volume' else m['Source'],
                          Target=m['Destination'], ReadOnly=not m['RW'])
-            if m['Type']=='bind': value['BindOptions']=dict(Propagation=m.get('Propagation') or 'rprivate')
-            else: value['VolumeOptions']=dict(NoCopy=True)
+            if m['Type']=='bind':
+                value.setdefault('BindOptions',{})['Propagation']=m.get('Propagation') or 'rprivate'
+            else:value.setdefault('VolumeOptions',{})['NoCopy']=True
             mounts.append(value)
         host['Binds'] = None; host['Mounts'] = sorted(mounts, key=lambda m: m['Target'])
         # Endpoint runtime IDs/IPs are not configuration. Preserve configured
@@ -275,6 +290,19 @@ class Worker:
             except Exception:problems.append('platform-health-unavailable')
         return chain,problems
 
+    def native_processes(self):
+        # Preserve native seed Core/Tor processes too; never export cmdlines.
+        result={}
+        for p in Path('/proc').iterdir():
+            if not p.name.isdigit():continue
+            try:
+                comm=(p/'comm').read_text().strip()
+                if comm not in ['dashd','tor']:continue
+                stat=(p/'stat').read_text().rsplit(')',1)[1].split()
+                result[comm+':'+p.name]=fingerprint(dict(comm=comm,start=stat[19],command=hashlib.sha256((p/'cmdline').read_bytes()).hexdigest()))
+            except (FileNotFoundError,ProcessLookupError):continue
+        return result
+
     def observe(self):
         selected,companions=self.containers()
         components={k:self.summary(v) for k,v in selected.items()}
@@ -284,11 +312,13 @@ class Worker:
         chain,problems=self.health(selected)
         for k,c in selected.items():require(self.engine.inspect(c['Id']) is not None,'concurrent-container-change')
         return dict(instanceId=self.t['instanceId'],at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    components=components,companions=extra,filesHash=self.files_hash(selected),chain=chain,problems=problems)
+                    components=components,companions=extra,nativeProcesses=self.native_processes(),filesHash=self.files_hash(selected),chain=chain,problems=problems)
 
     def assert_baseline(self, actual, baseline, mutable=()):
         require(actual['filesHash']==baseline['filesHash'],'configuration-files-changed')
         require(actual['companions']==baseline['companions'],'companion-changed')
+        keep=lambda m:{k:v for k,v in m.items() if 'core' not in mutable or not k.startswith('dashd:')}
+        require(keep(actual['nativeProcesses'])==keep(baseline['nativeProcesses']),'native-core-or-tor-changed')
         for k,b in baseline['components'].items():
             a=actual['components'][k]
             require(a['configHash']==b['configHash'],'workload-configuration-changed')
@@ -334,6 +364,8 @@ class Worker:
                     configHash=self.config_hash(self.recipe(c)),running=c['State']['Running'],
                     startedAt=c['State']['StartedAt'],restarts=c['RestartCount'])
         require(companions==baseline['companions'],'companion-changed')
+        keep=lambda m:{k:v for k,v in m.items() if 'core' not in pins or not k.startswith('dashd:')}
+        require(keep(self.native_processes())==keep(baseline['nativeProcesses']),'native-core-or-tor-changed')
         file_sources={}
         for k,b in baseline['components'].items():
             c=selected.get(k)
@@ -363,7 +395,11 @@ class Worker:
         else:
             require(marker is None or marker['phase']=='complete','unfinished-host-operation')
             actual=self.observe();self.assert_baseline(actual,baseline, pins if self.q['operation']=='deploy' else ())
-            selected,_=self.containers();recipes={k:self.recipe(c) for k,c in selected.items() if k in pins}
+            selected,_=self.containers()
+            for k in pins:
+                require(selected[k]['Id']==baseline['components'][k]['id']
+                        and selected[k]['Image']==baseline['components'][k]['imageId'],'deploy-source-drift')
+            recipes={k:self.recipe(c) for k,c in selected.items() if k in pins}
             marker=dict(id=self.q['operationId'],pins=pins,baseline=baseline,recipes=recipes,
                         operation=self.q['operation'],completed={},phase='applying')
             self.atomic('operation.json',marker)

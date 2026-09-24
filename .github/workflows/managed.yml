@@ -1,0 +1,125 @@
+name: Operate existing Moutai or managed testnet
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Explicit existing network scope
+        type: choice
+        options: [devnet-moutai, testnet]
+        required: true
+      operation:
+        description: Import observes only; enrollment and execution require exact confirmation
+        type: choice
+        options: [import, enroll, plan, deploy, upgrade, doctor, operation]
+        required: true
+      confirm:
+        description: Reviewed snapshot ID for enrollment or operation plan ID for deploy/upgrade
+        type: string
+        required: false
+      plan_operation:
+        description: For plan only; deploy restores same images, upgrade changes images
+        type: choice
+        options: [upgrade, deploy]
+        default: upgrade
+      scope:
+        description: For plan only; execution is bound to the reviewed plan
+        type: choice
+        options: [platform, tenderdash, core, all]
+        default: platform
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: operate-${{ inputs.network }}
+  cancel-in-progress: false
+jobs:
+  managed:
+    if: github.ref == 'refs/heads/main'
+    # Configure distinct scoped OIDC roles/environment protection for each network.
+    environment: ${{ inputs.network == 'testnet' && 'testnet-operations' || 'devnet-operations' }}
+    runs-on: ${{ vars.DASHNET_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build trusted main revision and verify environment configuration
+        env:
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
+          REGION: ${{ vars.DASHNET_AWS_REGION }}
+          ROLE: ${{ secrets.DASHNET_AWS_ROLE }}
+        run: |
+          set -euo pipefail
+          [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          test -n "$REGION" && test -n "$ROLE"
+          go build -trimpath -ldflags "-X main.version=$GITHUB_SHA" -o bin/dashnet ./cmd/dashnet
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ secrets.DASHNET_AWS_ROLE }}
+          aws-region: ${{ vars.DASHNET_AWS_REGION }}
+          role-session-name: managed-${{ github.run_id }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+      - name: Execute exact existing-network request
+        env:
+          NETWORK: ${{ inputs.network }}
+          OPERATION: ${{ inputs.operation }}
+          PLAN_OPERATION: ${{ inputs.plan_operation }}
+          SCOPE: ${{ inputs.scope }}
+          CONFIRM: ${{ inputs.confirm }}
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
+          SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$NETWORK" == testnet || "$NETWORK" == devnet-moutai ]]
+          work=$(mktemp -d "$RUNNER_TEMP/dashnet-existing.XXXXXXXX")
+          trap 'rm -rf -- "$work"' EXIT
+          base="s3://$BUCKET/managed/$NETWORK"
+          args=(--out "$work/result.json" --timeout 110m)
+          case "$OPERATION" in
+            import|operation) artifact=existing.json; input=--manifest ;;
+            enroll|plan|doctor) artifact=snapshot.json; input=--snapshot ;;
+            deploy|upgrade) artifact=plan.json; input=--plan ;;
+            *) exit 1 ;;
+          esac
+          aws s3 cp --only-show-errors "$base/$artifact" "$work/input.json"
+          actual=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p=p.get("snapshot",p); p=p.get("fleet",p); print(p["metadata"]["name"])' "$work/input.json")
+          test "$actual" = "$NETWORK"
+          args+=("$input" "$work/input.json")
+          if [[ "$OPERATION" == enroll || "$OPERATION" == deploy || "$OPERATION" == upgrade ]]; then
+            [[ "$CONFIRM" =~ ^[0-9a-f]{64}$ ]]
+            args+=(--confirm "$CONFIRM")
+          fi
+          if [[ "$OPERATION" == plan ]]; then
+            [[ "$PLAN_OPERATION" == deploy || "$PLAN_OPERATION" == upgrade ]]
+            [[ "$SCOPE" == core || "$SCOPE" == platform || "$SCOPE" == tenderdash || "$SCOPE" == all ]]
+            args+=(--operation "$PLAN_OPERATION" --scope "$SCOPE")
+            if [[ "$PLAN_OPERATION" == upgrade ]]; then
+              aws s3 cp --only-show-errors "$base/candidates.json" "$work/candidates.json"
+              args+=(--images "$work/candidates.json")
+            fi
+          elif [[ "$OPERATION" != operation ]]; then
+            test -n "$SSH_KEY"
+            printf '%s\n' "$SSH_KEY" > "$work/key"
+            unset SSH_KEY
+            aws s3 cp --only-show-errors "$base/known_hosts" "$work/known_hosts"
+            args+=(--ssh-key "$work/key" --known-hosts "$work/known_hosts")
+          fi
+          code=0
+          bin/dashnet "managed-$OPERATION" "${args[@]}" > "$work/stdout.log" \
+            2> >(tee "$work/operator.log" | awk '/^(managed-staging|managed-applying|managed-verifying)$/ {print; fflush()}') || code=$?
+          wait
+          aws s3 cp --only-show-errors "$work/operator.log" "$base/operations/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
+          if [[ -s "$work/result.json" ]]; then
+            aws s3 cp --only-show-errors "$work/result.json" "$base/operations/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          fi
+          {
+            echo '## Existing managed network operation'
+            printf 'Network: `%s` · operation: `%s` · exit: `%s`\n' "$NETWORK" "$OPERATION" "$code"
+            echo 'Detailed observations remain private. Import/plan results are not automatically promoted to execution inputs.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"

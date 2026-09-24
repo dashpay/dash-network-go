@@ -175,8 +175,21 @@ func CanWithdraw(s Snapshot, target Target) error {
 	}
 	return nil
 }
+func nativePreserved(base, current map[string]string, selected []string) bool {
+	filter := func(v map[string]string) map[string]string {
+		out := map[string]string{}
+		for k, s := range v {
+			if slices.Contains(selected, "core") && strings.HasPrefix(k, "dashd:") {
+				continue
+			}
+			out[k] = s
+		}
+		return out
+	}
+	return hash(filter(base)) == hash(filter(current))
+}
 func Preserved(base, current Observation, selected []string) error {
-	if base.FilesHash != current.FilesHash || hash(base.Companions) != hash(current.Companions) {
+	if base.FilesHash != current.FilesHash || hash(base.Companions) != hash(current.Companions) || !nativePreserved(base.NativeProcesses, current.NativeProcesses, selected) {
 		return errors.New("configuration/companion drift")
 	}
 	for c, b := range base.Components {

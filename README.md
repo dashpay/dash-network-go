@@ -217,3 +217,13 @@ interrupted checkpoints, footprint drift, strict SSH host trust, bounded output,
 host preparation/readback, and cancellation without target loss.
 
 See [architecture](docs/architecture.md) and [the implementation roadmap](docs/roadmap.md).
+
+## Existing Moutai and managed testnet
+
+The `managed-*` commands support explicit existing-state import/enrollment,
+scoped image upgrades and captured-container deployment/recovery. They preserve
+identities/data and use live per-network health/quorum gates. See the
+[managed-network commands, cutover and recovery guide](docs/managed-networks.md).
+This is not a read-only product boundary: authorized operators can manage both
+networks. New testnet-node provisioning, protocol migrations, live rollout proof,
+and the authenticated dashboard remain separate work.

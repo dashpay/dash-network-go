@@ -141,14 +141,15 @@ type Chain struct {
 	DAPIHealthy      bool             `json:"dapiHealthy"`
 }
 type Observation struct {
-	InstanceID string               `json:"instanceId"`
-	At         time.Time            `json:"at"`
-	Components map[string]Container `json:"components"`
-	Companions map[string]Container `json:"companions"`
-	FilesHash  string               `json:"filesHash"`
-	Chain      Chain                `json:"chain"`
-	Problems   []string             `json:"problems"`
-	Error      string               `json:"error,omitempty"`
+	InstanceID      string               `json:"instanceId"`
+	At              time.Time            `json:"at"`
+	Components      map[string]Container `json:"components"`
+	Companions      map[string]Container `json:"companions"`
+	NativeProcesses map[string]string    `json:"nativeProcesses"`
+	FilesHash       string               `json:"filesHash"`
+	Chain           Chain                `json:"chain"`
+	Problems        []string             `json:"problems"`
+	Error           string               `json:"error,omitempty"`
 }
 type Snapshot struct {
 	APIVersion string                 `json:"apiVersion"`

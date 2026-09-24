@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+
 	"github.com/dashpay/dash-network-go/internal/release"
 	"github.com/google/go-containerregistry/pkg/name"
-	"slices"
 )
 
 // Resolve captures each reference once per architecture, never once per node.

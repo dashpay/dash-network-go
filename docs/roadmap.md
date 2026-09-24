@@ -63,7 +63,11 @@ Remaining:
   restart/recovery without rewriting creation intent. Go/Python failure tests and
   a real Docker replacement/replay contract cover the implementation.
 - Prove actual Dash version-to-version upgrades on existing state. Core-only,
-  protocol/config migration and managed-testnet rollout remain unimplemented.
+  protocol/config migration remain unimplemented in the native devnet path.
+- Existing Moutai/testnet adapters now support explicit authenticated import and
+  enrollment, captured-workload deployment/recovery and scoped image upgrades.
+  See [managed networks](managed-networks.md); live management remains unproved.
+  Additional testnet-node provisioning/registration remains unimplemented.
 - Configure and live-prove the implemented Actions entry point; add explicit
   live workflow proof for the implemented upgrade entry point through the same
   CLI and shared state/locks.
@@ -72,10 +76,12 @@ Remaining:
 
 ## 4. Status integration
 
-- Multi-network read-only views fed by independent health collection and durable
+- Multi-network public read-only and authenticated operational views fed by independent health collection and durable
   operation events; extend beyond validators to the managed service topology.
-- Import existing testnet and Moutai for observation; no implicit adoption,
-  deployment, reset or upgrade of those networks.
+- Include existing testnet and Moutai with deploy/upgrade/recovery controls for
+  authorized operators, backed by managed CLI/Actions. Initial discovery is
+  read-only; explicit enrollment preserves existing state and enables management.
+  Merely showing a network does not trigger adoption or deployment.
 - Public showcase pages and authenticated, authorized operator views.
 - GitHub run links first; custom deployment/upgrade/resume forms after operation
   contracts are proven. The UI dispatches the same workflows, not a second engine.
