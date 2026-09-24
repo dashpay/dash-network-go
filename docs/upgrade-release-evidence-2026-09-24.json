@@ -1,0 +1,49 @@
+{
+  "status": "upgrade-and-independent-verification-passed",
+  "architecture": "arm64",
+  "protocol": 13,
+  "from": "4.2.0-beta.3",
+  "to": "4.2.0-beta.4",
+  "cliCommit": "d335497",
+  "cliSha256": "64ac070b36da483674db782ebc50199249601a0dd6928e6d1f4ada9aa8cacbd4",
+  "components": [
+    {
+      "component": "core",
+      "before": "index.docker.io/dashpay/dashd@sha256:3e79dca9db3e3b1a4273b8159e64c7dae285bfccafc94a04944c01f4c7e4d5df",
+      "after": "index.docker.io/dashpay/dashd@sha256:3e79dca9db3e3b1a4273b8159e64c7dae285bfccafc94a04944c01f4c7e4d5df",
+      "changed": false
+    },
+    {
+      "component": "tenderdash",
+      "before": "index.docker.io/dashpay/tenderdash@sha256:487be748fe81627cdaed377746a0346ae6e11b5edd1999571739615818239a6a",
+      "after": "index.docker.io/dashpay/tenderdash@sha256:487be748fe81627cdaed377746a0346ae6e11b5edd1999571739615818239a6a",
+      "changed": false
+    },
+    {
+      "component": "drive",
+      "before": "index.docker.io/dashpay/drive@sha256:108d248e9b1b46fa12c760ad8a10675567931796754fe3e239c9715da83efa06",
+      "after": "index.docker.io/dashpay/drive@sha256:885bedd1586b11dc47b8cd1bfd5a46249a7b6e422964f2ca03b2d62218495c18",
+      "changed": true
+    },
+    {
+      "component": "dapi",
+      "before": "index.docker.io/dashpay/rs-dapi@sha256:9704006b83408c7465d1818f6cc7cfb2890deadca1fd7d3f4ad884dbd6f6037d",
+      "after": "index.docker.io/dashpay/rs-dapi@sha256:52f7d29eee1bd58c927bc3a7ec75c3e1c1ec3999d1661e82e936cf6b51181785",
+      "changed": true
+    },
+    {
+      "component": "gateway",
+      "before": "index.docker.io/dashpay/envoy@sha256:e969ae71c1ce7951f8d28c2afdcc8d499747567e822de02a8f240dfeee8d4860",
+      "after": "index.docker.io/dashpay/envoy@sha256:e969ae71c1ce7951f8d28c2afdcc8d499747567e822de02a8f240dfeee8d4860",
+      "changed": false
+    }
+  ],
+  "verifiedValidators": 13,
+  "verifiedHosts": 14,
+  "coreProcessesPreserved": true,
+  "interruptionRun": "https://github.com/dashpay/dash-network-go/actions/runs/36048495361",
+  "resumeRun": "https://github.com/dashpay/dash-network-go/actions/runs/36050237058",
+  "resumeAttempt": 3,
+  "cleanupVerified": true,
+  "doctorRun": "https://github.com/dashpay/dash-network-go/actions/runs/36056882414"
+}

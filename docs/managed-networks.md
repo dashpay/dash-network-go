@@ -161,6 +161,14 @@ main, with separate `testnet-operations`/`devnet-operations` environments, scope
 OIDC roles, private artifact storage and verified SSH trust. It is inert until
 those dependencies are configured; the workflow is not live-proved merely by CI.
 
+Configure the role's maximum session duration to allow the requested 7,200
+seconds. The CLI stops after 110 minutes, ahead of the 120-minute job/credential
+limit, so it can checkpoint and release its claim. A large serial fleet with
+four-minute observation windows can require more than one run. Resume the same
+operation, plan and compatible binary; do not shorten the health window simply
+to fit one job. Keep production SSH authority network-scoped rather than copying
+a general infrastructure key into an Actions environment.
+
 Artifacts are private under `managed/<network>/`: `existing.json`, reviewed
 `snapshot.json`, optional `candidates.json`, reviewed `plan.json`, and
 `known_hosts`. Results/logs go under `operations/<run>-<attempt>`. Import and plan
