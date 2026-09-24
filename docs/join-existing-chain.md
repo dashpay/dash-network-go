@@ -85,3 +85,16 @@ The resulting allocation has independent ownership. It is not silently appended
 to an existing legacy managed manifest: fleet enrollment/expansion and dashboard
 control of these new allocations are separate explicit steps. Keep all unresolved
 legacy targets in their original reports.
+
+## GitHub Actions
+
+`operate.yml` supports `provision`, `bootstrap`, `join-plan` and `join` for the
+reviewed allocation bundle. Testnet-named allocations use a separate protected
+`testnet-fullnode-operations` environment; they do not inherit the existing testnet
+validator-management role. Bundle inputs are fixed paths under
+`networks/ALLOCATION/` in the private bucket: `ec2-plan.json`,
+`bootstrap-plan.json`, `chain.json`, `join.json`, and verified `known_hosts`.
+Planning outputs are not silently promoted. Retain the exact compatible CLI
+revision; recipe drift rejects execution. The workflow's 75-minute sync deadline
+may be insufficient for a large chain: resume the same join from another run or
+the retained local binary. The shared journal, not the runner, owns progress.
