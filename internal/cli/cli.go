@@ -49,6 +49,14 @@ Usage:
   dashnet upgrade-plan --deployment-plan deployment.json --network candidate.yaml
                        --lock release.lock.json --scope platform|tenderdash --out upgrade.json
   dashnet upgrade --plan upgrade.json --confirm UPGRADE_PLAN_ID --ssh-key PATH --known-hosts PATH
+  dashnet managed-import --manifest existing.json --ssh-key PATH --known-hosts PATH --out snapshot.json
+  dashnet managed-enroll --snapshot snapshot.json --confirm SNAPSHOT_ID --ssh-key PATH --known-hosts PATH
+  dashnet managed-plan --snapshot snapshot.json --operation deploy|upgrade --scope core|platform|tenderdash|all
+                       [--images candidates.json] --out managed-plan.json
+  dashnet managed-deploy|managed-upgrade --plan managed-plan.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
+  dashnet managed-doctor --snapshot snapshot.json --ssh-key PATH --known-hosts PATH
+  dashnet managed-operation --manifest existing.json
+  dashnet managed-unlock --manifest existing.json --expected-owner RUNNER_ID --confirm-runner-stopped
   dashnet version
 
 Planning and discovery are read-only. Provision creates EC2 instances and durable
@@ -58,7 +66,9 @@ Bootstrap installs/verifies Docker and pulls locked images on owned Ubuntu 24.04
 hosts; it does not start Core/Platform. Deploy runs the owned devnet lifecycle.
 Stop halts owned containers, preserving disks, wallet/validator identities and
 AWS resources (billing continues). Doctor is read-only and exits nonzero for
-unhealthy/unknown targets. No reset, destroy or testnet mutation yet.
+unhealthy/unknown targets. Managed commands enroll and operate explicit existing devnet/testnet workloads.
+Managed deploy restores captured containers/images; upgrade changes pinned images.
+No reset, destroy, new managed-testnet node provisioning or protocol migration yet.
 Image availability and EC2 running are not proof of application health.
 JSON is written to stdout unless --out is given; files are private (0600),
 atomic, and never overwritten. Status is operator data unless --public is used.
@@ -74,6 +84,8 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
+	case "managed-import", "managed-enroll", "managed-plan", "managed-deploy", "managed-upgrade", "managed-doctor", "managed-operation", "managed-unlock":
+		return runManaged(ctx, args, out, stderr)
 	case "host-trust":
 		return runTrust(ctx, args, out, stderr)
 	case "deployment-plan", "deploy", "doctor", "stop", "upgrade-plan", "upgrade":
