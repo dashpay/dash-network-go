@@ -41,7 +41,7 @@ Tests distinguish three levels:
 1. Fake-cloud/SSH orchestration and failure-path tests: scope, claims, lost
    responses, resume, unchanged genesis, stale/unknown/unreachable targets.
 2. Disposable **real-container** contracts: Core config, wallet, signed EvoNode
-   registration, transaction replay and persistent collateral locks; Tenderdash
+   registration, transaction replay and persistent collateral locks and persistent mining; Drive native configuration and its missing-ChainLock startup gate; Tenderdash
    config/node identity; Envoy TLS and DAPI gRPC. No AWS credentials/resources.
 3. **Not yet proved:** a real AWS fleet forming quorums and advancing Platform
    consensus end-to-end. No full-network success claim follows from levels 1–2.
@@ -167,10 +167,12 @@ inert until an administrator configures:
 - Protected **`devnet-operations`** environment, allowed main-branch deployments,
   required reviewer policy, and narrowly scoped OIDC role trust for this repo and
   environment. IAM must constrain exact account/network and state/artifact paths.
-- Environment variables `DASHNET_AWS_ROLE`, `DASHNET_AWS_REGION`,
-  `DASHNET_ARTIFACT_BUCKET`, and optionally `DASHNET_RUNNER` (a runner label with
-  private VPC reachability). Role maximum session duration must permit two hours.
-- Environment secret `DASHNET_SSH_KEY` and independently verified host trust in
+- Environment variable `DASHNET_AWS_REGION` and optionally `DASHNET_RUNNER`
+  (a runner label with private VPC reachability). Role maximum session duration
+  must permit two hours.
+- Environment secrets `DASHNET_AWS_ROLE`, `DASHNET_ARTIFACT_BUCKET` (private
+  infrastructure identifiers, masked in this public repository), `DASHNET_SSH_KEY`,
+  and independently verified host trust in
   the private bundle; use separate credentials/policy for managed testnet later.
 - Versioned private S3 paths `networks/DEVNET_NAME/ec2-plan.json`,
   `bootstrap-plan.json`, `deployment.json`, `known_hosts`. Restrict writes as
@@ -181,7 +183,9 @@ Dispatch the exact network/action and reviewed plan ID. GitHub concurrency queue
 same-network runs; the DynamoDB claim also coordinates local humans/agents. Reports
 are uploaded under private `operations/NETWORK/RUN_ID-ATTEMPT.json`. No private
 plan, trust file, key or report is published as a GitHub artifact. SSH files are
-removed on step exit. The public job summary only identifies network/action/result.
+removed on step exit. The public job summary only identifies network/action/result. Public live logs
+forward only exact stage names; full operator diagnostics stay in the private S3
+operation log.
 
 Retain the exact executable for resume. A later main revision with a changed
 recipe refuses the old plan; recover with the cached matching binary locally

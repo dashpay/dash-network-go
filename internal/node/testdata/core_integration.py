@@ -77,23 +77,33 @@ def main():
             )
             (root / "platform/drive").mkdir(parents=True, mode=0o700)
             w.compose("drive-contract", {"drive": w.platform_services()["drive"]})
+            # Drive deliberately waits for a ChainLock and mnsync before opening
+            # ABCI/gRPC. This one-Core fixture cannot form a quorum: verify the
+            # actual waiting gate, rather than falsely asserting consensus startup.
             drive_deadline = time.monotonic() + 30
             while True:
-                try:
-                    with socket.create_connection(
-                        ("127.0.0.1", q["context"]["ports"]["driveGRPC"]), timeout=1
-                    ):
-                        break
-                except OSError:
-                    assert (
-                        time.monotonic() < drive_deadline
-                    ), "Drive did not open configured gRPC listener"
-                    time.sleep(1)
+                logs = w.docker("logs", "--tail", "50", w.container_name("drive"))
+                if (
+                    b"cannot get best chain lock" in logs
+                    or b"waiting for core to sync" in logs
+                ):
+                    break
+                assert (
+                    time.monotonic() < drive_deadline
+                ), "Drive did not reach its Core-readiness gate"
+                time.sleep(1)
             running = w.inspect_container("drive")
             assert running["State"]["Running"] and running["RestartCount"] == 0
             w.verify_image(running, w.images["drive"])
+            try:
+                with socket.create_connection(
+                    ("127.0.0.1", q["context"]["ports"]["driveGRPC"]), timeout=1
+                ):
+                    raise AssertionError("Drive bypassed its missing-ChainLock gate")
+            except OSError:
+                pass
             print(
-                "Real Drive accepts the native environment and opens its gRPC listener (not a consensus proof).",
+                "Real Drive accepts native configuration and waits for Core readiness; no consensus claim.",
                 flush=True,
             )
             q["payoutAddress"] = wallet["payoutAddress"]

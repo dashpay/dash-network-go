@@ -48,7 +48,7 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 	height := int64(500 + f.counts[q.Target.Name])
 	switch q.Action {
 	case "core-start", "core-finalize", "core-status":
-		o.Core = &node.Core{Genesis: digest("genesis"), Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
+		o.Core = &node.Core{Mining: &node.Mining{Running: true, ContainerID: digest("miner")}, Genesis: digest("genesis"), Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
 	case "wallet":
 		o.PayoutAddress = "y" + strings.Repeat("1", 33)
 		o.SporkAddress = "y" + strings.Repeat("2", 33)
@@ -267,5 +267,55 @@ func TestBusyClaimAndDeadlineStopBeforeRemote(t *testing.T) {
 	s.owner = ""
 	if _, err := r.Execute(context.Background(), p, false); err == nil {
 		t.Fatal("no deadline accepted")
+	}
+}
+
+func TestDoctorRequiresFreshChainLockAndPersistentMiner(t *testing.T) {
+	for _, kind := range []string{"stale-chainlock", "miner-stopped"} {
+		t.Run(kind, func(t *testing.T) {
+			p, r, s, f := setup(t)
+			if _, err := execute(t, p, r); err != nil {
+				t.Fatal(err)
+			}
+			name := p.Miner().Name
+			f.after = func(q node.Request, o *node.Observation) error {
+				if q.Target.Name == name && q.Action == "core-status" {
+					if kind == "stale-chainlock" {
+						o.Core.ChainLockHeight = 1
+					} else {
+						o.Core.Mining.Running = false
+					}
+				}
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			h, err := r.Doctor(ctx, p, s.record)
+			if err != nil || h.Healthy || h.Nodes[name].Healthy {
+				t.Fatal("unhealthy Core/miner hidden", h, err)
+			}
+		})
+	}
+}
+func TestLostCheckpointCancelsWorkAndRetainsRecoveryState(t *testing.T) {
+	p, r, s, f := setup(t)
+	s.failSave = func(v provision.Record) error {
+		if v.Deployment != nil && v.Deployment.Stage == "core-start" {
+			return errors.New("database unavailable")
+		}
+		return nil
+	}
+	_, err := execute(t, p, r)
+	if err == nil {
+		t.Fatal("lost journal accepted")
+	}
+	for _, q := range f.calls {
+		if q.Action != "inspect" {
+			t.Fatal("mutation after missing stage checkpoint")
+		}
+	}
+	s.failSave = nil
+	if _, err = execute(t, p, r); err != nil {
+		t.Fatal("cannot recover original plan", err)
 	}
 }

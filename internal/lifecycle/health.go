@@ -126,7 +126,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	for _, t := range p.Targets {
 		v, first := b[t.Name], a[t.Name]
 		n := HealthNode{Problems: append(first.problems, v.problems...)}
-		if err := coreHealthy(t, record.Deployment.Nodes[t.Name], v.core); err != nil {
+		if err := coreHealthy(t, record.Deployment.Nodes[t.Name], v.core, p.Miner().Name); err != nil {
 			n.Problems = append(n.Problems, err.Error())
 		}
 		if v.core != nil {
@@ -136,6 +136,9 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 			}
 			if first.core == nil || v.core.Height <= first.core.Height {
 				n.Problems = append(n.Problems, "Core did not advance")
+			}
+			if first.core != nil && first.core.Mining != nil && v.core.Mining != nil && (first.core.Mining.ContainerID != v.core.Mining.ContainerID || first.core.Mining.Restarts != v.core.Mining.Restarts) {
+				n.Problems = append(n.Problems, "miner restarted during observation")
 			}
 			if first.core != nil && (first.core.ContainerID != v.core.ContainerID || first.core.Restarts != v.core.Restarts) {
 				n.Problems = append(n.Problems, "Core container changed during observation")

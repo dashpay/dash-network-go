@@ -458,7 +458,18 @@ class Worker:
             except RPCFailure as error:
                 if error.code not in [-32603, -1, -8]:
                     raise
+        mining = None
+        if self.c.get("miningNodeName") == self.t["name"]:
+            miner = self.inspect_container("miner")
+            if miner:
+                self.verify_image(miner, self.images["core"])
+                mining = dict(
+                    running=miner["State"]["Running"],
+                    containerId=miner["Id"],
+                    restarts=miner["RestartCount"],
+                )
         return dict(
+            mining=mining,
             genesis=genesis,
             height=info["blocks"],
             headers=info["headers"],

@@ -85,6 +85,7 @@ type Context struct {
 	GenesisTime            string   `json:"genesisTime"`
 	InitialProtocolVersion uint32   `json:"initialProtocolVersion"`
 	MiningIntervalSeconds  int      `json:"miningIntervalSeconds"`
+	MiningNodeName         string   `json:"miningNodeName"`
 	CorePeers              []string `json:"corePeers"`
 	Ports                  Ports    `json:"ports"`
 }
@@ -113,7 +114,13 @@ type Request struct {
 	TLSCertificate string `json:"tlsCertificate,omitempty"`
 	TLSPrivateKey  string `json:"tlsPrivateKey,omitempty"`
 }
+type Mining struct {
+	Running     bool   `json:"running"`
+	ContainerID string `json:"containerId"`
+	Restarts    int    `json:"restarts"`
+}
 type Core struct {
+	Mining          *Mining        `json:"mining,omitempty"`
 	Genesis         string         `json:"genesis"`
 	Height          int64          `json:"height"`
 	Headers         int64          `json:"headers"`

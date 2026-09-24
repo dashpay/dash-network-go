@@ -34,7 +34,18 @@ type execution struct {
 }
 
 func (p Plan) Request(t node.Target, action string) node.Request {
-	return node.Request{Target: t, Action: action, Context: node.Context{PlanID: p.ID, ComputePlanID: p.Bootstrap.Compute.ID, BootstrapID: p.Bootstrap.ID, Network: p.Bootstrap.Compute.Network.Metadata.Name, CoreNetwork: p.CoreNetwork, PlatformChainID: p.PlatformChainID, GenesisTime: p.GenesisTime.Format(time.RFC3339Nano), InitialProtocolVersion: p.InitialProtocolVersion, MiningIntervalSeconds: p.MiningIntervalSeconds, CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts}}
+	return node.Request{
+		Target: t, Action: action,
+		Context: node.Context{
+			PlanID: p.ID, ComputePlanID: p.Bootstrap.Compute.ID, BootstrapID: p.Bootstrap.ID,
+			Network:     p.Bootstrap.Compute.Network.Metadata.Name,
+			CoreNetwork: p.CoreNetwork, PlatformChainID: p.PlatformChainID,
+			GenesisTime:            p.GenesisTime.Format(time.RFC3339Nano),
+			InitialProtocolVersion: p.InitialProtocolVersion,
+			MiningIntervalSeconds:  p.MiningIntervalSeconds, MiningNodeName: p.Miner().Name,
+			CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
+		},
+	}
 }
 func (e *execution) report(s string) {
 	if e.runner.Progress != nil {
@@ -357,7 +368,7 @@ func (e *execution) deploy() error {
 			if err := e.core(t, o); err != nil {
 				return err
 			}
-			if err := coreHealthy(t, d.Nodes[t.Name], o.Core); err != nil {
+			if err := coreHealthy(t, d.Nodes[t.Name], o.Core, p.Miner().Name); err != nil {
 				ready = false
 			}
 			if minLock == 0 || o.Core.ChainLockHeight < minLock {
@@ -428,9 +439,12 @@ func (e *execution) peers() []node.Peer {
 	}
 	return peers
 }
-func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core) error {
+func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core, miner string) error {
 	if c == nil || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
 		return errors.New("Core sync/peers/ChainLock not ready")
+	}
+	if t.Name == miner && (c.Mining == nil || !c.Mining.Running || len(c.Mining.ContainerID) != 64) {
+		return errors.New("persistent miner unavailable")
 	}
 	for _, name := range []string{"llmq_devnet", "llmq_devnet_dip0024", "llmq_devnet_platform"} {
 		if c.Quorums[name] < 1 {

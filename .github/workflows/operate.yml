@@ -42,9 +42,9 @@ jobs:
       - name: Validate inputs and build trusted revision
         env:
           NETWORK: ${{ inputs.network }}
-          BUCKET: ${{ vars.DASHNET_ARTIFACT_BUCKET }}
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
           REGION: ${{ vars.DASHNET_AWS_REGION }}
-          ROLE: ${{ vars.DASHNET_AWS_ROLE }}
+          ROLE: ${{ secrets.DASHNET_AWS_ROLE }}
         run: |
           set -euo pipefail
           [[ "$NETWORK" =~ ^devnet-[a-z0-9][a-z0-9-]{0,35}$ ]]
@@ -53,16 +53,17 @@ jobs:
           go build -trimpath -ldflags "-X main.version=$GITHUB_SHA" -o bin/dashnet ./cmd/dashnet
       - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
-          role-to-assume: ${{ vars.DASHNET_AWS_ROLE }}
+          role-to-assume: ${{ secrets.DASHNET_AWS_ROLE }}
           aws-region: ${{ vars.DASHNET_AWS_REGION }}
           role-session-name: dashnet-${{ github.run_id }}
           role-duration-seconds: 7200
+          mask-aws-account-id: true
       - name: Execute exact reviewed plan
         env:
           NETWORK: ${{ inputs.network }}
           OPERATION: ${{ inputs.operation }}
           CONFIRM: ${{ inputs.confirm }}
-          BUCKET: ${{ vars.DASHNET_ARTIFACT_BUCKET }}
+          BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
           SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
         run: |
           set -euo pipefail
@@ -92,7 +93,11 @@ jobs:
             args+=(--ssh-key "$work/key" --known-hosts "$work/known_hosts")
           fi
           code=0
-          bin/dashnet "$OPERATION" "${args[@]}" || code=$?
+          # Only an exact stage-name allowlist reaches this public repo's logs.
+          bin/dashnet "$OPERATION" "${args[@]}" > "$work/stdout.log" \
+            2> >(tee "$work/operator.log" | awk '/^(preflight|core-start|identities|core-finalize|registrations|quorums|platform-start|health|ready|stopping|stopped)$/ {print; fflush()}') || code=$?
+          wait
+          aws s3 cp --only-show-errors "$work/operator.log" "s3://$BUCKET/operations/$NETWORK/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
           if [[ -s "$work/result.json" ]]; then
             aws s3 cp --only-show-errors "$work/result.json" "s3://$BUCKET/operations/$NETWORK/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           fi

@@ -25,6 +25,7 @@ def request():
             genesisTime="2026-09-24T00:00:00Z",
             initialProtocolVersion=14,
             miningIntervalSeconds=10,
+            miningNodeName="wallet-1",
             corePeers=["10.0.0.1:20001"],
             ports=dict(
                 coreP2P=20001,
