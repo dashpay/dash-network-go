@@ -113,6 +113,36 @@ class Registration(worker.Worker):
 
 
 class Tests(unittest.TestCase):
+    def test_activation_uses_core23_update_rpc_and_verifies_readback(self):
+        class Sporks(worker.Worker):
+            active = {"SPORK_17_QUORUM_DKG_ENABLED": False,
+                      "SPORK_19_CHAINLOCKS_ENABLED": False,
+                      "SPORK_21_QUORUM_ALL_CONNECTED": False}
+            updates = 0
+            accept = True
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "spork":
+                    assert params == ["active"], "spork is read-only in Core 23"
+                    return self.active.copy()
+                assert method == "sporkupdate" and params[1] == 0
+                self.updates += 1
+                if self.accept:
+                    self.active[params[0]] = True
+                return "success"
+
+        w = Sporks(request())
+        w.activate()
+        w.activate()
+        self.assertEqual(w.updates, 3)
+        w.accept = False
+        w.active["SPORK_19_CHAINLOCKS_ENABLED"] = False
+        with self.assertRaisesRegex(worker.Failure, "spork-not-active"):
+            w.activate()
+        del w.active["SPORK_19_CHAINLOCKS_ENABLED"]
+        with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
+            w.activate()
+
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
             q = request()

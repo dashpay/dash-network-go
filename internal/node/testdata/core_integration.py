@@ -49,6 +49,9 @@ def main():
             call("core-finalize")
             # Reload after Core restart before funding (wallet load is explicit).
             call("wallet")
+            call("activate")
+            # Exercise the live update RPC as well as readback/idempotent resume.
+            call("activate")
             q["requiredBalance"] = 4001
             call("fund")
             pair = w.rpc("bls", ["generate"])

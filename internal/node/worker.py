@@ -679,14 +679,21 @@ class Worker:
 
     def activate(self):
         self.require(self.t["role"] == "wallet", "wallet-only")
-        active = self.rpc("spork", ["active"])
-        for key in [
+        required = [
             "SPORK_17_QUORUM_DKG_ENABLED",
             "SPORK_19_CHAINLOCKS_ENABLED",
             "SPORK_21_QUORUM_ALL_CONNECTED",
-        ]:
-            if key in active and not active[key]:
-                self.rpc("spork", [key, 0])
+        ]
+        active = self.rpc("spork", ["active"])
+        self.require(all(key in active for key in required), "unsupported-spork-profile")
+        for key in required:
+            if not active[key]:
+                self.require(
+                    self.rpc("sporkupdate", [key, 0]) == "success",
+                    "spork-update-not-accepted",
+                )
+        observed = self.rpc("spork", ["active"])
+        self.require(all(observed.get(key) is True for key in required), "spork-not-active")
         return {}
 
     def mine_start(self):
