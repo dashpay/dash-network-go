@@ -258,7 +258,7 @@ func TestUpgradeLostSSHResponseResumesOnlyPendingNodeFirst(t *testing.T) {
 	f.hook = nil
 	f.remote.calls = nil
 	result, err = f.run(t, u)
-	if err != nil || result.Upgrade.Phase != "complete" {
+	if err != nil || result.Upgrade.Phase != "complete" || result.LastError != "" {
 		t.Fatal("resume failed", err)
 	}
 	for _, q := range f.remote.calls {

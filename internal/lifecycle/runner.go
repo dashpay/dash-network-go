@@ -531,6 +531,9 @@ func (e *execution) acceptHealth(health Health) error {
 	}
 	d.Phase = "network-ready"
 	d.ObservedAt = health.ObservedAt
+	// A completed recovery must not present the preceding failure as current.
+	// Failed attempts remain in their retained operation logs/checkpoints.
+	e.r.LastError = ""
 	return e.stage("ready")
 }
 func (e *execution) peers() []node.Peer {
