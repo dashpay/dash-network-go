@@ -5,6 +5,7 @@ must NOT be accepted as healthy by our worker. Disposable Docker CI only.
 """
 import base64
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -19,7 +20,8 @@ class Disposable(worker.Worker):
 def main():
     q=request();q['target']['role']='validator'
     q['target']['images']=json.loads(os.environ['PLATFORM_IMAGES'])
-    q['peers']=[dict(name=q['target']['name'],address=q['target']['peerAddress'],nodeId='a'*40,operatorPublicKey='b'*96,proTxHash='e'*64)]
+    node_id=hashlib.sha256(bytes(32)).hexdigest()[:40]
+    q['peers']=[dict(name=q['target']['name'],address=q['target']['peerAddress'],nodeId=node_id,operatorPublicKey='b'*96,proTxHash='e'*64)]
     q['genesisCoreHeight']=160
     with tempfile.TemporaryDirectory(prefix='dashnet-platform-ci-') as tmp:
         root=Path(tmp);root.chmod(0o700)
@@ -28,11 +30,11 @@ def main():
         w=Disposable(q,root,root/'lock')
         # Match the executor's Ed25519 certificate profile and loopback SAN.
         subprocess.run(['openssl','req','-new','-x509','-newkey','ed25519','-nodes','-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        w.atomic('secrets.json',dict(rpcPassword='private-ci-only',platformNodeID='a'*40,operatorPublicKey='b'*96,nodePrivateKey=base64.b64encode(bytes(64)).decode(),tlsCertificate=(root/'cert.pem').read_text(),tlsPrivateKey=(root/'key.pem').read_text()))
+        w.atomic('secrets.json',dict(rpcPassword='private-ci-only',platformNodeID=node_id,operatorPublicKey='b'*96,nodePrivateKey=base64.b64encode(bytes(64)).decode(),tlsCertificate=(root/'cert.pem').read_text(),tlsPrivateKey=(root/'key.pem').read_text()))
         w.platform_files()
         try:
             td=w.run(['docker','run','--rm','--network','none','--entrypoint','tenderdash','-v',str(root/'platform/tenderdash')+':/tenderdash',w.images['tenderdash'],'show-node-id','--home','/tenderdash']).decode().strip()
-            assert td=='a'*40, 'Tenderdash node-key readback'
+            assert td==node_id, 'Tenderdash node-key readback'
             print('Tenderdash accepts native configuration and node key.',flush=True)
             w.run(['docker','run','--rm','--network','none','--entrypoint','envoy','-v',str(root/'platform/envoy.json')+':/etc/envoy/config.json:ro','-v',str(root/'platform/tls')+':/tls:ro',w.images['gateway'],'-c','/etc/envoy/config.json','--mode','validate'])
             print('Envoy accepts native config and generated TLS identity.',flush=True)

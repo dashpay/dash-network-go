@@ -20,7 +20,12 @@ class Registration(worker.Worker):
         if method=='protx' and params[0]=='register_fund_evo':
             assert params[-1] is False and params[-2] is None
             self.prepared+=1;return 'signed-private-transaction'
-        if method=='decoderawtransaction': return dict(txid='e'*64)
+        if method=='decoderawtransaction': return dict(txid='e'*64,vout=[dict(n=0,value=4000,scriptPubKey=dict(addresses=[self.address('')]))])
+        if method=='gettxout': return dict(value=4000)
+        if method=='lockunspent':
+            assert params==[False,[dict(txid='e'*64,vout=0)],True]
+            return True
+        if method=='listlockunspent': return [dict(txid='e'*64,vout=0)]
         if method=='getrawtransaction':
             if not self.accepted: raise worker.RPCFailure(method,-5)
             return dict(confirmations=1)

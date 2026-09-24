@@ -5,6 +5,7 @@ stdout. Private identities and pre-broadcast transactions stay on the node.
 """
 import base64
 import contextlib
+from decimal import Decimal
 import fcntl
 import hashlib
 import http.client
@@ -290,7 +291,23 @@ class Worker:
         if 'sporkKey' not in secret:
             secret['sporkKey'] = self.rpc('dumpprivkey', [spork], True)
             self.atomic('secrets.json', secret)
+        # Core can restart between broadcast and the controller checkpoint. Re-lock
+        # every locally recorded collateral before any subsequent wallet funding.
+        for path in sorted((self.root / 'transactions').glob('*.json')):
+            saved = self.read(str(path.relative_to(self.root)))
+            try: self.rpc('getrawtransaction', [saved['txid'], True])
+            except RPCFailure as error:
+                if error.code == -5: continue # signed, not yet submitted
+                raise
+            self.lock_collateral(saved)
         return dict(payoutAddress=payout, sporkAddress=spork)
+
+    def lock_collateral(self, saved):
+        output = dict(txid=saved['txid'],vout=saved['collateralIndex'])
+        unspent = self.rpc('gettxout',[output['txid'],output['vout']])
+        self.require(unspent is not None and Decimal(str(unspent['value'])) == 4000, 'collateral-spent-or-changed')
+        self.require(self.rpc('lockunspent',[False,[output],True],True), 'collateral-lock-failed')
+        self.require(output in self.rpc('listlockunspent',[],True), 'collateral-lock-not-observed')
 
     def fund(self):
         self.require(self.t['role'] == 'wallet', 'wallet-only')
@@ -300,7 +317,8 @@ class Worker:
         # Mining is an explicit create-devnet action. No faucet/testnet funds are
         # used. Observe balance each retry; cap initial mining to 1,000 blocks.
         for _ in range(1000):
-            balance = int(self.rpc('getbalance', [], True))
+            locked = {(v['txid'],v['vout']) for v in self.rpc('listlockunspent',[],True)}
+            balance = int(sum((Decimal(str(v['amount'])) for v in self.rpc('listunspent',[1],True) if v['spendable'] and v.get('safe',True) and (v['txid'],v['vout']) not in locked), Decimal(0)))
             if balance >= target: return dict(balance=balance)
             self.require(self.rpc('getblockcount') < 1000, 'bootstrap-mining-limit')
             self.rpc('generatetoaddress', [1, address, 1000000])
@@ -319,7 +337,9 @@ class Worker:
             self.stage = 'registration-prepare'
             raw = self.rpc('protx', ['register_fund_evo', collateral, target['address'] + ':' + str(self.ports['coreP2P']), owner, target['operatorPublicKey'], owner, 0, self.address('dashnet:payout'), target['nodeId'], self.ports['platformP2P'], self.ports['gateway'], None, False], True)
             decoded = self.rpc('decoderawtransaction', [raw])
-            saved = dict(target=target, txid=decoded['txid'], hex=raw)
+            outputs = [v['n'] for v in decoded['vout'] if Decimal(str(v['value'])) == 4000 and collateral in v['scriptPubKey'].get('addresses',[v['scriptPubKey'].get('address')])]
+            self.require(len(outputs)==1, 'ambiguous-collateral-output')
+            saved = dict(target=target, txid=decoded['txid'], hex=raw, collateralIndex=outputs[0])
             # Durable signed bytes BEFORE submission. A lost response or runner
             # can never cause a second registration/funding transaction.
             self.atomic(path, saved)
@@ -331,6 +351,7 @@ class Worker:
             returned = self.rpc('sendrawtransaction', [saved['hex']])
             self.require(returned == saved['txid'], 'registration-txid-mismatch')
             tx = self.rpc('getrawtransaction', [saved['txid'], True])
+        self.lock_collateral(saved)
         required = self.q.get('requiredConfirmations', 1)
         self.require(1 <= required <= 6, 'registration-confirmations')
         for _ in range(required + 1):
@@ -491,6 +512,9 @@ class Worker:
         # Only stop owned containers, preserving all volumes and identities.
         for name in ['miner','gateway','dapi','tenderdash','drive','core']:
             if self.inspect_container(name): self.docker('stop','-t','120',self.container_name(name),timeout=150)
+        for name in ['miner','gateway','dapi','tenderdash','drive','core']:
+            value = self.inspect_container(name)
+            self.require(value is None or not value['State']['Running'], 'stop-not-observed')
 
 def main():
     worker = None

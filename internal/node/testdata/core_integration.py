@@ -43,10 +43,16 @@ def main():
             assert registration['proTxHash']==again['proTxHash']
             assert saved==(root/'transactions/validator-1.json').read_bytes()
             assert balance==w.rpc('getbalance',[],True)
+            assert w.rpc('listlockunspent',[],True), 'Collateral was not locked'
             resumed=call('core-start')['core']
             assert first['genesis']==resumed['genesis']
             call('stop');call('core-start');call('wallet')
+            assert w.rpc('listlockunspent',[],True), 'Collateral lock lost on restart'
             assert call('register')['proTxHash']==registration['proTxHash']
+            q['registration']=dict(name='validator-2',address='10.0.0.3',operatorPublicKey=w.rpc('bls',['generate'])['public'],nodeId='b'*40)
+            call('fund');call('register')
+            assert w.rpc('protx',['info',registration['proTxHash']])['proTxHash']==registration['proTxHash']
+            assert len(w.rpc('listlockunspent',[],True))==2, 'Second registration spent first collateral'
             print('Real Core: config, wallet, signed EvoNode registration, idempotent replay, stop/resume passed.',flush=True)
         finally:
             for name in ['core','miner']:
