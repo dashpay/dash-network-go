@@ -3,7 +3,9 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/pem"
 	"io"
@@ -41,7 +43,7 @@ func key(t *testing.T) (ssh.Signer, string) {
 	}
 	return signer, path
 }
-func server(t *testing.T, host, client ssh.Signer, handle func(ssh.Channel, string)) (Endpoint, *atomic.Int32) {
+func server(t *testing.T, host, client ssh.Signer, handle func(ssh.Channel, string), extraHosts ...ssh.Signer) (Endpoint, *atomic.Int32) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,6 +58,9 @@ func server(t *testing.T, host, client ssh.Signer, handle func(ssh.Channel, stri
 		return nil, nil
 	}}
 	config.AddHostKey(host)
+	for _, extra := range extraHosts {
+		config.AddHostKey(extra)
+	}
 	var calls atomic.Int32
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -154,6 +159,37 @@ func TestSSHRequiresInstanceScopedTrust(t *testing.T) {
 				}
 			} else if err == nil || calls.Load() != 0 {
 				t.Fatal("untrusted SSH executed", err)
+			}
+		})
+	}
+}
+
+func TestSSHNegotiatesOnlyPinnedHostKeyAlgorithms(t *testing.T) {
+	ed, _ := key(t)
+	ecdsaPrivate, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec, err := ssh.NewSignerFromKey(ecdsaPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, path := key(t)
+	for _, pinned := range []ssh.Signer{ed, ec} {
+		t.Run(pinned.PublicKey().Type(), func(t *testing.T) {
+			e, calls := server(t, ec, client, func(ch ssh.Channel, command string) {
+				_, _ = ch.Write([]byte("verified"))
+				exit(ch, 0)
+			}, ed)
+			remote, err := NewSSH("ubuntu", path, knownFile(t, e, pinned.PublicKey(), "trusted"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			out, err := remote.Run(ctx, e, "safe-command", "")
+			if err != nil || string(out) != "verified" || calls.Load() != 1 {
+				t.Fatal("server with multiple keys must negotiate the independently pinned type", err)
 			}
 		})
 	}

@@ -24,7 +24,10 @@ type Endpoint struct {
 	HostAlias string
 }
 
-type SSH struct{ config *ssh.ClientConfig }
+type SSH struct {
+	config     *ssh.ClientConfig
+	trustProbe ssh.PublicKey
+}
 
 // NewSSH never learns keys from the connection it is authenticating. The
 // operator supplies a separately verified known_hosts file; missing/changed
@@ -54,7 +57,47 @@ func NewSSH(user, keyPath, hostsPath string) (*SSH, error) {
 	if err != nil {
 		return nil, errors.New("cannot load trusted SSH known_hosts file")
 	}
-	return &SSH{config: &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: check, Timeout: 15 * time.Second}}, nil
+	return &SSH{config: &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: check, Timeout: 15 * time.Second}, trustProbe: signer.PublicKey()}, nil
+}
+
+// Go's SSH defaults may select an unpinned ECDSA/RSA key before the separately
+// pinned Ed25519 key. Negotiate only types present for this exact instance alias.
+// The normal callback still verifies the actual server key bytes during the
+// handshake. KeyError.Want is the known_hosts parser's matched key set, including
+// hashed aliases; no keys are learned from the network or copied from other hosts.
+func (s *SSH) hostAlgorithms(alias string) ([]string, error) {
+	var keys []ssh.PublicKey
+	err := s.config.HostKeyCallback(alias, hostAddress(alias), s.trustProbe)
+	if err == nil {
+		keys = append(keys, s.trustProbe)
+	} else {
+		var mismatch *knownhosts.KeyError
+		if !errors.As(err, &mismatch) {
+			return nil, errors.New("cannot resolve independently trusted instance host keys")
+		}
+		for _, key := range mismatch.Want {
+			keys = append(keys, key.Key)
+		}
+	}
+	allowed := map[string]bool{}
+	for _, key := range keys {
+		if key.Type() == ssh.KeyAlgoRSA {
+			allowed[ssh.KeyAlgoRSASHA256] = true
+			allowed[ssh.KeyAlgoRSASHA512] = true
+		} else {
+			allowed[key.Type()] = true
+		}
+	}
+	var algorithms []string
+	for _, algorithm := range ssh.SupportedAlgorithms().HostKeys {
+		if allowed[algorithm] {
+			algorithms = append(algorithms, algorithm)
+		}
+	}
+	if len(algorithms) == 0 {
+		return nil, errors.New("no supported host key pinned for this instance alias")
+	}
+	return algorithms, nil
 }
 
 type boundedOutput struct {
@@ -105,6 +148,10 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	// silently substitute for the operator's instance-scoped trust pin.
 	alias := net.JoinHostPort(e.HostAlias, strconv.Itoa(e.Port))
 	config := *s.config
+	config.HostKeyAlgorithms, err = s.hostAlgorithms(alias)
+	if err != nil {
+		return nil, err
+	}
 	config.HostKeyCallback = func(hostname string, _ net.Addr, key ssh.PublicKey) error {
 		return s.config.HostKeyCallback(hostname, hostAddress(alias), key)
 	}
