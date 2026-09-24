@@ -242,6 +242,10 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 // Bound concurrency while checkpointing on one goroutine. Every scheduled target
 // reports a result; one failed host never silently drops the remainder.
 func (e *execution) each(targets []node.Target, action string, prepare func(*node.Request), accept func(node.Target, node.Observation) error) error {
+	type job struct {
+		t node.Target
+		q node.Request
+	}
 	type reply struct {
 		t   node.Target
 		o   node.Observation
@@ -249,26 +253,32 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 	}
 	batchCtx, cancel := context.WithCancel(e.ctx)
 	defer cancel()
-	work := make(chan node.Target)
+	// Capture immutable intent before any checkpoint can change the journal.
+	// Workers must not copy/read e.r while the result loop updates it.
+	jobs := make([]job, 0, len(targets))
+	for _, t := range targets {
+		q := runtimeRequest(e.p, e.r, t, action)
+		if prepare != nil {
+			prepare(&q)
+		}
+		jobs = append(jobs, job{t, q})
+	}
+	work := make(chan job)
 	results := make(chan reply, len(targets))
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range work {
-				q := runtimeRequest(e.p, e.r, t, action)
-				if prepare != nil {
-					prepare(&q)
-				}
-				o, err := e.runner.Remote.Call(batchCtx, q)
-				results <- reply{t, o, err}
+			for j := range work {
+				o, err := e.runner.Remote.Call(batchCtx, j.q)
+				results <- reply{j.t, o, err}
 			}
 		}()
 	}
 	go func() {
-		for _, t := range targets {
-			work <- t
+		for _, j := range jobs {
+			work <- j
 		}
 		close(work)
 		wg.Wait()

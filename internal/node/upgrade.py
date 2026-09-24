@@ -54,7 +54,8 @@ class UpgradeWorker(Worker):
             same = marker and marker.get("id") == change["id"]
             if same:
                 self.require(marker["from"] == before and marker["to"] == after
-                             and marker["preserve"] == change["preserve"],
+                             and marker["preserve"] == change["preserve"]
+                             and marker.get("phase") in ["applying", "applied"],
                              "upgrade-marker-drift")
             else:
                 self.require((marker is None and not change.get("previousId"))
@@ -75,6 +76,12 @@ class UpgradeWorker(Worker):
                                  "upgrade-unexpected-image")
             for service in desired["services"]:
                 value = self.inspect_container(service)
+                # Compose can remove an old container before replacement fails.
+                # Only this exact unfinished, journaled image change may repair
+                # that absence. Missing unrelated/applied services remain drift.
+                if value is None and same and marker["phase"] == "applying" \
+                        and before[service] != after[service]:
+                    continue
                 self.require(value is not None, "upgrade-missing-service")
                 allowed = [before[service], after[service]] if same else [before[service]]
                 matches = False

@@ -89,6 +89,12 @@ is not yet an automated abandon/rebase/rollback or emergency full-fleet stop
 for a partially applied upgrade. A failed live version change is not "supported"
 merely because its images were pulled.
 
+If Compose removed a selected old container but failed before creating its
+replacement, the exact unfinished host marker permits recreating that selected
+service on resume. Missing unselected services, a missing container after a
+completed host rollout, or absent/mismatched markers are treated as drift—not as
+permission to recreate arbitrary containers.
+
 ## Actions
 
 The protected `Operate managed devnet` workflow supports `upgrade-plan` and

@@ -34,6 +34,7 @@ class Fixture(Upgrade):
         super().__init__(q,root,root/'lock')
         self.commands=[]
         self.lost=False
+        self.partial=False
         self.accessed=False
         self.atomic('deployment.json',dict(planId=self.c['planId']))
         services={k:self.service(k,before[k]) for k in self.containers}
@@ -65,8 +66,14 @@ class Fixture(Upgrade):
             assert self.read('upgrade.json')['phase'] in ['applying','applied']
             changed=args[args.index('never')+1:]
             desired=self.read('platform/compose.json')['services']
+            if self.partial:
+                self.partial=False
+                del self.containers[changed[0]]
+                raise worker.Failure('replacement-create-failed')
             for k in changed:
                 image='image-'+desired[k]['image']
+                if k not in self.containers:
+                    self.containers[k]=dict(Image='',State=dict(Running=True),RestartCount=0)
                 if self.containers[k]['Image']!=image:
                     self.containers[k]['Image']=image
                     self.containers[k]['Id']=hashlib.sha256(image.encode()).hexdigest()
@@ -126,6 +133,31 @@ class UpgradeTests(unittest.TestCase):
                 with self.assertRaises(worker.Failure):w.execute()
                 self.assertFalse(any('up' in c for c in w.commands))
                 self.assertEqual(w.read('platform/compose.json'),w.original)
+
+    def test_missing_container_recovery_requires_exact_inflight_selected_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w=Fixture(Path(tmp));w.partial=True
+            with self.assertRaisesRegex(worker.Failure,'replacement-create-failed'):w.execute()
+            self.assertNotIn('tenderdash',w.containers)
+            self.assertEqual(w.read('upgrade.json')['phase'],'applying')
+            w.q['action']='upgrade-stage';w.execute()
+            self.assertNotIn('tenderdash',w.containers)
+            w.q['action']='upgrade-apply';w.execute()
+            self.assertEqual(w.read('upgrade.json')['phase'],'applied')
+            self.assertIn('tenderdash',w.containers)
+            del w.containers['tenderdash']
+            with self.assertRaisesRegex(worker.Failure,'upgrade-missing-service'):w.execute()
+        for service in ['drive','tenderdash']:
+            with self.subTest(service=service),tempfile.TemporaryDirectory() as tmp:
+                w=Fixture(Path(tmp))
+                del w.containers[service]
+                with self.assertRaisesRegex(worker.Failure,'upgrade-missing-service'):w.execute()
+                self.assertIsNone(w.read('upgrade.json'))
+        with tempfile.TemporaryDirectory() as tmp:
+            w=Fixture(Path(tmp));w.partial=True
+            with self.assertRaises(worker.Failure):w.execute()
+            del w.containers['drive']
+            with self.assertRaisesRegex(worker.Failure,'upgrade-missing-service'):w.execute()
 
     def test_upgrade_entrypoint_cannot_run_arbitrary_lifecycle_actions(self):
         with tempfile.TemporaryDirectory() as tmp:

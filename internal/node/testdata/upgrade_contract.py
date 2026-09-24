@@ -16,6 +16,7 @@ from test_upgrade import Upgrade
 
 class Disposable(Upgrade):
     lose_after_apply = False
+    remove_before_apply = False
 
     def verify_instance(self):
         self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
@@ -28,6 +29,10 @@ class Disposable(Upgrade):
                     genesis='c'*64)
 
     def docker(self,*args,timeout=120):
+        if self.remove_before_apply and args[0]=='compose' and 'up' in args:
+            self.remove_before_apply=False
+            super().docker('rm','-f',self.container_name('drive'))
+            raise worker.Failure('simulated-replacement-create-failure')
         result=super().docker(*args,timeout=timeout)
         if self.lose_after_apply and args[0]=='compose' and 'up' in args:
             self.lose_after_apply=False
@@ -85,6 +90,16 @@ def main():
             for k in ['drive','dapi','gateway','helper']:after[k]=second
             q['target']['images']=[dict(component=k,pinned=v) for k,v in before.items()]
             q['upgrade']=dict(id='e'*64,previousId='d'*64,**{'from':before},to=after,preserve=current)
+            w.remove_before_apply=True
+            try:w.execute()
+            except worker.Failure as e:assert str(e)=='simulated-replacement-create-failure'
+            else:raise AssertionError('expected failure after removing old selected container')
+            assert w.inspect_container('drive') is None
+            assert w.read('upgrade.json')['phase']=='applying'
+            w=Disposable(q,root,root/'lock')
+            q['action']='upgrade-stage';w.execute()
+            assert w.inspect_container('drive') is None,'staging started a service'
+            q['action']='upgrade-apply'
             w.lose_after_apply=True
             try:w.execute()
             except worker.Failure as e:assert str(e)=='simulated-lost-apply-response'
