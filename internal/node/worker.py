@@ -317,7 +317,7 @@ class Worker:
             self.require(saved['target'] == target, 'registration-intent-changed')
         else:
             self.stage = 'registration-prepare'
-            raw = self.rpc('protx', ['register_fund_evo', collateral, target['address'] + ':' + str(self.ports['coreP2P']), owner, target['operatorPublicKey'], owner, 0, self.address('dashnet:payout'), target['nodeId'], self.ports['platformP2P'], self.ports['gateway'], '', False], True)
+            raw = self.rpc('protx', ['register_fund_evo', collateral, target['address'] + ':' + str(self.ports['coreP2P']), owner, target['operatorPublicKey'], owner, 0, self.address('dashnet:payout'), target['nodeId'], self.ports['platformP2P'], self.ports['gateway'], None, False], True)
             decoded = self.rpc('decoderawtransaction', [raw])
             saved = dict(target=target, txid=decoded['txid'], hex=raw)
             # Durable signed bytes BEFORE submission. A lost response or runner
@@ -409,8 +409,8 @@ class Worker:
         environment = dict(CHAIN_ID=self.c['platformChainId'], NETWORK='devnet', DB_PATH='/db', EPOCH_TIME_LENGTH_S='3600', ABCI_CONSENSUS_BIND_ADDRESS='tcp://127.0.0.1:' + str(p['driveABCI']), GRPC_BIND_ADDRESS='127.0.0.1:' + str(p['driveGRPC']), TOKIO_CONSOLE_ENABLED='false', GROVEDB_VISUALIZER_ENABLED='false', LOG_LEVEL='info')
         for prefix in ['CORE_CONSENSUS','CORE_CHECK_TX']:
             environment.update({prefix + '_JSON_RPC_USERNAME':'dashnet',prefix + '_JSON_RPC_PASSWORD':secret['rpcPassword'],prefix + '_JSON_RPC_HOST':'127.0.0.1',prefix + '_JSON_RPC_PORT':str(p['coreRPC'])})
-        for prefix, kind, window, signers, rotation in [('VALIDATOR_SET',107,24,4,False),('CHAIN_LOCK',101,24,4,False),('INSTANT_LOCK',105,48,2,True)]:
-            environment.update({prefix+'_QUORUM_TYPE':str(kind),prefix+'_QUORUM_WINDOW':str(window),prefix+'_QUORUM_ACTIVE_SIGNERS':str(signers),prefix+'_QUORUM_ROTATION':str(rotation).lower()})
+        for prefix, kind, size, window, signers, rotation in [('VALIDATOR_SET',107,12,24,4,False),('CHAIN_LOCK',101,12,24,4,False),('INSTANT_LOCK',105,8,48,2,True)]:
+            environment.update({prefix+'_QUORUM_SIZE':str(size),prefix+'_QUORUM_TYPE':str(kind),prefix+'_QUORUM_WINDOW':str(window),prefix+'_QUORUM_ACTIVE_SIGNERS':str(signers),prefix+'_QUORUM_ROTATION':str(rotation).lower()})
         drive = self.service('drive',self.images['drive'])
         drive.update(environment=environment,volumes=[str(self.root / 'platform/drive') + ':/db'],stop_grace_period='120s')
         td = self.service('tenderdash',self.images['tenderdash'])

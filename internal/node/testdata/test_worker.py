@@ -18,7 +18,7 @@ class Registration(worker.Worker):
     def address(self,label): return 'y'+'1'*33
     def rpc(self,method,params=None,wallet=False):
         if method=='protx' and params[0]=='register_fund_evo':
-            assert params[-1] is False
+            assert params[-1] is False and params[-2] is None
             self.prepared+=1;return 'signed-private-transaction'
         if method=='decoderawtransaction': return dict(txid='e'*64)
         if method=='getrawtransaction':
