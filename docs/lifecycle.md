@@ -152,8 +152,11 @@ dashnet stop --plan out/deployment.json --confirm EXACT_DEPLOYMENT_ID \
 ```
 
 Stop is disruptive and explicit. It verifies every target and stopped-container
-readback, preserves all disks/identities, and **does not terminate EC2 or stop
+readback, stops the mining host before withdrawing validators, preserves all
+disks/identities, and **does not terminate EC2 or stop
 billing**. Resume using `deploy`; there is no implicit reset, prune or rollback.
+If the mining host cannot be verified stopped, other hosts are not stopped by
+that invocation; inspect the unresolved target before retrying.
 There is no destroy/cleanup executor or existing-state upgrade executor in this
 milestone. Do not use this create profile to upgrade managed testnet or live
 legacy networks.

@@ -132,6 +132,11 @@ runner claim. A hard kill or ambiguous DynamoDB response can leave the claim.
 Claims have **no TTL or automatic stealing**: timing out is not proof a process
 or in-flight AWS request has stopped.
 
+Checkpoint retries are idempotent only for the exact same plan, current owner,
+revision and serialized payload. A delayed retry cannot overwrite a later
+revision, and different data at an accepted revision is refused. This handles a
+lost write acknowledgement without weakening the persistent runner claim.
+
 1. Inspect `dashnet operation` and identify the exact `owner` (also printed to
    stderr when the invocation starts).
 2. Stop the old terminal process / GitHub runner and verify it cannot resume.
