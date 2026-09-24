@@ -175,6 +175,45 @@ func TestAllTargetsPreflightBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestStopFreezesMiningBeforeWithdrawingValidators(t *testing.T) {
+	for _, minerFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(minerFailure), func(t *testing.T) {
+			p, r, _, f := setup(t)
+			if _, err := execute(t, p, r); err != nil {
+				t.Fatal(err)
+			}
+			minerStopped, othersStopped := false, 0
+			f.before = func(q node.Request) error {
+				if q.Action != "stop" {
+					return nil
+				}
+				if q.Target.Name == p.Miner().Name {
+					if minerFailure {
+						return errors.New("miner unreachable")
+					}
+					minerStopped = true
+					return nil
+				}
+				if !minerStopped {
+					t.Error("validator stopped while miner could still advance DKG")
+				}
+				othersStopped++
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := r.Execute(ctx, p, true)
+			if minerFailure {
+				if err == nil || othersStopped != 0 {
+					t.Fatal("continued shutdown after unverified miner stop", err)
+				}
+			} else if err != nil || !minerStopped || othersStopped != len(p.Targets)-1 {
+				t.Fatal("incomplete ordered stop", err)
+			}
+		})
+	}
+}
+
 func TestQuorumWaitExplainsBlockingNode(t *testing.T) {
 	p, r, _, f := setup(t)
 	name := p.Validators()[3].Name

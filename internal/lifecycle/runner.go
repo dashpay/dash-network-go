@@ -181,7 +181,19 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 		if err = e.stage("stopping"); err != nil {
 			return
 		}
-		if err = e.each(p.Targets, "stop", nil, nil); err != nil {
+		// Freeze block production before withdrawing validators. Otherwise a
+		// wallet at the end of the target list can keep mining DKG rounds while
+		// the earlier batches are intentionally offline.
+		if err = e.each([]node.Target{p.Miner()}, "stop", nil, nil); err != nil {
+			return
+		}
+		var remaining []node.Target
+		for _, t := range p.Targets {
+			if t.Name != p.Miner().Name {
+				remaining = append(remaining, t)
+			}
+		}
+		if err = e.each(remaining, "stop", nil, nil); err != nil {
 			return
 		}
 		e.r.Deployment.Phase = "stopped"
