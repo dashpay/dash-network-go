@@ -23,7 +23,9 @@ example are placeholders. Keep the real definition and plan private.
   an IPv6-enabled subnet can still assign IPv6. Security groups remain authoritative.
 - One exact AMI **and owner account** per requested architecture. The CLI checks
   architecture, HVM/Linux/EBS, availability, root size, and absence of marketplace
-  product codes/extra disks. These checks do not audit the AMI's content. Select a
+  product codes/extra EBS disks. Canonical's ephemeral instance-store mappings are
+  allowed; they do not allocate extra EBS volumes. These checks do not audit the
+  AMI's content. Select a
   trusted image; it will boot as supplied, without user-data or an IAM profile.
 - Explicit instance types/counts, at most 100 instances. No capacity or exact cost
   guarantee. The footprint summary lists instance count, total root storage, and

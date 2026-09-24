@@ -41,6 +41,7 @@ Usage:
   dashnet bootstrap --plan bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID
                     --ssh-key PATH --known-hosts PATH [--profile name]
                     [--timeout 30m] [--out hosts-ready.json]
+  dashnet host-trust --bootstrap-plan bootstrap-plan.json --out known_hosts [--profile name]
   dashnet deployment-plan --bootstrap-plan bootstrap-plan.json --protocol VERSION --out deployment.json
   dashnet deploy --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet doctor --plan deployment.json --ssh-key PATH --known-hosts PATH [--timeout 3m]
@@ -70,6 +71,8 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return err
 	}
 	switch args[0] {
+	case "host-trust":
+		return runTrust(ctx, args, out, stderr)
 	case "deployment-plan", "deploy", "doctor", "stop":
 		return runLifecycle(ctx, args, out, stderr, version)
 	case "bootstrap-plan", "bootstrap":

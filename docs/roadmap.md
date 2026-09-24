@@ -45,8 +45,11 @@ Remaining:
   the remaining network infrastructure beyond existing-VPC EC2 placement.
 - Extend the single-stage journal into reviewed lifecycle transitions/history;
   implement an evidence-backed repair path for unobserved/rejected launch intent.
-- Automate trusted host-key enrollment; prove the implemented chain lifecycle
-  on authorized real infrastructure, including quorum formation and Platform.
+- Authenticated EC2-console host-key enrollment is implemented with scope,
+  freshness and duplicate-key checks; its real-cloud proof is part of the
+  [multi-validator acceptance run](validation.md).
+- Prove the implemented chain lifecycle on authorized real infrastructure,
+  including quorum formation and Platform.
 - Implement account/network-scoped cleanup and interrupted-operation recovery.
 - Prove create, resume, and destroy on an explicitly authorized disposable devnet.
   Preserve a record for every intended target, including unreachable ones.
@@ -66,6 +69,8 @@ Remaining:
 
 - Multi-network read-only views fed by independent health collection and durable
   operation events; extend beyond validators to the managed service topology.
+- Import existing testnet and Moutai for observation; no implicit adoption,
+  deployment, reset or upgrade of those networks.
 - Public showcase pages and authenticated, authorized operator views.
 - GitHub run links first; custom deployment/upgrade/resume forms after operation
   contracts are proven. The UI dispatches the same workflows, not a second engine.

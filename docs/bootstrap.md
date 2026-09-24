@@ -21,8 +21,9 @@ masternodes, open ports, or reset any data. `hosts-ready` is not network health.
 - Supply an independently verified `known_hosts` file. Obtain each host's public
   key through a trusted channel such as the authenticated AWS serial console
   (where available) or an established host-key provisioning process. A raw
-  `ssh-keyscan` result alone is **not** authentication. Host trust enrollment is
-  currently an operator step, not an automatically implemented workflow.
+  `ssh-keyscan` result alone is **not** authentication. The read-only `host-trust`
+  command can collect cloud-init's Ed25519 public keys through authenticated
+  `ec2:GetConsoleOutput`. Manual independent verification remains a fallback.
 
 Host keys are addressed by an immutable alias, not the instance's changing IP:
 
@@ -46,6 +47,9 @@ dashnet bootstrap-plan --compute-plan out/lab-ec2-plan.json \
   --out out/lab-bootstrap-plan.json
 
 # Review the bootstrap plan ID and per-role image digests, then execute.
+dashnet host-trust --bootstrap-plan out/lab-bootstrap-plan.json \
+  --profile YOUR_AWS_PROFILE --out /secure/lab-known-hosts
+
 dashnet bootstrap --plan out/lab-bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID \
   --ssh-key /secure/deployment-key --known-hosts /secure/lab-known-hosts \
   --profile YOUR_AWS_PROFILE --timeout 30m --out out/lab-hosts-ready.json
@@ -53,6 +57,15 @@ dashnet bootstrap --plan out/lab-bootstrap-plan.json --confirm BOOTSTRAP_PLAN_ID
 # The same network operation record contains both compute and bootstrap progress.
 dashnet operation --plan out/lab-ec2-plan.json --profile YOUR_AWS_PROFILE
 ```
+
+`host-trust` requires an idle operation and checks account, ownership, recorded
+instance IDs and launch timestamps. It rejects missing/stale/ambiguous console
+records, incomplete public-key blocks, cloned host keys, and changes during
+collection. All targets must pass before a mode-0600 instance-scoped trust file
+is atomically published. Existing trust is never overwritten. No SSH connection,
+AWS write, journal update or raw console output is produced. Console availability
+depends on the image/cloud-init output; wait and retry or use an independently
+verified file if the public keys are unavailable. Do not relax host-key checking.
 
 Repeat `bootstrap` with the **same plan and original CLI binary** to resume. Use a
 new output filename, or omit `--out`. Recipe changes invalidate old bootstrap

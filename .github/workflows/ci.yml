@@ -44,7 +44,7 @@ jobs:
           bin/dashnet validate --network examples/testnet.yaml
           bin/dashnet validate --network examples/devnet-compute.yaml
           bin/dashnet validate --network examples/devnet-lifecycle.yaml
-          for command in deployment-plan deploy doctor stop; do
+          for command in deployment-plan deploy doctor stop host-trust; do
             if bin/dashnet "$command"; then
               echo "$command accepted missing explicit intent"
               exit 1
