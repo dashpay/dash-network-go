@@ -87,7 +87,9 @@ jobs:
           set -euo pipefail
           docker pull dashpay/dashd:23
           image=$(docker image inspect dashpay/dashd:23 --format '{{index .RepoDigests 0}}')
-          sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
+          docker pull dashpay/drive:4.2.0-beta.3
+          drive=$(docker image inspect dashpay/drive:4.2.0-beta.3 --format '{{index .RepoDigests 0}}')
+          sudo env CORE_IMAGE="$image" DRIVE_IMAGE="$drive" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
 
   platform-contract:
     runs-on: ubuntu-latest
