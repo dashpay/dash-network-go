@@ -82,6 +82,26 @@ jobs:
           image=$(docker image inspect dashpay/dashd:23 --format '{{index .RepoDigests 0}}')
           sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
 
+  platform-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify native Tenderdash, Envoy TLS and DAPI gRPC contracts
+        run: |
+          set -euo pipefail
+          images='[]'
+          for spec in 'tenderdash=dashpay/tenderdash:1.8.0' 'gateway=dashpay/envoy:1.39.0-impr.1' 'dapi=dashpay/rs-dapi:4.2.0-beta.3' 'drive=dashpay/drive:4.2.0-beta.3'; do
+            component=${spec%%=*}
+            tag=${spec#*=}
+            docker pull "$tag"
+            pinned=$(docker image inspect "$tag" --format '{{index .RepoDigests 0}}')
+            images=$(jq -c --arg component "$component" --arg pinned "$pinned" '. + [{component:$component,pinned:$pinned}]' <<< "$images")
+          done
+          sudo env PLATFORM_IMAGES="$images" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/platform_contract.py
+
   binaries:
     runs-on: ubuntu-latest
     timeout-minutes: 20
