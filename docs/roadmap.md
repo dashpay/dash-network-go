@@ -24,6 +24,11 @@ Implemented first slice (not live AWS-proved):
   conditional recovery, and reconciliation after lost responses/checkpoints.
 - EC2-running verification for every target; application health stays unknown.
 - Failure-path tests and a human provisioning/recovery runbook.
+- Authenticated SSH transport, instance-scoped host trust, IMDSv2 identity checks,
+  Ubuntu 24.04 Docker/Compose preparation and role-specific immutable image pulls.
+- Additive bootstrap journal checkpoints, host-side locks, all-host preflight and
+  verified interrupted-run resume; no service starts. Loopback SSH and disposable
+  recipe integration tests plus a human bootstrap runbook. Not live-node proved.
 
 Remaining:
 
@@ -31,7 +36,8 @@ Remaining:
   the remaining network infrastructure beyond existing-VPC EC2 placement.
 - Extend the single-stage journal into reviewed lifecycle transitions/history;
   implement an evidence-backed repair path for unobserved/rejected launch intent.
-- Implement node transport/configuration, Core start, funding/registration,
+- Automate trusted host-key enrollment and implement node configuration, Core
+  start, funding/registration,
   Platform start, and health checks. Retain published container packaging initially.
 - Implement account/network-scoped cleanup and interrupted-operation recovery.
 - Prove create, resume, and destroy on an explicitly authorized disposable devnet.

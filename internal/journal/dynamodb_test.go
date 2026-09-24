@@ -268,3 +268,29 @@ func TestDelayedSameOwnerCheckpointCannotRegressProgress(t *testing.T) {
 		t.Fatal("newer progress was lost", err)
 	}
 }
+
+func TestBootstrapCheckpointRoundTripAndPartialReadinessRefusal(t *testing.T) {
+	d, _, p := setup(t)
+	ctx := context.Background()
+	r, err := d.Acquire(ctx, p, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Bootstrap = &provision.BootstrapProgress{PlanID: p.ID, Phase: "interrupted", Nodes: map[string]provision.BootstrapNode{}}
+	for _, target := range p.Targets {
+		r.Bootstrap.Nodes[target.Name] = provision.BootstrapNode{Phase: "unknown"}
+	}
+	r.Revision++
+	if err = d.Save(ctx, r, "bootstrap"); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := d.Read(ctx, p)
+	if err != nil || current.Bootstrap.PlanID != p.ID || len(current.Bootstrap.Nodes) != len(p.Targets) {
+		t.Fatal("bootstrap journal lost", err)
+	}
+	r.Bootstrap.Phase = "hosts-ready"
+	r.Revision++
+	if err = d.Save(ctx, r, "bootstrap"); err == nil {
+		t.Fatal("partial readiness persisted as success")
+	}
+}
