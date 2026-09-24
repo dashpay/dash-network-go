@@ -50,6 +50,11 @@ startup can be distinguished.
 6. Run independent `doctor` checks after deployment, including common-height
    Platform block agreement and functioning TLS/HTTP2/DAPI with live backends.
    Retain a row for each of the 14 targets; unreachable is unknown, not omitted.
+   The default observation gap is 15 seconds. For this profile's 50-second
+   proposal timeouts, also record a longer check with
+   `--observation-window 90s --timeout 5m`. The report records the requested
+   interval. This does not waive stalled-chain, identity, restart, quorum or
+   block-agreement failures; retain short-window failures and investigate them.
 7. Rehearse controller interruption/resume using the same binary and plans.
    Compare instance IDs, validator identities, genesis, signed registration
    transaction IDs and collateral before/after; no duplicate launch or payment.

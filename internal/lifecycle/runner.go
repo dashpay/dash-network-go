@@ -22,6 +22,9 @@ type Runner struct {
 	Remote         node.Backend
 	Owner, Version string
 	Progress       func(string)
+	// ObservationWindow is the minimum interval between health samples. Zero
+	// retains the default; it never relaxes identity, quorum or agreement gates.
+	ObservationWindow time.Duration
 	// Tests inject a clock wait; production uses context-aware timers.
 	Wait func(context.Context) error
 }

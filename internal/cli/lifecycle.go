@@ -28,11 +28,12 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
-	var timeout time.Duration
+	var timeout, observationWindow time.Duration
 	var protocol uint
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
+	fs.DurationVar(&observationWindow, "observation-window", 15*time.Second, "minimum interval between health samples; allow for consensus round timeouts")
 	if args[0] == "deployment-plan" {
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
@@ -52,6 +53,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	if fs.NArg() != 0 || timeout <= 0 {
 		return errors.New("use named flags and a positive timeout")
+	}
+	if observationWindow <= 0 || ((args[0] == "doctor" || args[0] == "deploy") && observationWindow >= timeout) {
+		return errors.New("--observation-window must be positive and leave time for probes inside --timeout")
 	}
 	var b bootstrap.Plan
 	var p lifecycle.Plan
@@ -141,6 +145,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		return err
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
+	runner.ObservationWindow = observationWindow
 	if args[0] == "doctor" {
 		if owner != "" {
 			fmt.Fprintln(stderr, "Network has an active runner; this is a concurrent read-only observation, not permission to mutate.")

@@ -19,12 +19,13 @@ type HealthNode struct {
 	Problems       []string `json:"problems"`
 }
 type Health struct {
-	Network    string                `json:"network"`
-	PlanID     string                `json:"planId"`
-	ObservedAt time.Time             `json:"observedAt"`
-	Healthy    bool                  `json:"healthy"`
-	Nodes      map[string]HealthNode `json:"nodes"`
-	Problems   []string              `json:"problems"`
+	Network           string                `json:"network"`
+	PlanID            string                `json:"planId"`
+	ObservedAt        time.Time             `json:"observedAt"`
+	Healthy           bool                  `json:"healthy"`
+	Nodes             map[string]HealthNode `json:"nodes"`
+	Problems          []string              `json:"problems"`
+	ObservationWindow string                `json:"observationWindow"`
 }
 type samples struct {
 	core     *node.Core
@@ -80,6 +81,14 @@ func (r Runner) sample(ctx context.Context, p Plan, reference int64) map[string]
 // restart, funding or configuration change is allowed through this path.
 func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (Health, error) {
 	h := Health{Network: p.Bootstrap.Compute.Network.Metadata.Name, PlanID: p.ID, Nodes: map[string]HealthNode{}, Problems: []string{}}
+	window := r.ObservationWindow
+	if window == 0 {
+		window = 15 * time.Second
+	}
+	if window < 0 {
+		return h, errors.New("health observation window must be positive")
+	}
+	h.ObservationWindow = window.String()
 	if err := p.Validate(); err != nil {
 		return h, err
 	}
@@ -113,7 +122,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 			return h, err
 		}
 	} else {
-		timer := time.NewTimer(15 * time.Second)
+		timer := time.NewTimer(window)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():

@@ -435,3 +435,32 @@ func TestLostCheckpointCancelsWorkAndRetainsRecoveryState(t *testing.T) {
 		t.Fatal("cannot recover original plan", err)
 	}
 }
+
+func TestDoctorObservationWindowAndCancellation(t *testing.T) {
+	p, r, s, f := setup(t)
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	r.Wait = nil
+	r.ObservationWindow = 20 * time.Millisecond
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	health, err := r.Doctor(ctx, p, s.record)
+	if err != nil || !health.Healthy || time.Since(start) < r.ObservationWindow || health.ObservationWindow != "20ms" {
+		t.Fatal("observation interval not honored", health, err)
+	}
+	r.ObservationWindow = time.Minute
+	f.calls = nil
+	short, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	health, err = r.Doctor(short, p, s.record)
+	if !errors.Is(err, context.DeadlineExceeded) || health.Healthy {
+		t.Fatal("cancelled observation became healthy", health, err)
+	}
+	for _, q := range f.calls {
+		if q.Action != "core-status" && q.Action != "platform-status" {
+			t.Fatal("doctor mutated", q.Action)
+		}
+	}
+}
