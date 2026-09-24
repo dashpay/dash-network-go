@@ -442,6 +442,7 @@ class Worker:
         self.verify_image(value, self.images["core"])
         info = self.rpc("getblockchaininfo")
         self.require(info["chain"] == "devnet-" + self.c["coreNetwork"], "wrong-chain")
+        sync = self.rpc("mnsync", ["status"])
         genesis = self.rpc("getblockhash", [1])
         quorums = self.rpc("quorum", ["list"])
         chainlock = 0
@@ -473,6 +474,7 @@ class Worker:
             genesis=genesis,
             height=info["blocks"],
             headers=info["headers"],
+            synced=sync["IsSynced"] and sync["IsBlockchainSynced"],
             ibd=info["initialblockdownload"],
             peers=self.rpc("getconnectioncount"),
             containerId=value["Id"],
@@ -949,7 +951,10 @@ class Worker:
             GRPC_BIND_ADDRESS="127.0.0.1:" + str(p["driveGRPC"]),
             TOKIO_CONSOLE_ENABLED="false",
             GROVEDB_VISUALIZER_ENABLED="false",
-            LOG_LEVEL="info",
+            ABCI_LOG_STDOUT_DESTINATION="stdout",
+            ABCI_LOG_STDOUT_LEVEL="info",
+            ABCI_LOG_STDOUT_FORMAT="json",
+            ABCI_LOG_STDOUT_COLOR="false",
         )
         for prefix in ["CORE_CONSENSUS", "CORE_CHECK_TX"]:
             environment.update(

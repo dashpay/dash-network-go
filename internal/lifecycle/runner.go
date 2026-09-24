@@ -440,7 +440,7 @@ func (e *execution) peers() []node.Peer {
 	return peers
 }
 func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core, miner string) error {
-	if c == nil || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
+	if c == nil || !c.Synced || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
 		return errors.New("Core sync/peers/ChainLock not ready")
 	}
 	if t.Name == miner && (c.Mining == nil || !c.Mining.Running || len(c.Mining.ContainerID) != 64) {

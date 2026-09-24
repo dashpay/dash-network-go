@@ -41,7 +41,8 @@ Tests distinguish three levels:
 1. Fake-cloud/SSH orchestration and failure-path tests: scope, claims, lost
    responses, resume, unchanged genesis, stale/unknown/unreachable targets.
 2. Disposable **real-container** contracts: Core config, wallet, signed EvoNode
-   registration, transaction replay and persistent collateral locks and persistent mining; Drive native configuration and its missing-ChainLock startup gate; Tenderdash
+   registration, transaction replay, persistent collateral locks and mining;
+   Drive native configuration and its missing-ChainLock startup gate; Tenderdash
    config/node identity; Envoy TLS and DAPI gRPC. No AWS credentials/resources.
 3. **Not yet proved:** a real AWS fleet forming quorums and advancing Platform
    consensus end-to-end. No full-network success claim follows from levels 1–2.
@@ -183,9 +184,11 @@ Dispatch the exact network/action and reviewed plan ID. GitHub concurrency queue
 same-network runs; the DynamoDB claim also coordinates local humans/agents. Reports
 are uploaded under private `operations/NETWORK/RUN_ID-ATTEMPT.json`. No private
 plan, trust file, key or report is published as a GitHub artifact. SSH files are
-removed on step exit. The public job summary only identifies network/action/result. Public live logs
+removed on step exit. The public job summary only identifies network/action/result.
+Public live logs
 forward only exact stage names; full operator diagnostics stay in the private S3
-operation log.
+operation log. Workflow-dispatch network names themselves are public metadata;
+use a private operations repository if those names are confidential.
 
 Retain the exact executable for resume. A later main revision with a changed
 recipe refuses the old plan; recover with the cached matching binary locally

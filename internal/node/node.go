@@ -124,6 +124,7 @@ type Core struct {
 	Genesis         string         `json:"genesis"`
 	Height          int64          `json:"height"`
 	Headers         int64          `json:"headers"`
+	Synced          bool           `json:"synced"`
 	IBD             bool           `json:"ibd"`
 	Peers           int            `json:"peers"`
 	ContainerID     string         `json:"containerId"`

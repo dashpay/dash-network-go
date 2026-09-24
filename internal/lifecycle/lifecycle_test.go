@@ -48,7 +48,7 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 	height := int64(500 + f.counts[q.Target.Name])
 	switch q.Action {
 	case "core-start", "core-finalize", "core-status":
-		o.Core = &node.Core{Mining: &node.Mining{Running: true, ContainerID: digest("miner")}, Genesis: digest("genesis"), Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
+		o.Core = &node.Core{Mining: &node.Mining{Running: true, ContainerID: digest("miner")}, Genesis: digest("genesis"), Synced: true, Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
 	case "wallet":
 		o.PayoutAddress = "y" + strings.Repeat("1", 33)
 		o.SporkAddress = "y" + strings.Repeat("2", 33)
