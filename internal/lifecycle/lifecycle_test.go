@@ -175,6 +175,62 @@ func TestAllTargetsPreflightBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestHealthyFinalStageResumeUsesFreshReadOnlyProof(t *testing.T) {
+	for _, stage := range []string{"health", "ready"} {
+		t.Run(stage, func(t *testing.T) {
+			p, r, s, f := setup(t)
+			if _, err := execute(t, p, r); err != nil {
+				t.Fatal(err)
+			}
+			s.record.Deployment.Stage = stage
+			s.record.Deployment.Phase = "interrupted"
+			start := len(f.calls)
+			got, err := execute(t, p, r)
+			if err != nil || got.Deployment.Phase != "network-ready" {
+				t.Fatal("fresh resume verification failed", err)
+			}
+			reads := map[string]int{}
+			for _, q := range f.calls[start:] {
+				if q.Action != "inspect" && q.Action != "core-status" && q.Action != "platform-status" {
+					t.Fatal("healthy resume repeated a mutation", q.Action)
+				}
+				if q.Action == "core-status" {
+					reads[q.Target.Name]++
+				}
+			}
+			for _, target := range p.Targets {
+				if reads[target.Name] != 2 {
+					t.Fatal("resume trusted cached readiness", target.Name, reads[target.Name])
+				}
+			}
+		})
+	}
+}
+
+func TestStaleReadyMarkerDoesNotSkipRequiredReconciliation(t *testing.T) {
+	p, r, _, f := setup(t)
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	stopped, restarted := true, false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-start" {
+			stopped, restarted = false, true
+		}
+		return nil
+	}
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && q.Target.Name == p.Miner().Name && stopped {
+			o.Core.Mining.Running = false
+		}
+		return nil
+	}
+	got, err := execute(t, p, r)
+	if err != nil || !restarted || got.Deployment.Phase != "network-ready" {
+		t.Fatal("trusted a stale ready marker instead of repairing the stopped miner", err)
+	}
+}
+
 func TestStopFreezesMiningBeforeWithdrawingValidators(t *testing.T) {
 	for _, minerFailure := range []bool{false, true} {
 		t.Run(fmt.Sprint(minerFailure), func(t *testing.T) {

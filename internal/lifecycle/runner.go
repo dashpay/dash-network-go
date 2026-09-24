@@ -153,6 +153,8 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if stop && e.r.Deployment == nil {
 		return result, errors.New("cannot stop a deployment that has never started")
 	}
+	verifyFirst := e.r.Deployment != nil && e.r.Deployment.GenesisCoreHeight > 0 &&
+		(e.r.Deployment.Stage == "health" || e.r.Deployment.Stage == "ready")
 	if e.r.Deployment == nil {
 		e.r.Deployment = &provision.DeploymentProgress{PlanID: p.ID, Nodes: map[string]provision.DeploymentNode{}}
 	}
@@ -199,6 +201,24 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 		e.r.Deployment.Phase = "stopped"
 		err = e.stage("stopped")
 		return
+	}
+	if verifyFirst {
+		// An interrupted final check must not repeat wallet/registration work
+		// when the exact intended fleet is already healthy. This is fresh
+		// two-sample evidence, not trust in a cached journal success flag.
+		if err = e.stage("health"); err != nil {
+			return
+		}
+		var health Health
+		health, err = r.Doctor(ctx, p, e.r)
+		if err != nil {
+			return
+		}
+		if health.Healthy {
+			err = e.acceptHealth(health)
+			return
+		}
+		e.report("existing fleet is not yet healthy; reconciling the original deployment")
 	}
 	err = e.deploy()
 	return
@@ -428,23 +448,28 @@ func (e *execution) deploy() error {
 			return probeErr
 		}
 		if health.Healthy {
-			for name, v := range health.Nodes {
-				n := d.Nodes[name]
-				n.Phase = "ready"
-				n.ObservedAt = health.ObservedAt
-				n.CoreHeight = v.CoreHeight
-				n.PlatformHeight = v.PlatformHeight
-				d.Nodes[name] = n
-			}
-			d.Phase = "network-ready"
-			d.ObservedAt = health.ObservedAt
-			return e.stage("ready")
+			return e.acceptHealth(health)
 		}
 		e.report("waiting for advancing, consistent consensus and DAPI: " + strings.Join(health.Problems, "; "))
 		if err = e.wait(); err != nil {
 			return fmt.Errorf("application verification incomplete: %w", err)
 		}
 	}
+}
+
+func (e *execution) acceptHealth(health Health) error {
+	d := e.r.Deployment
+	for name, v := range health.Nodes {
+		n := d.Nodes[name]
+		n.Phase = "ready"
+		n.ObservedAt = health.ObservedAt
+		n.CoreHeight = v.CoreHeight
+		n.PlatformHeight = v.PlatformHeight
+		d.Nodes[name] = n
+	}
+	d.Phase = "network-ready"
+	d.ObservedAt = health.ObservedAt
+	return e.stage("ready")
 }
 func (e *execution) peers() []node.Peer {
 	var peers []node.Peer
