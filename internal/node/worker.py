@@ -145,7 +145,7 @@ class Worker:
         self.require((self.root.stat().st_mode & 0o777) == 0o700, 'bootstrap-root-permissions')
         self.require((self.root / 'owner').read_text().strip() == self.c['computePlanId'] + ':' + self.t['instanceId'], 'bootstrap-owner')
         self.require((self.root / 'ready').read_text().strip() == self.c['bootstrapId'], 'bootstrap-not-ready')
-        self.require(b'HTTP2' in self.run(['curl','--version']), 'curl-http2-required')
+        self.require(b'HTTP2' in self.run(['/usr/bin/curl','--version']), 'curl-http2-required')
         prior = self.read('deployment.json')
         if prior:
             self.require(prior['planId'] == self.c['planId'], 'deployment-plan-changed')
@@ -251,7 +251,7 @@ class Worker:
                 state, protx = mn.get('state',''), mn.get('proTxHash','')
             except RPCFailure as error:
                 if error.code not in [-32603,-1,-8]: raise
-        return dict(genesis=genesis, height=info['blocks'], headers=info['headers'], ibd=info['initialblockdownload'], peers=self.rpc('getconnectioncount'), containerId=value['Id'], configSha256=hashlib.sha256((self.root / 'core/dash.conf').read_bytes()).hexdigest(), masternodeState=state, proTxHash=protx, chainLockHeight=chainlock, quorums={k:len(v) for k,v in quorums.items()})
+        return dict(genesis=genesis, height=info['blocks'], headers=info['headers'], ibd=info['initialblockdownload'], peers=self.rpc('getconnectioncount'), containerId=value['Id'], restarts=value['RestartCount'], configSha256=hashlib.sha256((self.root / 'core/dash.conf').read_bytes()).hexdigest(), masternodeState=state, proTxHash=protx, chainLockHeight=chainlock, quorums={k:len(v) for k,v in quorums.items()})
 
     def verify_image(self, container, pinned):
         image = json.loads(self.docker('image','inspect', pinned))[0]
@@ -459,7 +459,7 @@ class Worker:
         # Trust only the persisted per-node certificate, not --insecure.
         with tempfile.TemporaryDirectory(dir=self.root) as tmp:
             headers = Path(tmp)/'headers'
-            raw = self.run(['curl','--silent','--show-error','--fail','--noproxy','*','--http2','--max-time','20','--cacert',str(self.root/'platform/tls/cert.pem'),'--dump-header',str(headers),'-H','content-type: application/grpc','-H','te: trailers','--data-binary','@-','https://127.0.0.1:'+str(self.ports['gateway'])+'/org.dash.platform.dapi.v0.Platform/getStatus'],stdin=b'\x00\x00\x00\x00\x02\x0a\x00',timeout=25)
+            raw = self.run(['/usr/bin/curl','--silent','--show-error','--fail','--noproxy','*','--http2','--max-time','20','--cacert',str(self.root/'platform/tls/cert.pem'),'--dump-header',str(headers),'-H','content-type: application/grpc','-H','te: trailers','--data-binary','@-','https://127.0.0.1:'+str(self.ports['gateway'])+'/org.dash.platform.dapi.v0.Platform/getStatus'],stdin=b'\x00\x00\x00\x00\x02\x0a\x00',timeout=25)
             values = headers.read_text().lower().splitlines()
             self.require('grpc-status: 0' in values, 'dapi-grpc-failed')
         self.require(len(raw)>=5 and raw[0]==0 and int.from_bytes(raw[1:5],'big')==len(raw)-5, 'dapi-grpc-frame')
@@ -467,12 +467,13 @@ class Worker:
 
     def platform_status(self):
         self.require(self.t['role']=='validator','validator-only')
-        containers = {}
+        containers, restarts = {}, {}
         for name in ['drive','tenderdash','dapi','gateway']:
             value = self.inspect_container(name)
             self.require(value and value['State']['Running'] and not value['State'].get('Restarting'), 'platform-not-running')
             self.verify_image(value,self.images[name])
             containers[name] = value['Id']
+            restarts[name] = value['RestartCount']
         status = self.tenderdash('status')
         dapi = self.dapi_status()
         software = protobuf(protobuf(dapi[1])[1])
@@ -481,7 +482,7 @@ class Worker:
         reference = ''
         if self.q.get('referenceHeight',0)>0:
             reference = self.tenderdash('block?height='+str(self.q['referenceHeight']))['block_id']['hash'].lower()
-        return dict(height=int(status['sync_info']['latest_block_height']),dapiHeight=chain.get(4,0),catchingUp=status['sync_info']['catching_up'] or bool(chain.get(1,0)),chainId=network[1].decode(),nodeId=identity[1].hex(),proTxHash=identity[2].hex(),driveVersion=software[2].decode(),referenceBlockHash=reference,containers=containers)
+        return dict(height=int(status['sync_info']['latest_block_height']),dapiHeight=chain.get(4,0),catchingUp=status['sync_info']['catching_up'] or bool(chain.get(1,0)),chainId=network[1].decode(),nodeId=identity[1].hex(),proTxHash=identity[2].hex(),driveVersion=software[2].decode(),referenceBlockHash=reference,containers=containers,restarts=restarts)
 
     def execute(self):
         self.verify_instance()

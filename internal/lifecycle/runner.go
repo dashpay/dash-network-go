@@ -429,7 +429,7 @@ func (e *execution) peers() []node.Peer {
 	return peers
 }
 func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core) error {
-	if c == nil || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 {
+	if c == nil || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
 		return errors.New("Core sync/peers/ChainLock not ready")
 	}
 	for _, name := range []string{"llmq_devnet", "llmq_devnet_dip0024", "llmq_devnet_platform"} {

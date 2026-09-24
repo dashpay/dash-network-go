@@ -109,7 +109,7 @@ func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 }
 func execute(t *testing.T, p Plan, r Runner) (provision.Record, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return r.Execute(ctx, p, false)
 }
@@ -130,7 +130,7 @@ func TestCompleteLifecycleResumeDoctorAndStop(t *testing.T) {
 	if b.Deployment.GenesisCoreHeight != height || len(f.registrations) != 13 {
 		t.Fatal("resume changed genesis or registrations")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := len(f.calls)
 	h, err := r.Doctor(ctx, p, b)
@@ -222,7 +222,7 @@ func TestChangedHostAndPlanRefused(t *testing.T) {
 	}
 }
 func TestDoctorNeverHidesUnreachableOrDivergentNode(t *testing.T) {
-	for _, kind := range []string{"unreachable", "stalled", "fork", "wrong-identity"} {
+	for _, kind := range []string{"unreachable", "stalled", "fork", "wrong-identity", "restarting"} {
 		t.Run(kind, func(t *testing.T) {
 			p, r, s, f := setup(t)
 			if _, err := execute(t, p, r); err != nil {
@@ -240,11 +240,13 @@ func TestDoctorNeverHidesUnreachableOrDivergentNode(t *testing.T) {
 						o.Platform.ReferenceBlockHash = digest("fork")
 					case "wrong-identity":
 						o.Platform.NodeID = strings.Repeat("0", 40)
+					case "restarting":
+						o.Platform.Restarts = map[string]int{"drive": f.counts[q.Target.Name]}
 					}
 				}
 				return nil
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			h, err := r.Doctor(ctx, p, s.record)
 			if err != nil || h.Healthy || len(h.Nodes) != 14 || h.Nodes[name].Healthy {

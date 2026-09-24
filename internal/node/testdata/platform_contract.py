@@ -38,10 +38,10 @@ def main():
         w.atomic('secrets.json',dict(rpcPassword='private-ci-only',platformNodeID=node_id,operatorPublicKey='b'*96,nodePrivateKey=base64.b64encode(private).decode(),tlsCertificate=(root/'cert.pem').read_text(),tlsPrivateKey=(root/'key.pem').read_text()))
         w.platform_files()
         try:
-            td=w.run(['docker','run','--rm','--network','none','--entrypoint','tenderdash','-v',str(root/'platform/tenderdash')+':/tenderdash',w.images['tenderdash'],'show-node-id','--home','/tenderdash']).decode().strip()
+            td=w.run(['docker','run','--rm','--user','0:0','--network','none','--entrypoint','tenderdash','-v',str(root/'platform/tenderdash')+':/tenderdash',w.images['tenderdash'],'show-node-id','--home','/tenderdash']).decode().strip()
             assert td==node_id, 'Tenderdash node-key readback'
             print('Tenderdash accepts native configuration and node key.',flush=True)
-            w.run(['docker','run','--rm','--network','none','--entrypoint','envoy','-v',str(root/'platform/envoy.json')+':/etc/envoy/config.json:ro','-v',str(root/'platform/tls')+':/tls:ro',w.images['gateway'],'-c','/etc/envoy/config.json','--mode','validate'])
+            w.run(['docker','run','--rm','--user','0:0','--network','none','--entrypoint','envoy','-v',str(root/'platform/envoy.json')+':/etc/envoy/config.json:ro','-v',str(root/'platform/tls')+':/tls:ro',w.images['gateway'],'-c','/etc/envoy/config.json','--mode','validate'])
             print('Envoy accepts native config and generated TLS identity.',flush=True)
             services=w.platform_services()
             w.compose('platform',{k:services[k] for k in ['dapi','gateway']})

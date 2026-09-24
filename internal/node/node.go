@@ -120,6 +120,7 @@ type Core struct {
 	IBD             bool           `json:"ibd"`
 	Peers           int            `json:"peers"`
 	ContainerID     string         `json:"containerId"`
+	Restarts        int            `json:"restarts"`
 	ConfigSHA256    string         `json:"configSha256"`
 	MasternodeState string         `json:"masternodeState,omitempty"`
 	ProTxHash       string         `json:"proTxHash,omitempty"`
@@ -136,6 +137,7 @@ type Platform struct {
 	DriveVersion       string            `json:"driveVersion"`
 	ReferenceBlockHash string            `json:"referenceBlockHash,omitempty"`
 	Containers         map[string]string `json:"containers"`
+	Restarts           map[string]int    `json:"restarts"`
 }
 type Observation struct {
 	InstanceID        string    `json:"instanceId"`

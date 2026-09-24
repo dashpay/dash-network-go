@@ -137,7 +137,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 			if first.core == nil || v.core.Height <= first.core.Height {
 				n.Problems = append(n.Problems, "Core did not advance")
 			}
-			if first.core != nil && first.core.ContainerID != v.core.ContainerID {
+			if first.core != nil && (first.core.ContainerID != v.core.ContainerID || first.core.Restarts != v.core.Restarts) {
 				n.Problems = append(n.Problems, "Core container changed during observation")
 			}
 		}
@@ -166,7 +166,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 				}
 				if first.platform != nil {
 					for name, id := range first.platform.Containers {
-						if x.Containers[name] != id {
+						if x.Containers[name] != id || x.Restarts[name] != first.platform.Restarts[name] {
 							n.Problems = append(n.Problems, "Platform container changed: "+name)
 						}
 					}
