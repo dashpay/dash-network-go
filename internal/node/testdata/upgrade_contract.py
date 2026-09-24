@@ -18,6 +18,11 @@ class Disposable(Upgrade):
     lose_after_apply = False
     remove_before_apply = False
 
+    def wait_abci(self):
+        # Tiny process fixtures have no ABCI server. Live Dash acceptance
+        # separately exercises the actual TCP readiness check.
+        self.require(self.inspect_container('drive')['State']['Running'], 'fixture-drive-not-running')
+
     def verify_instance(self):
         self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
 

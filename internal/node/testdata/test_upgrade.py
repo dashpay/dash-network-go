@@ -57,8 +57,16 @@ class Fixture(Upgrade):
     def inspect_container(self, service):
         return self.containers.get(service)
 
+    def wait_abci(self):
+        self.commands.append(('wait-abci',))
+        self.require(self.containers['drive']['State']['Running'], 'upgrade-drive-abci-timeout')
+
     def docker(self,*args,timeout=120):
         self.commands.append(args)
+        if args[0] in ['stop','start']:
+            service = next(k for k in self.containers if self.container_name(k)==args[-1])
+            self.containers[service]['State']['Running'] = args[0]=='start'
+            if args[0]=='start':self.containers[service]['RestartCount']=0
         if args[:2]==('image','inspect'):
             pin=args[2]
             return json.dumps([dict(Id='image-'+pin,Architecture='amd64',Os='linux',RepoDigests=[pin])]).encode()
@@ -84,6 +92,27 @@ class Fixture(Upgrade):
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_drive_update_withdraws_tenderdash_before_abci_disconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w=Fixture(Path(tmp),'drive');old=copy.deepcopy(w.containers)
+            w.lost=True
+            with self.assertRaisesRegex(worker.Failure,'lost-apply-response'):w.execute()
+            self.assertFalse(w.containers['tenderdash']['State']['Running'])
+            self.assertEqual(w.read('upgrade.json')['dependency'],'stopped')
+            w.q['action']='upgrade-stage';w.execute()
+            self.assertFalse(w.containers['tenderdash']['State']['Running'])
+            w.q['action']='upgrade-apply';w.execute()
+            self.assertEqual(w.containers['tenderdash'],old['tenderdash'])
+            self.assertEqual(w.read('upgrade.json')['dependency'],'started')
+            stop=next(i for i,c in enumerate(w.commands) if c[0]=='stop')
+            apply=next(i for i,c in enumerate(w.commands) if 'up' in c)
+            ready=next(i for i,c in enumerate(w.commands) if c[0]=='wait-abci')
+            start=next(i for i,c in enumerate(w.commands) if c[0]=='start')
+            self.assertLess(stop,apply);self.assertLess(apply,ready);self.assertLess(ready,start)
+            starts=sum(c[0]=='start' for c in w.commands)
+            w.execute()
+            self.assertEqual(sum(c[0]=='start' for c in w.commands),starts)
+
     def test_real_document_changes_images_only_and_preserves_unselected_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             w=Fixture(Path(tmp))

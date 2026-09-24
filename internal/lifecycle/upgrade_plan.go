@@ -43,7 +43,7 @@ type UpgradePlan struct {
 	Recovery     string                `json:"recovery"`
 }
 
-const upgradeRecovery = "forward-only; stop on failure; no automatic downgrade, database reset or protocol migration"
+const upgradeRecovery = "forward-only; Drive replacement gracefully stops Tenderdash then restarts it after ABCI readiness; Core remains running; stop on failure; no automatic downgrade, database reset or protocol migration"
 
 func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from provision.FleetImages, scope string) (provision.FleetImages, error) {
 	if err := p.Validate(); err != nil {

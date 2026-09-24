@@ -5,9 +5,22 @@ An on-host write-ahead marker reconciles lost SSH responses with the same plan.
 There is deliberately no downgrade/rollback/reset action.
 """
 import copy
+import socket
+import time
 
 
 class UpgradeWorker(Worker):
+    def wait_abci(self):
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            self.preserve_core()
+            try:
+                with socket.create_connection(('127.0.0.1', self.ports['driveABCI']), timeout=2):
+                    return
+            except OSError:
+                time.sleep(1)
+        raise Failure('upgrade-drive-abci-timeout')
+
     def preserve_core(self):
         expected = self.q["upgrade"]["preserve"]
         actual = self.core_status()
@@ -52,6 +65,7 @@ class UpgradeWorker(Worker):
             self.require(compose is not None, "upgrade-missing-compose")
             marker = self.read("upgrade.json")
             same = marker and marker.get("id") == change["id"]
+            drain = before['drive'] != after['drive']
             if same:
                 self.require(marker["from"] == before and marker["to"] == after
                              and marker["preserve"] == change["preserve"]
@@ -94,9 +108,12 @@ class UpgradeWorker(Worker):
                         pass
                 self.require(matches, "upgrade-running-image-drift")
                 if before[service] == after[service]:
+                    dependency = service == 'tenderdash' and drain and same and marker.get('dependency')
                     self.require(value["Id"] == change["preserve"]["containers"][service]
-                                 and value["RestartCount"] == change["preserve"]["restarts"][service]
-                                 and value["State"]["Running"],
+                                 and (value["RestartCount"] == change["preserve"]["restarts"][service]
+                                      or (dependency in ['start-requested', 'started'] and value["RestartCount"] == 0))
+                                 and (value["State"]["Running"] or
+                                      (dependency in ['stop-requested', 'stopped', 'start-requested'] and marker['phase'] == 'applying')),
                                  "upgrade-unselected-service-changed")
             for component, pin in after.items():
                 if before[component] != pin:
@@ -124,9 +141,33 @@ class UpgradeWorker(Worker):
             path = str(self.root / "platform/compose.json")
             self.docker("compose", "-p", self.project, "-f", path, "config", "--quiet")
             changed = [k for k in desired["services"] if before[k] != after[k]]
-            if changed:
+            # Tenderdash exits on an ABCI EOF. Gracefully withdraw it before
+            # Drive, rather than relying on Docker's crash/restart policy.
+            # Save intent first so disconnects after stop are retry-safe.
+            if drain and marker['phase'] == 'applying' and marker.get('dependency') not in ['start-requested', 'started']:
+                marker['dependency'] = 'stop-requested'
+                self.atomic('upgrade.json', marker)
+                self.docker('stop', '--time', '120', self.container_name('tenderdash'), timeout=150)
+                value = self.inspect_container('tenderdash')
+                self.require(value and not value['State']['Running'], 'upgrade-dependency-not-stopped')
+                marker['dependency'] = 'stopped'
+                self.atomic('upgrade.json', marker)
+            immediate = [k for k in changed if not (drain and k == 'tenderdash')]
+            if immediate:
                 self.docker("compose", "-p", self.project, "-f", path, "up", "-d",
-                            "--no-deps", "--pull", "never", *changed, timeout=300)
+                            "--no-deps", "--pull", "never", *immediate, timeout=300)
+            if drain:
+                self.wait_abci()
+                if marker.get('dependency') != 'started':
+                    marker['dependency'] = 'start-requested'
+                    self.atomic('upgrade.json', marker)
+                if 'tenderdash' in changed:
+                    self.docker('compose', '-p', self.project, '-f', path, 'up', '-d',
+                                '--no-deps', '--pull', 'never', 'tenderdash', timeout=300)
+                elif not self.inspect_container('tenderdash')['State']['Running']:
+                    self.docker('start', self.container_name('tenderdash'))
+                marker['dependency'] = 'started'
+                self.atomic('upgrade.json', marker)
             core = self.preserve_core()
             for service in desired["services"]:
                 value = self.inspect_container(service)
@@ -134,7 +175,8 @@ class UpgradeWorker(Worker):
                 self.verify_image(value, after[service])
                 if before[service] == after[service]:
                     self.require(value["Id"] == change["preserve"]["containers"][service]
-                                 and value["RestartCount"] == change["preserve"]["restarts"][service],
+                                 and value["RestartCount"] ==
+                                     (0 if service == 'tenderdash' and drain else change["preserve"]["restarts"][service]),
                                  "upgrade-unselected-service-changed")
             marker["phase"] = "applied"
             self.atomic("upgrade.json", marker)

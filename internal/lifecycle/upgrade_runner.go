@@ -61,7 +61,13 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			if record.Upgrade != nil {
 				old := record.Upgrade.Baseline[t.Name]
 				for _, component := range []string{"drive", "tenderdash", "dapi", "gateway"} {
-					if record.Runtime.Images[t.Name][component] == record.Upgrade.From[t.Name][component] && (x.Containers[component] != old.Containers[component] || x.Restarts[component] != old.Restarts[component]) {
+					expectedRestarts := old.Restarts[component]
+					if component == "tenderdash" && record.Upgrade.From[t.Name]["drive"] != record.Runtime.Images[t.Name]["drive"] {
+						// A planned graceful stop/start around Drive preserves the
+						// Tenderdash container/image, but resets Docker's counter.
+						expectedRestarts = 0
+					}
+					if record.Runtime.Images[t.Name][component] == record.Upgrade.From[t.Name][component] && (x.Containers[component] != old.Containers[component] || x.Restarts[component] != expectedRestarts) {
 						return nil, fmt.Errorf("unselected/not-yet-upgraded service changed: %s/%s", t.Name, component)
 					}
 				}
