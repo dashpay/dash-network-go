@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -435,6 +436,30 @@ class Worker:
             file_sources[k]=c
         require(self.files_hash(file_sources)==baseline['filesHash'],'configuration-files-changed')
 
+    def wait_abci(self):
+        drive=self.engine.inspect(self.t['containers']['drive'])
+        td=self.engine.inspect(self.t['containers']['tenderdash'])
+        env=dict(v.split('=',1) for v in drive['Config'].get('Env',[]) if '=' in v)
+        address=urllib.parse.urlparse(env.get('ABCI_CONSENSUS_BIND_ADDRESS',''))
+        require(address.scheme=='tcp' and address.port and address.hostname,'unsupported-abci-listener')
+        host=address.hostname
+        if drive['HostConfig']['NetworkMode']=='host':
+            require(host in ['0.0.0.0','127.0.0.1','::','::1'],'unsupported-abci-host')
+            host='127.0.0.1' if host in ['0.0.0.0','::'] else host
+        else:
+            td_networks=(td['NetworkSettings']['Networks'] if td else
+                         self.read('operation.json')['recipes']['tenderdash']['NetworkingConfig']['EndpointsConfig'])
+            common=set(drive['NetworkSettings']['Networks'])&set(td_networks)
+            require(len(common)==1 and host in ['0.0.0.0','::'],'unsupported-abci-network')
+            host=drive['NetworkSettings']['Networks'][next(iter(common))]['IPAddress']
+            require(bool(host),'missing-abci-address')
+        deadline=time.monotonic()+150
+        while time.monotonic()<deadline:
+            try:
+                with socket.create_connection((host,address.port),timeout=2):return
+            except OSError:time.sleep(1)
+        raise Failure('drive-abci-readiness-timeout')
+
     def apply(self):
         self.owner();pins=self.q['pins'];baseline=self.q['expected']
         marker=self.read('operation.json');same=marker and marker['id']==self.q['operationId']
@@ -448,14 +473,28 @@ class Worker:
                 require(selected[k]['Id']==baseline['components'][k]['id']
                         and selected[k]['Image']==baseline['components'][k]['imageId'],'deploy-source-drift')
             recipes={k:self.recipe(c) for k,c in selected.items() if k in pins}
+            drain=('drive' in pins and 'tenderdash' in selected and
+                   (selected['drive']['Image']!=self.engine.image(pins['drive'])['Id']
+                    or not selected['drive']['State']['Running']))
+            require(not drain or 'tenderdash' in pins,'tenderdash-dependency-outside-scope')
             marker=dict(id=self.q['operationId'],pins=pins,baseline=baseline,recipes=recipes,
-                        operation=self.q['operation'],completed={},phase='applying')
+                        operation=self.q['operation'],completed={},phase='applying',drain=drain)
             self.atomic('operation.json',marker)
         self.operation_guard(marker)
+        if marker['phase']=='complete':return self.observe()
+        if marker.get('drain') and marker.get('dependency') not in ['start-requested','started']:
+            marker['dependency']='stop-requested';self.atomic('operation.json',marker)
+            td=self.engine.inspect(self.t['containers']['tenderdash'])
+            require(td is not None,'missing-tenderdash-dependency')
+            self.engine.call('POST','/containers/'+td['Id']+'/stop?t=120',timeout=150)
+            marker['dependency']='stopped';self.atomic('operation.json',marker)
         # Recover in service dependency order. Companion containers are untouched.
         for k in ['core','drive','tenderdash','dapi','gateway','helper']:
             if k not in pins:continue
             self.operation_guard(marker)
+            if k=='tenderdash' and marker.get('drain'):
+                self.wait_abci()
+                marker['dependency']='start-requested';self.atomic('operation.json',marker)
             name=self.t['containers'][k];c=self.engine.inspect(name);desired=self.engine.image(pins[k])
             require(desired is not None,'image-not-staged')
             recipe=copy.deepcopy(marker['recipes'][k]);recipe['Config']['Image']=pins[k]
@@ -479,6 +518,8 @@ class Worker:
             c=self.engine.inspect(name)
             require(c['State']['Running'] and self.config_hash(self.recipe(c))==baseline['components'][k]['configHash'],'replacement-not-preserved')
             marker['completed'][k]=c['Id'];self.atomic('operation.json',marker)
+            if k=='tenderdash' and marker.get('drain'):
+                marker['dependency']='started';self.atomic('operation.json',marker)
         actual=self.observe();self.assert_baseline(actual,baseline,pins)
         marker['phase']='complete';self.atomic('operation.json',marker)
         return actual

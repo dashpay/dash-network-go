@@ -31,6 +31,11 @@ class Fixture(worker.Worker):
         worker.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-only')
     def health(self,selected):
         return {},[]
+    def wait_abci(self):
+        # Tiny fixtures do not expose ABCI. The actual listener contract is
+        # exercised by the disposable multi-validator Dash upgrade proof.
+        assert self.engine.inspect(self.t['containers']['drive'])['State']['Running']
+        assert self.engine.inspect(self.t['containers']['core'])['State']['Running']
 
 
 def main():
@@ -98,6 +103,28 @@ def main():
             q.update(operation='deploy',operationId='c'*64,expected=baseline)
             result=w.execute();assert result['components']['tenderdash']['id']==replacement
             assert result['components']['tenderdash']['running']
+            # Drive replacement must gracefully withdraw the unchanged TD
+            # process first and recover that stop across a lost response.
+            baseline=w.observe();td_before=baseline['components']['tenderdash']
+            q.update(operation='upgrade',operationId='d'*64,expected=baseline,pins=dict(drive=after,tenderdash=after))
+            engine.fail_create=True
+            try:w.execute()
+            except worker.Failure as e:assert str(e)=='simulated-create-failure'
+            else:raise AssertionError('expected Drive replacement interruption')
+            assert not engine.inspect(names['tenderdash'])['State']['Running']
+            engine.lose_start=True
+            try:w.execute()
+            except worker.Failure as e:assert str(e)=='simulated-start-response-loss'
+            else:raise AssertionError('expected lost Drive start response')
+            result=w.execute()
+            assert result['components']['core']==baseline['components']['core']
+            td_after=result['components']['tenderdash']
+            assert td_before['id']==td_after['id'] and td_before['imageId']==td_after['imageId']
+            assert td_after['running'] and td_after['restarts']==0
+            assert td_after['startedAt']!=td_before['startedAt'],'Tenderdash was not gracefully restarted'
+            assert run(['docker','exec',names['tenderdash'],'cat','/anonymous/sentinel'])==b'anonymous-state'
+            repeated=w.execute()
+            assert repeated['components']==result['components'],'replay restarted dependency twice'
             print('Existing-state enrollment, exact Engine image replacement, stop/remove/create interruption, lost start response, same-image deployment and persistent state preservation passed.')
         finally:
             for name in [*names.values(),companion]:
