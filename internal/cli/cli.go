@@ -46,6 +46,9 @@ Usage:
   dashnet deploy --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet doctor --plan deployment.json --ssh-key PATH --known-hosts PATH [--timeout 3m]
   dashnet stop --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
+  dashnet upgrade-plan --deployment-plan deployment.json --network candidate.yaml
+                       --lock release.lock.json --scope platform|tenderdash --out upgrade.json
+  dashnet upgrade --plan upgrade.json --confirm UPGRADE_PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet version
 
 Planning and discovery are read-only. Provision creates EC2 instances and durable
@@ -73,7 +76,7 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 	switch args[0] {
 	case "host-trust":
 		return runTrust(ctx, args, out, stderr)
-	case "deployment-plan", "deploy", "doctor", "stop":
+	case "deployment-plan", "deploy", "doctor", "stop", "upgrade-plan", "upgrade":
 		return runLifecycle(ctx, args, out, stderr, version)
 	case "bootstrap-plan", "bootstrap":
 		return runBootstrap(ctx, args, out, stderr, version)

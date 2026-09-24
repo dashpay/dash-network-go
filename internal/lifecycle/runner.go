@@ -118,6 +118,12 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if err = prior.Validate(p.Bootstrap.Compute); err != nil {
 		return
 	}
+	if prior.Upgrade != nil && prior.Upgrade.Phase != "complete" {
+		return result, errors.New("unfinished upgrade owns runtime intent; resume that upgrade before deploy/stop")
+	}
+	if _, err = effectiveImages(p, prior); err != nil {
+		return
+	}
 	if prior.Bootstrap == nil || prior.Bootstrap.PlanID != p.Bootstrap.ID || prior.Bootstrap.Phase != "hosts-ready" {
 		return result, errors.New("finish exact node bootstrap first")
 	}
@@ -145,6 +151,12 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 		result = e.r
 	}()
 	if err = e.r.Validate(p.Bootstrap.Compute); err != nil {
+		return
+	}
+	if e.r.Upgrade != nil && e.r.Upgrade.Phase != "complete" {
+		return result, errors.New("upgrade changed before claim; resume that upgrade")
+	}
+	if _, err = effectiveImages(p, e.r); err != nil {
 		return
 	}
 	if e.r.Bootstrap == nil || e.r.Bootstrap.PlanID != p.Bootstrap.ID || e.r.Bootstrap.Phase != "hosts-ready" {
@@ -245,7 +257,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 		go func() {
 			defer wg.Done()
 			for t := range work {
-				q := e.p.Request(t, action)
+				q := runtimeRequest(e.p, e.r, t, action)
 				if prepare != nil {
 					prepare(&q)
 				}
@@ -285,7 +297,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 	return errors.Join(failures...)
 }
 func (e *execution) call(t node.Target, action string, prepare func(*node.Request)) (node.Observation, error) {
-	q := e.p.Request(t, action)
+	q := runtimeRequest(e.p, e.r, t, action)
 	if prepare != nil {
 		prepare(&q)
 	}

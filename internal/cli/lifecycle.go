@@ -21,6 +21,8 @@ import (
 	"github.com/dashpay/dash-network-go/internal/lifecycle"
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
+	"github.com/dashpay/dash-network-go/internal/release"
+	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/dashpay/dash-network-go/internal/transport"
 )
 
@@ -28,6 +30,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
+	var candidatePath, lockPath, scope string
 	var timeout, observationWindow time.Duration
 	var protocol uint
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
@@ -37,12 +40,17 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	if args[0] == "deployment-plan" {
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
+	} else if args[0] == "upgrade-plan" {
+		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
+		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
+		fs.StringVar(&lockPath, "lock", "", "resolved candidate release lock")
+		fs.StringVar(&scope, "scope", "platform", "platform or tenderdash; Core is preserved")
 	} else {
-		fs.StringVar(&path, "plan", "", "immutable deployment plan")
+		fs.StringVar(&path, "plan", "", "immutable deployment or upgrade plan")
 		fs.StringVar(&keyPath, "ssh-key", "", "private SSH identity file")
 		fs.StringVar(&hostsPath, "known-hosts", "", "verified instance-scoped SSH host keys")
 		if args[0] != "doctor" {
-			fs.StringVar(&confirm, "confirm", "", "exact deployment plan ID authorizing this action")
+			fs.StringVar(&confirm, "confirm", "", "exact operation plan ID authorizing this action")
 		}
 	}
 	if err := fs.Parse(args[1:]); err != nil {
@@ -54,11 +62,14 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	if fs.NArg() != 0 || timeout <= 0 {
 		return errors.New("use named flags and a positive timeout")
 	}
-	if observationWindow <= 0 || ((args[0] == "doctor" || args[0] == "deploy") && observationWindow >= timeout) {
+	if observationWindow <= 0 || ((args[0] == "doctor" || args[0] == "deploy" || args[0] == "upgrade") && observationWindow >= timeout) {
 		return errors.New("--observation-window must be positive and leave time for probes inside --timeout")
 	}
 	var b bootstrap.Plan
 	var p lifecycle.Plan
+	var upgrade lifecycle.UpgradePlan
+	var candidate spec.Network
+	var candidateLock release.Lock
 	if args[0] == "deployment-plan" {
 		if bootstrapPath == "" || protocol < 1 || protocol > 100 {
 			return errors.New("--bootstrap-plan and explicit --protocol (1..100) required")
@@ -69,9 +80,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err := b.Validate(); err != nil {
 			return err
 		}
-	} else {
-		if path == "" || keyPath == "" || hostsPath == "" {
-			return errors.New("--plan, --ssh-key and --known-hosts required")
+	} else if args[0] == "upgrade-plan" {
+		if path == "" || candidatePath == "" || lockPath == "" {
+			return errors.New("--deployment-plan, --network and --lock required")
 		}
 		if err := files.ReadJSON(path, &p); err != nil {
 			return err
@@ -79,9 +90,45 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err := p.Validate(); err != nil {
 			return err
 		}
+		var err error
+		candidate, err = spec.Load(candidatePath)
+		if err != nil {
+			return err
+		}
+		if err = files.ReadJSON(lockPath, &candidateLock); err != nil {
+			return err
+		}
+		if err = candidateLock.Validate(candidate); err != nil {
+			return err
+		}
 		b = p.Bootstrap
-		if args[0] != "doctor" && confirm != p.ID {
-			return errors.New("--confirm must equal the reviewed deployment plan ID; no AWS or SSH requests made")
+	} else {
+		if path == "" || keyPath == "" || hostsPath == "" {
+			return errors.New("--plan, --ssh-key and --known-hosts required")
+		}
+		if args[0] == "upgrade" {
+			if err := files.ReadJSON(path, &upgrade); err != nil {
+				return err
+			}
+			if err := upgrade.Validate(); err != nil {
+				return err
+			}
+			p = upgrade.Deployment
+		} else {
+			if err := files.ReadJSON(path, &p); err != nil {
+				return err
+			}
+		}
+		if err := p.Validate(); err != nil {
+			return err
+		}
+		b = p.Bootstrap
+		expectedID := p.ID
+		if args[0] == "upgrade" {
+			expectedID = upgrade.ID
+		}
+		if args[0] != "doctor" && confirm != expectedID {
+			return errors.New("--confirm must equal the reviewed operation plan ID; no AWS or SSH requests made")
 		}
 	}
 	if output != "" {
@@ -91,7 +138,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	var remote *transport.SSH
 	var err error
-	if args[0] != "deployment-plan" {
+	if args[0] != "deployment-plan" && args[0] != "upgrade-plan" {
 		remote, err = transport.NewSSH(b.Access.User, keyPath, hostsPath)
 		if err != nil {
 			return err
@@ -146,6 +193,17 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
 	runner.ObservationWindow = observationWindow
+	if args[0] == "upgrade-plan" {
+		if owner != "" {
+			return errors.New("network has an active runner; finish or recover it before upgrade planning")
+		}
+		upgrade, err = runner.PrepareUpgrade(ctx, p, record, candidate, candidateLock, scope)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stderr, "Forward-only image rollout on the exact owned devnet. Source images come from shared state; live digests, health, membership and Core preservation are checked before execution. No protocol migration, reset or automatic downgrade.")
+		return emit(out, output, upgrade)
+	}
 	if args[0] == "doctor" {
 		if owner != "" {
 			fmt.Fprintln(stderr, "Network has an active runner; this is a concurrent read-only observation, not permission to mutate.")
@@ -163,6 +221,13 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		return nil
 	}
 	fmt.Fprintln(stderr, "runner:", runner.Owner)
+	if args[0] == "upgrade" {
+		result, err := runner.Upgrade(ctx, upgrade)
+		if err != nil {
+			return fmt.Errorf("%w; inspect shared operation and resume upgrade with this same plan/binary; do not reset or blindly downgrade", err)
+		}
+		return emit(out, output, result)
+	}
 	result, err := runner.Execute(ctx, p, args[0] == "stop")
 	if err != nil {
 		return fmt.Errorf("%w; inspect operation using the original EC2 plan; resume deploy with the same deployment plan/binary. Never unlock until the prior runner and remote operations are stopped", err)

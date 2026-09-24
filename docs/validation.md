@@ -1,7 +1,9 @@
 # Multi-validator AWS acceptance run
 
-The next release gate is a **real disposable fleet**, not another mocked
-consensus test. This document is a run plan, not a claim that the run passed.
+The acceptance gate is a **real disposable fleet**, not another mocked
+consensus test. This document is the reusable run plan; the
+[2026-09-24 operator-assisted result](validation-2026-09-24.md) records what passed
+and what remains unproved.
 Keep validation fixes together in one continuing PR; do not require a merge
 between individual deployment stages.
 

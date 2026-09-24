@@ -14,9 +14,9 @@
 This milestone cannot deploy or upgrade a network. Tests prove the behavior above,
 not consensus readiness or a successful infrastructure lifecycle.
 
-## 2. One real devnet lifecycle — in progress
+## 2. One real devnet lifecycle — operator-assisted AWS proof complete
 
-Implemented first slice (not live AWS-proved):
+Implemented and exercised on the disposable fleet:
 
 - Read-only EC2 footprint planning with explicit subnet/security groups/key pair,
   owner-pinned architecture-checked AMIs, and per-target launch identity.
@@ -28,16 +28,17 @@ Implemented first slice (not live AWS-proved):
   Ubuntu 24.04 Docker/Compose preparation and role-specific immutable image pulls.
 - Additive bootstrap journal checkpoints, host-side locks, all-host preflight and
   verified interrupted-run resume; no service starts. Loopback SSH and disposable
-  recipe integration tests plus a human bootstrap runbook. Not live-node proved.
+  recipe integration tests plus a human bootstrap runbook. All 14 hosts verified.
 
-Implemented lifecycle increment (not live-fleet proved):
+Implemented lifecycle increment:
 
 - Exact-host immutable devnet plans; Core, wallet/validator identities, signed
   pre-broadcast registrations, persistent collateral locks and native Platform.
 - Quorum/ChainLock gates, independent two-sample health with DAPI and common-height
   block comparison; interrupted resume and explicit stop preserving data.
 - Protected Actions entry point, private evidence output, human recovery runbook,
-  fake-cloud failure tests and real-container contracts.
+  fake-cloud failure tests and real-container contracts. See the
+  [live creation/interruption/stop-resume/cleanup results](validation-2026-09-24.md).
 
 Remaining:
 
@@ -48,20 +49,24 @@ Remaining:
 - Authenticated EC2-console host-key enrollment is implemented with scope,
   freshness and duplicate-key checks; its real-cloud proof is part of the
   [multi-validator acceptance run](validation.md).
-- Prove the implemented chain lifecycle on authorized real infrastructure,
-  including quorum formation and Platform.
+- Prove unattended creation with the final release binary; the first real
+  acceptance run required documented operator-assisted compatibility fixes.
 - Implement account/network-scoped cleanup and interrupted-operation recovery.
-- Prove create, resume, and destroy on an explicitly authorized disposable devnet.
-  Preserve a record for every intended target, including unreachable ones.
+- Prove generalized CLI destroy. The first run's explicitly scoped teardown
+  verified every instance, retained root volume and dedicated support resource.
 
 ## 3. Upgrades and execution workflows
 
-- Use live membership, exact old/new versions, migration constraints, and quorum
-  state to make plans executable.
-- Prove Platform-only, Tenderdash-only, and Core-only changes preserve unselected
-  components. Test existing-state upgrades separately from fresh-network startup.
+- Implemented Platform/Tenderdash image-only plans and execution, live membership
+  and protocol gates, shared/host locks, preserved Core start/configuration,
+  bounded staging and one-validator-at-a-time health gates. Runtime images survive
+  restart/recovery without rewriting creation intent. Go/Python failure tests and
+  a real Docker replacement/replay contract cover the implementation.
+- Prove actual Dash version-to-version upgrades on existing state. Core-only,
+  protocol/config migration and managed-testnet rollout remain unimplemented.
 - Configure and live-prove the implemented Actions entry point; add explicit
-  existing-state upgrade execution through the same CLI and shared state/locks.
+  live workflow proof for the implemented upgrade entry point through the same
+  CLI and shared state/locks.
 - Configure devnet and managed-testnet roles/policies separately; no implicit
   reset or destruction inside an upgrade operation.
 

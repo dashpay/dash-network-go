@@ -164,8 +164,8 @@ disks/identities, and **does not terminate EC2 or stop
 billing**. Resume using `deploy`; there is no implicit reset, prune or rollback.
 If the mining host cannot be verified stopped, other hosts are not stopped by
 that invocation; inspect the unresolved target before retrying.
-There is no destroy/cleanup executor or existing-state upgrade executor in this
-milestone. Do not use this create profile to upgrade managed testnet or live
+There is no generalized destroy/cleanup executor. Existing-state image changes use
+the separate [upgrade executor](upgrades.md). Do not use this create profile to upgrade managed testnet or live
 legacy networks.
 
 ## GitHub Actions execution

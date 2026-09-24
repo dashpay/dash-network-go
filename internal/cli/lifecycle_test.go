@@ -9,7 +9,7 @@ import (
 )
 
 func TestLifecycleCLIRequiresCompleteExplicitIntent(t *testing.T) {
-	for _, command := range []string{"deployment-plan", "deploy", "doctor", "stop"} {
+	for _, command := range []string{"deployment-plan", "deploy", "doctor", "stop", "upgrade-plan", "upgrade"} {
 		if err := cli.Run(context.Background(), []string{command}, &bytes.Buffer{}, &bytes.Buffer{}, "test"); err == nil {
 			t.Fatal("accepted incomplete intent", command)
 		}

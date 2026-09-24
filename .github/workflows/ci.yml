@@ -44,7 +44,7 @@ jobs:
           bin/dashnet validate --network examples/testnet.yaml
           bin/dashnet validate --network examples/devnet-compute.yaml
           bin/dashnet validate --network examples/devnet-lifecycle.yaml
-          for command in deployment-plan deploy doctor stop host-trust; do
+          for command in deployment-plan deploy doctor stop host-trust upgrade-plan upgrade; do
             if bin/dashnet "$command"; then
               echo "$command accepted missing explicit intent"
               exit 1
@@ -110,6 +110,22 @@ jobs:
             images=$(jq -c --arg component "$component" --arg pinned "$pinned" '. + [{component:$component,pinned:$pinned}]' <<< "$images")
           done
           sudo env PLATFORM_IMAGES="$images" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/platform_contract.py
+
+  upgrade-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prove real Compose image replacement, preservation and lost-response replay
+        run: |
+          set -euo pipefail
+          docker pull busybox:1.36.1
+          before=$(docker image inspect busybox:1.36.1 --format '{{index .RepoDigests 0}}')
+          docker pull busybox:1.37.0
+          after=$(docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}')
+          sudo env UPGRADE_FROM="$before" UPGRADE_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/upgrade_contract.py
 
   binaries:
     runs-on: ubuntu-latest

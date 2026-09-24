@@ -11,11 +11,21 @@ on:
         description: Run/resume a reviewed lifecycle operation
         required: true
         type: choice
-        options: [provision, bootstrap, deploy, doctor, stop]
+        options: [provision, bootstrap, deploy, doctor, stop, upgrade-plan, upgrade]
       confirm:
-        description: Exact plan SHA256 for this action (doctor ignores this)
+        description: Exact plan SHA256 for this action (doctor/upgrade-plan ignore this)
         required: false
         type: string
+      upgrade_scope:
+        description: Scope for upgrade-plan; execution uses the scope inside the confirmed plan
+        type: choice
+        options: [platform, tenderdash]
+        default: platform
+      observation_window:
+        description: Minimum time between independent consensus observations
+        type: choice
+        options: [90s, 15s]
+        default: 90s
 
 # This workflow is inert until the protected environment and scoped OIDC role,
 # runner, private artifact bucket, and separately verified SSH trust are configured.
@@ -63,6 +73,8 @@ jobs:
           NETWORK: ${{ inputs.network }}
           OPERATION: ${{ inputs.operation }}
           CONFIRM: ${{ inputs.confirm }}
+          UPGRADE_SCOPE: ${{ inputs.upgrade_scope }}
+          OBSERVATION_WINDOW: ${{ inputs.observation_window }}
           BUCKET: ${{ secrets.DASHNET_ARTIFACT_BUCKET }}
           SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
         run: |
@@ -73,29 +85,40 @@ jobs:
           case "$OPERATION" in
             provision) plan=ec2-plan.json ;;
             bootstrap) plan=bootstrap-plan.json ;;
-            deploy|doctor|stop) plan=deployment.json ;;
+            deploy|doctor|stop|upgrade-plan) plan=deployment.json ;;
+            upgrade) plan=upgrade.json ;;
             *) exit 1 ;;
           esac
           aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/$plan" "$work/plan.json"
           # Prevent a bundle stored under one name from targeting another network.
-          actual=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("bootstrap",p).get("compute",p).get("network",{}).get("metadata",{}).get("name",""))' "$work/plan.json")
+          actual=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p=p.get("deployment",p); print(p.get("bootstrap",p).get("compute",p).get("network",{}).get("metadata",{}).get("name",""))' "$work/plan.json")
           test "$actual" = "$NETWORK"
           args=(--plan "$work/plan.json" --out "$work/result.json")
-          if [[ "$OPERATION" != doctor ]]; then
+          if [[ "$OPERATION" != doctor && "$OPERATION" != upgrade-plan ]]; then
             [[ "$CONFIRM" =~ ^[0-9a-f]{64}$ ]]
             args+=(--confirm "$CONFIRM")
           fi
-          if [[ "$OPERATION" != provision ]]; then
+          if [[ "$OPERATION" == upgrade-plan ]]; then
+            [[ "$UPGRADE_SCOPE" == platform || "$UPGRADE_SCOPE" == tenderdash ]]
+            aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/candidate.yaml" "$work/candidate.yaml"
+            aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/candidate.lock.json" "$work/candidate.lock.json"
+            args=(--deployment-plan "$work/plan.json" --network "$work/candidate.yaml" --lock "$work/candidate.lock.json" --scope "$UPGRADE_SCOPE" --out "$work/result.json")
+          fi
+          if [[ "$OPERATION" != provision && "$OPERATION" != upgrade-plan ]]; then
             test -n "$SSH_KEY"
             printf '%s\n' "$SSH_KEY" > "$work/key"
             unset SSH_KEY
             aws s3 cp --only-show-errors "s3://$BUCKET/networks/$NETWORK/known_hosts" "$work/known_hosts"
             args+=(--ssh-key "$work/key" --known-hosts "$work/known_hosts")
           fi
+          if [[ "$OPERATION" == deploy || "$OPERATION" == doctor || "$OPERATION" == upgrade ]]; then
+            [[ "$OBSERVATION_WINDOW" == 15s || "$OBSERVATION_WINDOW" == 90s ]]
+            args+=(--observation-window "$OBSERVATION_WINDOW" --timeout 75m)
+          fi
           code=0
           # Only an exact stage-name allowlist reaches this public repo's logs.
           bin/dashnet "$OPERATION" "${args[@]}" > "$work/stdout.log" \
-            2> >(tee "$work/operator.log" | awk '/^(preflight|core-start|identities|core-finalize|registrations|quorums|platform-start|health|ready|stopping|stopped)$/ {print; fflush()}') || code=$?
+            2> >(tee "$work/operator.log" | awk '/^(preflight|core-start|identities|core-finalize|registrations|quorums|platform-start|health|ready|stopping|stopped|upgrade-staging|upgrade-applying|upgrade-verifying)$/ {print; fflush()}') || code=$?
           wait
           aws s3 cp --only-show-errors "$work/operator.log" "s3://$BUCKET/operations/$NETWORK/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.log"
           if [[ -s "$work/result.json" ]]; then

@@ -43,6 +43,9 @@ func ObservationDigest() string {
 }
 
 func workerScript(action string) string {
+	if action == "upgrade-stage" || action == "upgrade-apply" {
+		return "__name__ = 'dashnet_upgrade'\n" + recipe + "\n" + observer + "\n" + upgradeRecipe + "\nmain()\n"
+	}
 	if action == "inspect" || action == "core-status" || action == "platform-status" {
 		// Do not execute the original entry point until the observation-only
 		// capability guard and compatible RPC reader have been installed.
@@ -114,17 +117,18 @@ type Peer struct {
 	ProTxHash         string `json:"proTxHash,omitempty"`
 }
 type Request struct {
-	Context               Context `json:"context"`
-	Target                Target  `json:"target"`
-	Action                string  `json:"action"`
-	SporkAddress          string  `json:"sporkAddress,omitempty"`
-	PayoutAddress         string  `json:"payoutAddress,omitempty"`
-	Registration          *Peer   `json:"registration,omitempty"`
-	Peers                 []Peer  `json:"peers,omitempty"`
-	GenesisCoreHeight     int64   `json:"genesisCoreHeight,omitempty"`
-	RequiredBalance       int64   `json:"requiredBalance,omitempty"`
-	RequiredConfirmations int     `json:"requiredConfirmations,omitempty"`
-	ReferenceHeight       int64   `json:"referenceHeight,omitempty"`
+	Context               Context      `json:"context"`
+	Target                Target       `json:"target"`
+	Action                string       `json:"action"`
+	SporkAddress          string       `json:"sporkAddress,omitempty"`
+	PayoutAddress         string       `json:"payoutAddress,omitempty"`
+	Registration          *Peer        `json:"registration,omitempty"`
+	Peers                 []Peer       `json:"peers,omitempty"`
+	GenesisCoreHeight     int64        `json:"genesisCoreHeight,omitempty"`
+	RequiredBalance       int64        `json:"requiredBalance,omitempty"`
+	RequiredConfirmations int          `json:"requiredConfirmations,omitempty"`
+	ReferenceHeight       int64        `json:"referenceHeight,omitempty"`
+	Upgrade               *ImageChange `json:"upgrade,omitempty"`
 	// Transient input candidates. They are never journaled or printed, and the
 	// worker refuses to replace existing identity files on resume.
 	NodePrivateKey string `json:"nodePrivateKey,omitempty"`
@@ -137,6 +141,7 @@ type Mining struct {
 	Restarts    int    `json:"restarts"`
 }
 type Core struct {
+	StartedAt       string         `json:"startedAt,omitempty"`
 	Mining          *Mining        `json:"mining,omitempty"`
 	Genesis         string         `json:"genesis"`
 	Height          int64          `json:"height"`
@@ -153,6 +158,8 @@ type Core struct {
 	Quorums         map[string]int `json:"quorums"`
 }
 type Platform struct {
+	Protocol           uint32            `json:"protocol,omitempty"`
+	Validators         []string          `json:"validators,omitempty"`
 	Height             int64             `json:"height"`
 	DAPIHeight         int64             `json:"dapiHeight"`
 	CatchingUp         bool              `json:"catchingUp"`
@@ -199,7 +206,12 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 		return Observation{}, errors.New("node operation requires a deadline")
 	}
 	if !actions[q.Action] {
-		return Observation{}, errors.New("unsupported node action")
+		if q.Action != "upgrade-stage" && q.Action != "upgrade-apply" {
+			return Observation{}, errors.New("unsupported node action")
+		}
+		if err := q.validateUpgrade(); err != nil {
+			return Observation{}, err
+		}
 	}
 	if err := q.Target.Validate(); err != nil {
 		return Observation{}, err

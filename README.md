@@ -3,7 +3,7 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
-**Current milestone: integrated devnet lifecycle (not live-fleet proved).**
+**Current milestone: live-proved devnet lifecycle and health-gated image upgrades.**
 The CLI plans/provisions EC2, prepares owned Ubuntu hosts, starts Core, funds and
 registers EvoNodes, starts Platform, and runs independent health gates. It has
 inspect/resume and explicit stop-preserving-data commands, backed by a shared
@@ -11,8 +11,11 @@ DynamoDB journal/runner claim. No AI session is required.
 
 Use the [complete lifecycle/runbook](docs/lifecycle.md) and
 [13-validator + wallet example](examples/devnet-lifecycle.yaml).
-No testnet mutation, existing-network adoption, upgrade, reset or destroy executor
-is exposed yet. Real-container contract tests are not proof of a running AWS fleet.
+The [operator-assisted AWS proof](docs/validation-2026-09-24.md) covered 13 validators,
+interruption, stop/resume, DAPI and complete scoped cleanup. [Image upgrades](docs/upgrades.md)
+support owned devnets with Core preserved; live version-to-version upgrades remain
+unproved. No testnet mutation, existing-network adoption, reset or generalized
+destroy executor is exposed yet.
 
 ## Quick start
 
@@ -106,9 +109,9 @@ Normal retries reconcile existing instances. Lost-response ambiguity never cause
 a blind relaunch. Claims do not expire automatically; a crashed runner requires
 explicit stopped-runner recovery. A changed generation/plan cannot bypass the
 existing operation. Root volumes are retained on termination; there is no
-automatic cleanup/rollback yet. **EC2 launch remains fake-client tested, not live-launch verified.** The next
-commands implement application services; their evidence boundary is documented
-separately in the lifecycle guide.
+automatic cleanup/rollback yet. Direct EC2 launch and recovery are covered by the
+[disposable AWS acceptance run](docs/validation-2026-09-24.md); its teardown used a
+separately scoped helper, not a general-purpose CLI destroy command.
 
 ## Authenticated node bootstrap
 
@@ -129,8 +132,9 @@ skip it. Shared and host-side locks protect interrupted-run recovery. No Dash
 containers start, and `hosts-ready` is **not** application health.
 
 The same `operation` command shows per-host bootstrap progress. Trust enrollment
-is currently manual; no insecure host-key learning fallback exists. SSH identities
-stay local. This stage is integration-tested, **not live-node verified**.
+supports fresh authenticated EC2 console keys through `host-trust`; no insecure
+host-key learning fallback exists. SSH identities stay local. This stage was
+verified on all 14 hosts in the disposable AWS run.
 
 ## Complete devnet execution
 
@@ -139,6 +143,16 @@ After bootstrap, `deployment-plan` binds exact instances and immutable genesis.
 node and exits nonzero for unknown/degraded health. `stop` verifies owned services
 are stopped and preserves all state (EC2 billing continues). See
 [commands, compatibility assumptions and recovery](docs/lifecycle.md).
+
+## Existing-state upgrades
+
+`upgrade-plan` records exact old/new images for a completed owned deployment;
+`upgrade` stages artifacts and rolls one validator at a time, with whole-fleet
+health and Core-process/configuration preservation gates between withdrawals.
+Runtime images live separately from the immutable creation plan, so later
+inspection/recovery cannot silently revert the release. See the
+[upgrade command and recovery guide](docs/upgrades.md) for supported profiles,
+interrupted-run behavior and the remaining live-version validation boundary.
 
 ## Public and operator data
 
