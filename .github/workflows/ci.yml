@@ -5,15 +5,53 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      proof_operation:
+        description: Temporary isolated AWS acceptance; requires separately scoped environment
+        type: choice
+        options: [none, doctor, upgrade]
+        default: none
+      proof_plan_id:
+        description: Exact reviewed upgrade plan ID; required for upgrade
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.proof_operation || 'none' }}
+  cancel-in-progress: ${{ !inputs.proof_operation || inputs.proof_operation == 'none' }}
 
 jobs:
+  aws-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.proof_operation != 'none'
+    environment: dashnet-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ vars.DASHNET_PROOF_ROLE }}
+          aws-region: ${{ vars.DASHNET_PROOF_REGION }}
+          role-session-name: proof-${{ github.run_id }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+      - name: Execute pinned proof artifact with private reports
+        env:
+          PROOF_OPERATION: ${{ inputs.proof_operation }}
+          PROOF_PLAN_ID: ${{ inputs.proof_plan_id }}
+          PROOF_BUCKET: ${{ vars.DASHNET_PROOF_BUCKET }}
+          PROOF_GROUP: ${{ vars.DASHNET_PROOF_GROUP }}
+          PROOF_BINARY_SHA256: ${{ vars.DASHNET_PROOF_BINARY_SHA256 }}
+          PROOF_SSH_KEY: ${{ secrets.DASHNET_PROOF_SSH_KEY }}
+        run: bash .github/scripts/aws-acceptance.sh
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
