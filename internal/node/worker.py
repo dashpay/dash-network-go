@@ -235,7 +235,7 @@ class Worker:
         self.require(value and value['State']['Running'], 'core-not-running')
         self.verify_image(value, self.images['core'])
         info = self.rpc('getblockchaininfo')
-        self.require(info['chain'] == 'devnet', 'wrong-chain')
+        self.require(info['chain'] == 'devnet-' + self.c['coreNetwork'], 'wrong-chain')
         genesis = self.rpc('getblockhash', [1])
         quorums = self.rpc('quorum', ['list'])
         chainlock = 0

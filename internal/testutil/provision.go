@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -113,10 +114,7 @@ func (c *Cloud) RunInstances(_ context.Context, input *ec2.RunInstancesInput, _ 
 			architecture = types.ArchitectureValuesX8664
 		}
 	}
-	id := "i-00000001"
-	if len(c.Instances) > 0 {
-		id = "i-00000002"
-	}
+	id := fmt.Sprintf("i-%08x", len(c.Instances)+1)
 	instance := types.Instance{InstanceId: aws.String(id), ClientToken: input.ClientToken, ImageId: input.ImageId, InstanceType: input.InstanceType, Architecture: architecture, SubnetId: input.NetworkInterfaces[0].SubnetId, VpcId: aws.String(c.Network.AWS.Provision.VPCID), KeyName: input.KeyName, MetadataOptions: &types.InstanceMetadataOptionsResponse{HttpTokens: types.HttpTokensStateRequired}, State: &types.InstanceState{Name: types.InstanceStateNameRunning}}
 	for _, g := range input.NetworkInterfaces[0].Groups {
 		instance.SecurityGroups = append(instance.SecurityGroups, types.GroupIdentifier{GroupId: aws.String(g)})

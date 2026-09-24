@@ -189,6 +189,8 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 		o   node.Observation
 		err error
 	}
+	batchCtx, cancel := context.WithCancel(e.ctx)
+	defer cancel()
 	work := make(chan node.Target)
 	results := make(chan reply, len(targets))
 	var wg sync.WaitGroup
@@ -201,7 +203,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 				if prepare != nil {
 					prepare(&q)
 				}
-				o, err := e.runner.Remote.Call(e.ctx, q)
+				o, err := e.runner.Remote.Call(batchCtx, q)
 				results <- reply{t, o, err}
 			}
 		}()
@@ -230,6 +232,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 		n.ObservedAt = time.Now().UTC()
 		e.r.Deployment.Nodes[result.t.Name] = n
 		if saveErr := e.save(); saveErr != nil {
+			cancel()
 			failures = append(failures, saveErr)
 		}
 	}
