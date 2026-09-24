@@ -174,6 +174,27 @@ func TestAllTargetsPreflightBeforeMutation(t *testing.T) {
 		t.Fatal("lost interruption")
 	}
 }
+
+func TestQuorumWaitExplainsBlockingNode(t *testing.T) {
+	p, r, _, f := setup(t)
+	name := p.Validators()[3].Name
+	missing := false
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && q.Target.Name == name && !missing {
+			missing = true
+			delete(o.Core.Quorums, "llmq_devnet_platform")
+		}
+		return nil
+	}
+	var progress []string
+	r.Progress = func(s string) { progress = append(progress, s) }
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(progress, "\n"), name+": missing llmq_devnet_platform (Core height ") {
+		t.Fatal("quorum wait omitted the actual blocking node and reason", progress)
+	}
+}
 func TestLostRegistrationAndPlatformResponseResume(t *testing.T) {
 	for _, action := range []string{"register", "platform-start"} {
 		t.Run(action, func(t *testing.T) {

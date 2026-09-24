@@ -363,6 +363,7 @@ func (e *execution) deploy() error {
 	}
 	for {
 		ready := true
+		var waiting []string
 		minLock := int64(0)
 		err = e.each(p.Targets, "core-status", nil, func(t node.Target, o node.Observation) error {
 			if err := e.core(t, o); err != nil {
@@ -370,6 +371,7 @@ func (e *execution) deploy() error {
 			}
 			if err := coreHealthy(t, d.Nodes[t.Name], o.Core, p.Miner().Name); err != nil {
 				ready = false
+				waiting = append(waiting, fmt.Sprintf("%s: %s (Core height %d)", t.Name, err, o.Core.Height))
 			}
 			if minLock == 0 || o.Core.ChainLockHeight < minLock {
 				minLock = o.Core.ChainLockHeight
@@ -388,6 +390,7 @@ func (e *execution) deploy() error {
 			}
 			break
 		}
+		e.report("waiting for Core readiness: " + strings.Join(waiting, "; "))
 		if err = e.wait(); err != nil {
 			return fmt.Errorf("waiting for READY masternodes, all devnet quorums and ChainLocks: %w", err)
 		}
@@ -440,8 +443,14 @@ func (e *execution) peers() []node.Peer {
 	return peers
 }
 func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core, miner string) error {
-	if c == nil || !c.Synced || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
-		return errors.New("Core sync/peers/ChainLock not ready")
+	if c == nil {
+		return errors.New("Core observation missing")
+	}
+	if !c.Synced || c.IBD || c.Peers < 1 || c.Height < c.Headers {
+		return fmt.Errorf("Core not synchronized (height=%d headers=%d peers=%d mnsync=%t ibd=%t)", c.Height, c.Headers, c.Peers, c.Synced, c.IBD)
+	}
+	if c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
+		return fmt.Errorf("ChainLock not ready/fresh (locked=%d tip=%d)", c.ChainLockHeight, c.Height)
 	}
 	if t.Name == miner && (c.Mining == nil || !c.Mining.Running || len(c.Mining.ContainerID) != 64) {
 		return errors.New("persistent miner unavailable")
