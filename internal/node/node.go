@@ -165,6 +165,12 @@ var actions = map[string]bool{"inspect": true, "core-start": true, "core-status"
 var diagnostic = regexp.MustCompile(`^[a-z0-9:_-]{1,120}$`)
 
 func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
+	if r.SSH == nil {
+		return Observation{}, errors.New("authenticated SSH required")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return Observation{}, errors.New("node operation requires a deadline")
+	}
 	if !actions[q.Action] {
 		return Observation{}, errors.New("unsupported node action")
 	}
@@ -172,11 +178,10 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 		return Observation{}, err
 	}
 	if q.Action == "identity" {
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			return Observation{}, err
 		}
-		_ = pub
 		q.NodePrivateKey = base64.StdEncoding.EncodeToString(priv)
 		cert, key, err := certificate(q.Target)
 		if err != nil {

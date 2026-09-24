@@ -30,7 +30,12 @@ def main():
         w=Disposable(q,root,root/'lock')
         # Match the executor's Ed25519 certificate profile and loopback SAN.
         subprocess.run(['openssl','req','-new','-x509','-newkey','ed25519','-nodes','-keyout',str(root/'key.pem'),'-out',str(root/'cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        w.atomic('secrets.json',dict(rpcPassword='private-ci-only',platformNodeID=node_id,operatorPublicKey='b'*96,nodePrivateKey=base64.b64encode(bytes(64)).decode(),tlsCertificate=(root/'cert.pem').read_text(),tlsPrivateKey=(root/'key.pem').read_text()))
+        key_der=subprocess.check_output(['openssl','pkey','-in',str(root/'key.pem'),'-outform','DER'])
+        public_der=subprocess.check_output(['openssl','pkey','-in',str(root/'key.pem'),'-pubout','-outform','DER'])
+        private=key_der[-32:]+public_der[-32:]
+        node_id=hashlib.sha256(public_der[-32:]).hexdigest()[:40]
+        q['peers'][0]['nodeId']=node_id
+        w.atomic('secrets.json',dict(rpcPassword='private-ci-only',platformNodeID=node_id,operatorPublicKey='b'*96,nodePrivateKey=base64.b64encode(private).decode(),tlsCertificate=(root/'cert.pem').read_text(),tlsPrivateKey=(root/'key.pem').read_text()))
         w.platform_files()
         try:
             td=w.run(['docker','run','--rm','--network','none','--entrypoint','tenderdash','-v',str(root/'platform/tenderdash')+':/tenderdash',w.images['tenderdash'],'show-node-id','--home','/tenderdash']).decode().strip()

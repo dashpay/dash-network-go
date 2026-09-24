@@ -43,6 +43,13 @@ jobs:
           bin/dashnet validate --network examples/devnet.yaml
           bin/dashnet validate --network examples/testnet.yaml
           bin/dashnet validate --network examples/devnet-compute.yaml
+          bin/dashnet validate --network examples/devnet-lifecycle.yaml
+          for command in deployment-plan deploy doctor stop; do
+            if bin/dashnet "$command"; then
+              echo "$command accepted missing explicit intent"
+              exit 1
+            fi
+          done
           if bin/dashnet provision; then
             echo 'Provisioning accepted missing explicit intent'
             exit 1

@@ -145,6 +145,7 @@ class Worker:
         self.require((self.root.stat().st_mode & 0o777) == 0o700, 'bootstrap-root-permissions')
         self.require((self.root / 'owner').read_text().strip() == self.c['computePlanId'] + ':' + self.t['instanceId'], 'bootstrap-owner')
         self.require((self.root / 'ready').read_text().strip() == self.c['bootstrapId'], 'bootstrap-not-ready')
+        self.require(b'HTTP2' in self.run(['curl','--version']), 'curl-http2-required')
         prior = self.read('deployment.json')
         if prior:
             self.require(prior['planId'] == self.c['planId'], 'deployment-plan-changed')

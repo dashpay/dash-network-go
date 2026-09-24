@@ -1,0 +1,47 @@
+# Full lifecycle topology example. All AWS IDs are placeholders; no live resources.
+# Copy privately, select a trusted prepared Linux AMI and existing networking.
+apiVersion: dash.network/v1alpha1
+kind: Network
+metadata:
+  name: devnet-lifecycle-example
+  displayName: Disposable devnet lifecycle
+  description: Full lifecycle intent; replace all placeholder IDs before planning.
+  visibility: private
+chain:
+  type: devnet
+  generation: 1
+aws:
+  accountId: '123456789012'
+  region: us-west-2
+  networkTagKey: DashNetwork
+  provision:
+    stateTable: dashnet-operations
+    vpcId: vpc-00000001
+    subnetId: subnet-00000001
+    securityGroupIds:
+    - sg-00000001
+    keyName: YOUR_EMERGENCY_SSH_KEY
+    publicIpv4: false
+    rootVolumeGiB: 100
+    amis:
+      arm64:
+        id: ami-00000001
+        ownerId: '123456789012'
+nodes:
+- name: validators
+  role: validator
+  count: 13
+  architecture: arm64
+  instanceType: t4g.large
+- name: wallet
+  role: wallet
+  count: 1
+  architecture: arm64
+  instanceType: t4g.medium
+images:
+  core: docker.io/dashpay/dashd:23
+  drive: docker.io/dashpay/drive:4.2.0-beta.3
+  dapi: docker.io/dashpay/rs-dapi:4.2.0-beta.3
+  tenderdash: docker.io/dashpay/tenderdash:1.8.0
+  gateway: docker.io/dashpay/envoy:1.39.0-impr.1
+  helper: docker.io/dashpay/dashmate-helper:4.2.0-beta.3

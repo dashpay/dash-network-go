@@ -54,6 +54,9 @@ func (r Record) validateDeployment(p Plan) error {
 	default:
 		return errors.New("invalid deployment stage")
 	}
+	if d.Phase == "network-ready" && (d.Stage != "ready" || d.ObservedAt.IsZero() || d.CoreGenesis == "" || d.GenesisCoreHeight < 1 || d.PayoutAddress == "" || d.SporkAddress == "") {
+		return errors.New("network-ready lacks complete chain evidence")
+	}
 	if d.CoreGenesis != "" && !hex64.MatchString(d.CoreGenesis) {
 		return errors.New("invalid Core genesis evidence")
 	}
@@ -75,7 +78,7 @@ func (r Record) validateDeployment(p Plan) error {
 		if n.OperatorPublicKey != "" && !hex96.MatchString(n.OperatorPublicKey) || n.PlatformNodeID != "" && !hex40.MatchString(n.PlatformNodeID) || n.ProTxHash != "" && !hex64.MatchString(n.ProTxHash) || n.CoreContainerID != "" && !hex64.MatchString(n.CoreContainerID) || n.CoreHeight < 0 || n.PlatformHeight < 0 {
 			return errors.New("invalid deployment target evidence")
 		}
-		if d.Phase == "network-ready" && (n.Phase != "ready" || n.ObservedAt.IsZero()) {
+		if d.Phase == "network-ready" && (n.Phase != "ready" || n.ObservedAt.IsZero() || n.CoreContainerID == "" || n.CoreHeight < 1 || (t.Role == "validator" && (n.PlatformHeight < 1 || n.ProTxHash == "" || n.PlatformNodeID == "" || n.OperatorPublicKey == ""))) {
 			return errors.New("network readiness requires all targets observed")
 		}
 	}
