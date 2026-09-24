@@ -696,6 +696,16 @@ class Worker:
         self.require(all(observed.get(key) is True for key in required), "spork-not-active")
         return {}
 
+    def mine_pause(self):
+        self.require(self.t["role"] in ["miner", "wallet"], "miner-only")
+        value = self.inspect_container("miner")
+        if value:
+            self.verify_image(value, self.images["core"])
+            self.docker("stop", "-t", "20", self.container_name("miner"), timeout=30)
+            observed = self.inspect_container("miner")
+            self.require(observed and observed["Id"] == value["Id"] and not observed["State"]["Running"], "miner-pause-unverified")
+        return {}
+
     def mine_start(self):
         self.require(self.t["role"] in ["miner", "wallet"], "miner-only")
         address = self.q["payoutAddress"]
@@ -1157,6 +1167,7 @@ class Worker:
                 "register",
                 "activate",
                 "mine-start",
+                "mine-pause",
                 "platform-start",
                 "platform-status",
                 "stop",
@@ -1197,6 +1208,8 @@ class Worker:
                 result.update(self.activate())
             elif action == "mine-start":
                 result.update(self.mine_start())
+            elif action == "mine-pause":
+                result.update(self.mine_pause())
             elif action == "platform-start":
                 result.update(self.platform_start())
             elif action == "platform-status":

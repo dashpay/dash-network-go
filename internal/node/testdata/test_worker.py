@@ -148,7 +148,7 @@ class Tests(unittest.TestCase):
 
     def test_read_only_adapter_refuses_every_mutating_action(self):
         for action in ["core-start", "core-finalize", "wallet", "identity",
-                       "fund", "register", "activate", "mine-start",
+                       "fund", "register", "activate", "mine-start", "mine-pause",
                        "platform-start", "stop", "upgrade-stage", "upgrade-apply"]:
             q = request()
             q["action"] = action

@@ -274,8 +274,15 @@ func TestQuorumWaitExplainsBlockingNode(t *testing.T) {
 	p, r, _, f := setup(t)
 	name := p.Validators()[3].Name
 	missing := false
+	mining := false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-start" {
+			mining = true
+		}
+		return nil
+	}
 	f.after = func(q node.Request, o *node.Observation) error {
-		if q.Action == "core-status" && q.Target.Name == name && !missing {
+		if q.Action == "core-status" && q.Target.Name == name && mining && !missing {
 			missing = true
 			delete(o.Core.Quorums, "llmq_devnet_platform")
 		}
@@ -461,6 +468,40 @@ func TestDoctorObservationWindowAndCancellation(t *testing.T) {
 	for _, q := range f.calls {
 		if q.Action != "core-status" && q.Action != "platform-status" {
 			t.Fatal("doctor mutated", q.Action)
+		}
+	}
+}
+
+func TestQuietMasternodeSyncBeforeStartingMining(t *testing.T) {
+	p, r, _, f := setup(t)
+	paused, started := false, false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-pause" {
+			paused = true
+		}
+		if q.Action == "mine-start" {
+			if !paused {
+				return errors.New("mined before the quiet sync interval")
+			}
+			started = true
+		}
+		return nil
+	}
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && !paused {
+			o.Core.Synced = false
+		}
+		return nil
+	}
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	if !paused || !started {
+		t.Fatal("quiet interval did not complete before mining")
+	}
+	for _, q := range f.calls {
+		if q.Action == "stop" {
+			t.Fatal("quiet sync stopped Core")
 		}
 	}
 }

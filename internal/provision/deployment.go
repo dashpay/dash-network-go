@@ -50,7 +50,7 @@ func (r Record) validateDeployment(p Plan) error {
 		return errors.New("invalid deployment phase")
 	}
 	switch d.Stage {
-	case "preflight", "core-start", "identities", "core-finalize", "registrations", "quorums", "platform-start", "health", "ready", "stopping", "stopped":
+	case "preflight", "core-start", "identities", "core-finalize", "registrations", "core-sync", "quorums", "platform-start", "health", "ready", "stopping", "stopped":
 	default:
 		return errors.New("invalid deployment stage")
 	}

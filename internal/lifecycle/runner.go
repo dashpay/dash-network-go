@@ -412,6 +412,40 @@ func (e *execution) deploy() error {
 	if _, err = e.call(p.Wallet(), "activate", nil); err != nil {
 		return err
 	}
+	// With <=3 ordinary peers Core requires a quiet interval before mnsync
+	// finishes. Starting ten-second mining first can reset that timer forever.
+	// Keep Core running; stop only the owned miner if a resumed run needs quiet.
+	if err = e.stage("core-sync"); err != nil {
+		return err
+	}
+	paused := false
+	for {
+		ready := true
+		if err = e.each(p.Targets, "core-status", nil, func(t node.Target, o node.Observation) error {
+			if err := e.core(t, o); err != nil {
+				return err
+			}
+			if !o.Core.Synced || o.Core.IBD || o.Core.Headers > o.Core.Height || o.Core.Peers == 0 {
+				ready = false
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if ready {
+			break
+		}
+		if !paused {
+			if _, err = e.call(p.Miner(), "mine-pause", nil); err != nil {
+				return err
+			}
+			paused = true
+		}
+		e.report("waiting for masternode sync with mining paused; Core remains running")
+		if err = e.wait(); err != nil {
+			return err
+		}
+	}
 	if _, err = e.call(p.Miner(), "mine-start", func(q *node.Request) { q.PayoutAddress = d.PayoutAddress }); err != nil {
 		return err
 	}

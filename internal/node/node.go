@@ -195,7 +195,7 @@ type Remote struct {
 	Account, Region string
 }
 
-var actions = map[string]bool{"inspect": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "mine-start": true, "platform-start": true, "platform-status": true, "stop": true}
+var actions = map[string]bool{"inspect": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "mine-start": true, "mine-pause": true, "platform-start": true, "platform-status": true, "stop": true}
 var diagnostic = regexp.MustCompile(`^[a-z0-9:_-]{1,120}$`)
 
 func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
