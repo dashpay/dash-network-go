@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.proof_operation || 'none' }}
-  cancel-in-progress: ${{ !inputs.proof_operation || inputs.proof_operation == 'none' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   aws-acceptance:
