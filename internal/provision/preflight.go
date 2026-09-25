@@ -56,6 +56,20 @@ func Prepare(ctx context.Context, n spec.Network, identity inventory.STS, cloud 
 		return Plan{}, err
 	}
 	cfg := n.AWS.Provision
+	// Old immutable plans remain inspectable, but new public provisioning must
+	// explicitly select our address pool. Never fall back to Amazon public IPv4.
+	if cfg.PublicIPv4 {
+		if cfg.IPAMPoolID == "" {
+			return Plan{}, errors.New("public provisioning requires aws.provision.ipamPoolId; Amazon-assigned public addresses are not allowed")
+		}
+		ipam, ok := cloud.(IPAM)
+		if !ok {
+			return Plan{}, errors.New("EC2 client does not support IPAM")
+		}
+		if err := verifyPool(ctx, n, ipam); err != nil {
+			return Plan{}, err
+		}
+	}
 	subnets, err := cloud.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{cfg.SubnetID}})
 	if err != nil {
 		return Plan{}, fmt.Errorf("describe subnet: %w", err)

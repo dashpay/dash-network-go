@@ -23,7 +23,7 @@ func launch(ctx context.Context, p Plan, t Target, c EC2) (string, error) {
 	out, err := c.RunInstances(ctx, &ec2.RunInstancesInput{
 		ImageId: aws.String(t.AMI), InstanceType: types.InstanceType(t.InstanceType), MinCount: aws.Int32(1), MaxCount: aws.Int32(1), ClientToken: aws.String(p.Token(t)), KeyName: aws.String(cfg.KeyName),
 		// A specified subnet gives the idempotency token a stable AZ scope.
-		NetworkInterfaces:   []types.InstanceNetworkInterfaceSpecification{{DeviceIndex: aws.Int32(0), SubnetId: aws.String(cfg.SubnetID), Groups: cfg.SecurityGroupIDs, AssociatePublicIpAddress: aws.Bool(cfg.PublicIPv4), DeleteOnTermination: aws.Bool(true)}},
+		NetworkInterfaces:   []types.InstanceNetworkInterfaceSpecification{{DeviceIndex: aws.Int32(0), SubnetId: aws.String(cfg.SubnetID), Groups: cfg.SecurityGroupIDs, AssociatePublicIpAddress: aws.Bool(false), DeleteOnTermination: aws.Bool(true)}},
 		BlockDeviceMappings: []types.BlockDeviceMapping{{DeviceName: aws.String(t.RootDevice), Ebs: &types.EbsBlockDevice{VolumeSize: aws.Int32(cfg.RootVolumeGiB), VolumeType: types.VolumeTypeGp3, Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(false)}}},
 		MetadataOptions:     &types.InstanceMetadataOptionsRequest{HttpTokens: types.HttpTokensStateRequired, HttpEndpoint: types.InstanceMetadataEndpointStateEnabled, HttpPutResponseHopLimit: aws.Int32(1)},
 		TagSpecifications:   []types.TagSpecification{{ResourceType: types.ResourceTypeInstance, Tags: tags}, {ResourceType: types.ResourceTypeVolume, Tags: tags}},
@@ -157,5 +157,5 @@ func reconcile(p Plan, r *Record, live map[string]types.Instance, waitForVisibil
 // Footprint is suitable for a terminal summary, not a public status projection.
 func (p Plan) Footprint() string {
 	cfg := p.Network.AWS.Provision
-	return fmt.Sprintf("%s: %d on-demand EC2 instances, %d GiB gp3 root storage, public IPv4=%s; existing subnet %s; root disks retained on termination", p.Network.Metadata.Name, len(p.Targets), int64(len(p.Targets))*int64(cfg.RootVolumeGiB), strconv.FormatBool(cfg.PublicIPv4), cfg.SubnetID)
+	return fmt.Sprintf("%s: %d on-demand EC2 instances, %d GiB gp3 root storage, public IPv4=%s, IPAM pool=%s; existing subnet %s; root disks and IPAM Elastic IPs retained on termination", p.Network.Metadata.Name, len(p.Targets), int64(len(p.Targets))*int64(cfg.RootVolumeGiB), strconv.FormatBool(cfg.PublicIPv4), cfg.IPAMPoolID, cfg.SubnetID)
 }

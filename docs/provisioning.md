@@ -1,14 +1,11 @@
 # EC2 provisioning and recovery
 
-This is the first **mutating** slice of the new engine. It creates a bounded
-fleet directly with the AWS Go SDK and keeps its progress in DynamoDB. It has
-been failure-tested with fake AWS clients; **no live AWS launch has been proved**.
-
-It is deliberately named EC2 provisioning, not network deployment. There is no
-node preparation, authenticated node transport, Core bootstrap, funding,
-registration, Platform start, upgrade, reset, adoption, or destroy implementation.
-`compute-ready` means every intended instance was observed **EC2 running**, not
-that SSH, the OS, Core, Platform, or DAPI passed a health check.
+This stage creates a bounded fleet directly with the AWS Go SDK and keeps its
+progress in DynamoDB. Other commands handle the subsequent
+[network lifecycle](lifecycle.md). For new public-facing nodes, use the explicit
+[IPAM/BYOIP address contract](ipam.md). `compute-ready` means all intended instances
+are running and their requested IPAM addresses are associated—not that SSH,
+the OS, Core, Platform, or DAPI passed a health check.
 
 ## Concrete input
 
@@ -21,6 +18,8 @@ example are placeholders. Keep the real definition and plan private.
   routes, security-group policy, outbound access, or SSH host identity. Review
   these first. `publicIpv4: false` suppresses public IPv4 allocation, **not IPv6**;
   an IPv6-enabled subnet can still assign IPv6. Security groups remain authoritative.
+  `publicIpv4: true` requires `ipamPoolId`; Amazon automatic public IPs are never
+  requested. The plan accounts for one IPAM Elastic IP per public target.
 - One exact AMI **and owner account** per requested architecture. The CLI checks
   architecture, HVM/Linux/EBS, availability, root size, and absence of marketplace
   product codes/extra EBS disks. Canonical's ephemeral instance-store mappings are
@@ -168,6 +167,8 @@ Minimum API surfaces to scope in IAM are:
 | Identity | `sts:GetCallerIdentity` |
 | Footprint/readback | `ec2:DescribeSubnets`, `DescribeSecurityGroups`, `DescribeKeyPairs`, `DescribeImages`, `DescribeInstanceTypes`, `DescribeInstances` |
 | Instance creation | `ec2:RunInstances`, `ec2:CreateTags` for tag-on-create; scoped AMI, subnet, groups, key pair, and instance/volume resources |
+| IPAM public addresses | `ec2:DescribeIpamPools`, `DescribeAddresses`, `AllocateAddress`, `AssociateAddress`, scoped `CreateTags`; see [IPAM](ipam.md) |
+| Explicit retired-address cleanup | `ec2:ReleaseAddress` after every original instance is terminated and every owned address is detached |
 | Journal | `dynamodb:DescribeTable`, `GetItem`, `PutItem`, `UpdateItem` on the one regional table |
 
 Encrypted volumes using account-specific KMS policies may require additional
@@ -175,8 +176,7 @@ permissions. IAM restrictions are defense in depth; these action names alone are
 **not** a ready-to-deploy least-privilege policy. There is no `iam:PassRole`, node
 IAM profile, security-group mutation, termination, or journal deletion call here.
 
-There is not yet a deployment workflow in this **public** repository. The existing
-planning workflow remains read-only. Before wiring production credentials, add
+The planning workflow remains read-only. Before wiring production credentials, use
 trusted-ref/environment-scoped OIDC policies, protected environments, and
 per-network `concurrency` with `cancel-in-progress: false`. DynamoDB provides the
 cross-terminal/Actions exclusion that GitHub concurrency alone cannot provide.

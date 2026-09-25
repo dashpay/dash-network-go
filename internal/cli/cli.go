@@ -31,6 +31,7 @@ Usage:
   dashnet inventory --network network.yaml [--profile name] [--out inventory.json]
   dashnet status    --inventory inventory.json [--public] [--max-age 5m] [--out status.json]
   dashnet provision-plan --network network.yaml [--profile name] --out ec2-plan.json
+  dashnet release-addresses --plan ec2-plan.json --confirm PLAN_ID [--profile name]
   dashnet provision --plan ec2-plan.json --confirm PLAN_ID [--profile name]
   dashnet operation --plan ec2-plan.json [--profile name]
   dashnet operation-unlock --plan ec2-plan.json --expected-owner RUNNER_ID
@@ -98,7 +99,7 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		return runLifecycle(ctx, args, out, stderr, version)
 	case "bootstrap-plan", "bootstrap":
 		return runBootstrap(ctx, args, out, stderr, version)
-	case "provision-plan", "provision", "operation", "operation-unlock":
+	case "provision-plan", "provision", "operation", "operation-unlock", "release-addresses":
 		return runProvision(ctx, args, out, stderr, version)
 	case "validate", "resolve", "plan", "inventory", "status":
 	default:

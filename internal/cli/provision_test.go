@@ -26,6 +26,8 @@ func TestMutationRequiresConcretePlanAcknowledgmentBeforeAWS(t *testing.T) {
 	for _, args := range [][]string{
 		{"provision", "--plan", path},
 		{"provision", "--plan", path, "--confirm", "wrong"},
+		{"release-addresses", "--plan", path},
+		{"release-addresses", "--plan", path, "--confirm", "wrong"},
 		{"operation-unlock", "--plan", path},
 		{"operation-unlock", "--plan", path, "--expected-owner", "old"},
 		{"operation-unlock", "--plan", path, "--confirm-runner-stopped"},
@@ -47,7 +49,7 @@ func TestProvisionCLIArguments(t *testing.T) {
 			t.Fatalf("accepted incomplete command %v", args)
 		}
 	}
-	for _, cmd := range []string{"provision", "provision-plan", "operation", "operation-unlock"} {
+	for _, cmd := range []string{"provision", "provision-plan", "operation", "operation-unlock", "release-addresses"} {
 		if err := cli.Run(context.Background(), []string{cmd, "--help"}, &bytes.Buffer{}, &bytes.Buffer{}, "test"); err != nil {
 			t.Fatal(err)
 		}

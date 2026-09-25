@@ -9,11 +9,15 @@ import (
 
 var resourceID = regexp.MustCompile(`^(vpc|subnet|sg|ami)-([0-9a-f]{8}|[0-9a-f]{17})$`)
 var tableName = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,255}$`)
+var ipamPoolID = regexp.MustCompile(`^ipam-pool-[0-9a-f]{17}$`)
 
 func (n Network) ValidateProvision() error {
 	p := n.AWS.Provision
 	if p == nil {
 		return errors.New("aws.provision is required for EC2 provisioning")
+	}
+	if p.IPAMPoolID != "" && (!p.PublicIPv4 || !ipamPoolID.MatchString(p.IPAMPoolID)) {
+		return errors.New("ipamPoolId must be an explicit IPAM pool ID and requires publicIpv4: true")
 	}
 	if n.Chain.Type == "testnet" {
 		if !strings.HasPrefix(n.Metadata.Name, "testnet-") {
