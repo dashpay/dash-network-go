@@ -45,3 +45,21 @@ func TestReadRejectsTrailingOrUnknownJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestTextTrustPublicationIsPrivateAndNonOverwriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	if err := files.WriteText(path, "original\n"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("trust permissions", err)
+	}
+	if err = files.WriteText(path, "replacement\n"); err == nil {
+		t.Fatal("trust overwritten")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "original\n" {
+		t.Fatal("trust changed", err)
+	}
+}

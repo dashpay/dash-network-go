@@ -679,14 +679,31 @@ class Worker:
 
     def activate(self):
         self.require(self.t["role"] == "wallet", "wallet-only")
-        active = self.rpc("spork", ["active"])
-        for key in [
+        required = [
             "SPORK_17_QUORUM_DKG_ENABLED",
             "SPORK_19_CHAINLOCKS_ENABLED",
             "SPORK_21_QUORUM_ALL_CONNECTED",
-        ]:
-            if key in active and not active[key]:
-                self.rpc("spork", [key, 0])
+        ]
+        active = self.rpc("spork", ["active"])
+        self.require(all(key in active for key in required), "unsupported-spork-profile")
+        for key in required:
+            if not active[key]:
+                self.require(
+                    self.rpc("sporkupdate", [key, 0]) == "success",
+                    "spork-update-not-accepted",
+                )
+        observed = self.rpc("spork", ["active"])
+        self.require(all(observed.get(key) is True for key in required), "spork-not-active")
+        return {}
+
+    def mine_pause(self):
+        self.require(self.t["role"] in ["miner", "wallet"], "miner-only")
+        value = self.inspect_container("miner")
+        if value:
+            self.verify_image(value, self.images["core"])
+            self.docker("stop", "-t", "20", self.container_name("miner"), timeout=30)
+            observed = self.inspect_container("miner")
+            self.require(observed and observed["Id"] == value["Id"] and not observed["State"]["Running"], "miner-pause-unverified")
         return {}
 
     def mine_start(self):
@@ -1032,11 +1049,24 @@ class Worker:
             "http://127.0.0.1:" + str(self.ports["platformRPC"]) + "/" + method,
             timeout=15,
         ) as response:
-            value = json.loads(response.read(1024 * 1024))
+            raw = response.read(1024 * 1024 + 1)
+        self.require(len(raw) <= 1024 * 1024, "tenderdash-response-size")
+        value = json.loads(raw)
         self.require(
-            "result" in value and "error" not in value, "tenderdash-rpc-failed"
+            isinstance(value, dict) and value.get("error") is None,
+            "tenderdash-rpc-failed",
         )
-        return value["result"]
+        # Tenderdash 1.8 GET endpoints return bare objects; JSON-RPC callers and
+        # earlier endpoints may wrap the same object in a result envelope.
+        result = value.get("result", value)
+        fields = {"status": ["node_info", "sync_info", "validator_info"],
+                  "block": ["block_id", "block"]}.get(method.split("?", 1)[0])
+        self.require(
+            fields is not None and isinstance(result, dict)
+            and all(isinstance(result.get(key), dict) for key in fields),
+            "tenderdash-response-shape",
+        )
+        return result
 
     def dapi_status(self):
         # Exercise the real TLS -> HTTP/2 -> gRPC -> DAPI -> Drive/TD path.
@@ -1137,6 +1167,7 @@ class Worker:
                 "register",
                 "activate",
                 "mine-start",
+                "mine-pause",
                 "platform-start",
                 "platform-status",
                 "stop",
@@ -1177,6 +1208,8 @@ class Worker:
                 result.update(self.activate())
             elif action == "mine-start":
                 result.update(self.mine_start())
+            elif action == "mine-pause":
+                result.update(self.mine_pause())
             elif action == "platform-start":
                 result.update(self.platform_start())
             elif action == "platform-status":

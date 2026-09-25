@@ -19,6 +19,7 @@ type NodeProgress struct {
 }
 
 type Record struct {
+	Join              *JoinProgress           `json:"join,omitempty"`
 	APIVersion        string                  `json:"apiVersion"`
 	Kind              string                  `json:"kind"`
 	Revision          int64                   `json:"revision"`
@@ -33,6 +34,8 @@ type Record struct {
 	Nodes             map[string]NodeProgress `json:"nodes"`
 	Bootstrap         *BootstrapProgress      `json:"bootstrap,omitempty"`
 	Deployment        *DeploymentProgress     `json:"deployment,omitempty"`
+	Runtime           *RuntimeState           `json:"runtime,omitempty"`
+	Upgrade           *UpgradeProgress        `json:"upgrade,omitempty"`
 }
 
 func NewRecord(p Plan) Record {
@@ -81,7 +84,13 @@ func (r Record) Validate(p Plan) error {
 	if err := r.validateBootstrap(p); err != nil {
 		return err
 	}
-	return r.validateDeployment(p)
+	if err := r.validateDeployment(p); err != nil {
+		return err
+	}
+	if err := r.validateJoin(p); err != nil {
+		return err
+	}
+	return r.validateUpgrade(p)
 }
 
 // Store serializes CLI and Actions through a non-expiring owner claim. The same

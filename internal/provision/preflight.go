@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -103,9 +104,8 @@ func Prepare(ctx context.Context, n spec.Network, identity inventory.STS, cloud 
 		if aws.ToString(img.ImageId) != requested.ID || aws.ToString(img.OwnerId) != requested.OwnerID || string(img.Architecture) != string(arch(a)) || img.State != types.ImageStateAvailable || img.RootDeviceType != types.DeviceTypeEbs || img.VirtualizationType != types.VirtualizationTypeHvm || img.Platform != "" || len(img.ProductCodes) != 0 || root == "" {
 			return Plan{}, fmt.Errorf("%s AMI must be available, owner-pinned, architecture-matched, HVM Linux/EBS, with no marketplace product codes", a)
 		}
-		// Prevent implicit extra disks (and costs) inherited from the AMI.
-		if len(img.BlockDeviceMappings) != 1 || aws.ToString(img.BlockDeviceMappings[0].DeviceName) != root || img.BlockDeviceMappings[0].Ebs == nil || aws.ToInt32(img.BlockDeviceMappings[0].Ebs.VolumeSize) > cfg.RootVolumeGiB {
-			return Plan{}, fmt.Errorf("%s AMI must have one EBS root disk no larger than rootVolumeGiB", a)
+		if err := validateImageDisks(img, cfg.RootVolumeGiB); err != nil {
+			return Plan{}, fmt.Errorf("%s AMI: %w", a, err)
 		}
 		roots[a] = root
 	}
@@ -130,4 +130,37 @@ func Prepare(ctx context.Context, n spec.Network, identity inventory.STS, cloud 
 	}
 	p := build(n, roots)
 	return p, p.Validate()
+}
+
+var ephemeralDevice = regexp.MustCompile(`^ephemeral[0-9]+$`)
+
+// Canonical Ubuntu AMIs include ephemeral instance-store declarations even on
+// EBS-only instance types. They do not create additional billable EBS volumes.
+// Reject every extra EBS or ambiguous mapping, irrespective of its position.
+func validateImageDisks(img types.Image, requestedGiB int32) error {
+	root := aws.ToString(img.RootDeviceName)
+	roots := 0
+	devices, virtuals := map[string]bool{}, map[string]bool{}
+	for _, mapping := range img.BlockDeviceMappings {
+		device, virtual := aws.ToString(mapping.DeviceName), aws.ToString(mapping.VirtualName)
+		if device == "" || devices[device] || mapping.NoDevice != nil {
+			return errors.New("invalid, duplicate or suppressed block-device mapping")
+		}
+		devices[device] = true
+		if device == root {
+			if mapping.Ebs == nil || virtual != "" || aws.ToInt32(mapping.Ebs.VolumeSize) < 1 || aws.ToInt32(mapping.Ebs.VolumeSize) > requestedGiB {
+				return errors.New("root must be one EBS disk no larger than rootVolumeGiB")
+			}
+			roots++
+		} else {
+			if mapping.Ebs != nil || !ephemeralDevice.MatchString(virtual) || virtuals[virtual] {
+				return errors.New("extra disks must be unique ephemeral instance-store mappings, never extra EBS volumes")
+			}
+			virtuals[virtual] = true
+		}
+	}
+	if roots != 1 {
+		return errors.New("exactly one EBS root mapping is required")
+	}
+	return nil
 }

@@ -19,12 +19,13 @@ type HealthNode struct {
 	Problems       []string `json:"problems"`
 }
 type Health struct {
-	Network    string                `json:"network"`
-	PlanID     string                `json:"planId"`
-	ObservedAt time.Time             `json:"observedAt"`
-	Healthy    bool                  `json:"healthy"`
-	Nodes      map[string]HealthNode `json:"nodes"`
-	Problems   []string              `json:"problems"`
+	Network           string                `json:"network"`
+	PlanID            string                `json:"planId"`
+	ObservedAt        time.Time             `json:"observedAt"`
+	Healthy           bool                  `json:"healthy"`
+	Nodes             map[string]HealthNode `json:"nodes"`
+	Problems          []string              `json:"problems"`
+	ObservationWindow string                `json:"observationWindow"`
 }
 type samples struct {
 	core     *node.Core
@@ -32,7 +33,7 @@ type samples struct {
 	problems []string
 }
 
-func (r Runner) sample(ctx context.Context, p Plan, reference int64) map[string]samples {
+func (r Runner) sample(ctx context.Context, p Plan, record provision.Record, reference int64) map[string]samples {
 	result := map[string]samples{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -51,14 +52,14 @@ func (r Runner) sample(ctx context.Context, p Plan, reference int64) map[string]
 			}
 			defer func() { <-limit }()
 			s := samples{}
-			o, err := r.Remote.Call(ctx, p.Request(t, "core-status"))
+			o, err := r.Remote.Call(ctx, runtimeRequest(p, record, t, "core-status"))
 			if err != nil {
 				s.problems = append(s.problems, "Core: "+node.SafeError(err))
 			} else {
 				s.core = o.Core
 			}
 			if t.Role == "validator" {
-				q := p.Request(t, "platform-status")
+				q := runtimeRequest(p, record, t, "platform-status")
 				q.ReferenceHeight = reference
 				o, err = r.Remote.Call(ctx, q)
 				if err != nil {
@@ -80,6 +81,14 @@ func (r Runner) sample(ctx context.Context, p Plan, reference int64) map[string]
 // restart, funding or configuration change is allowed through this path.
 func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (Health, error) {
 	h := Health{Network: p.Bootstrap.Compute.Network.Metadata.Name, PlanID: p.ID, Nodes: map[string]HealthNode{}, Problems: []string{}}
+	window := r.ObservationWindow
+	if window == 0 {
+		window = 15 * time.Second
+	}
+	if window < 0 {
+		return h, errors.New("health observation window must be positive")
+	}
+	h.ObservationWindow = window.String()
 	if err := p.Validate(); err != nil {
 		return h, err
 	}
@@ -88,6 +97,9 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	}
 	if record.Deployment == nil || record.Deployment.PlanID != p.ID {
 		return h, errors.New("missing matching deployment journal")
+	}
+	if _, err := effectiveImages(p, record); err != nil {
+		return h, err
 	}
 	if r.Remote == nil {
 		return h, errors.New("authenticated transport required")
@@ -101,7 +113,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	if err := liveScope(ctx, p, record, r.Cloud); err != nil {
 		return h, err
 	}
-	a := r.sample(ctx, p, 0)
+	a := r.sample(ctx, p, record, 0)
 	reference := int64(0)
 	for _, t := range p.Validators() {
 		if v := a[t.Name].platform; v != nil && v.Height > 0 && (reference == 0 || v.Height < reference) {
@@ -113,7 +125,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 			return h, err
 		}
 	} else {
-		timer := time.NewTimer(15 * time.Second)
+		timer := time.NewTimer(window)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
@@ -121,7 +133,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 		case <-timer.C:
 		}
 	}
-	b := r.sample(ctx, p, reference)
+	b := r.sample(ctx, p, record, reference)
 	commonHash := ""
 	for _, t := range p.Targets {
 		v, first := b[t.Name], a[t.Name]

@@ -144,6 +144,13 @@ rechecks the fleet, restores the same identities/registrations and retains genes
 Do not regenerate a deployment plan or change generation to bypass an interruption.
 Address/instance, image, identity or genesis drift fails closed.
 
+Read-only requests use a separately guarded observation adapter. Compatible RPC
+response decoding can be repaired while retaining the exact original mutation
+recipe in a reviewed recovery build. The adapter refuses every mutation action;
+it cannot configure, register, start or stop services. Retain that build's source
+revisions, recipe hash and executable checksum alongside the original plan.
+This is not permission to replace a bound mutation recipe or edit plan IDs.
+
 To halt this tool's owned containers while preserving recovery data:
 
 ```sh
@@ -152,10 +159,13 @@ dashnet stop --plan out/deployment.json --confirm EXACT_DEPLOYMENT_ID \
 ```
 
 Stop is disruptive and explicit. It verifies every target and stopped-container
-readback, preserves all disks/identities, and **does not terminate EC2 or stop
+readback, stops the mining host before withdrawing validators, preserves all
+disks/identities, and **does not terminate EC2 or stop
 billing**. Resume using `deploy`; there is no implicit reset, prune or rollback.
-There is no destroy/cleanup executor or existing-state upgrade executor in this
-milestone. Do not use this create profile to upgrade managed testnet or live
+If the mining host cannot be verified stopped, other hosts are not stopped by
+that invocation; inspect the unresolved target before retrying.
+There is no generalized destroy/cleanup executor. Existing-state image changes use
+the separate [upgrade executor](upgrades.md). Do not use this create profile to upgrade managed testnet or live
 legacy networks.
 
 ## GitHub Actions execution
@@ -194,4 +204,18 @@ Retain the exact executable for resume. A later main revision with a changed
 recipe refuses the old plan; recover with the cached matching binary locally
 (or a separately reviewed workflow pinned to that binary), never by rewriting IDs.
 Dashboard or GitHub availability is not required for the terminal path. No OIDC
-role, environment secret, bucket, network or dashboard was configured by this PR.
+role or environment for existing Moutai/testnet is implicitly provisioned. The
+disposable acceptance proof uses separate, temporary authority; it is not a
+production workflow credential.
+
+### OIDC subject format
+
+Inspect `gh api repos/dashpay/dash-network-go/actions/oidc/customization/sub`
+before writing IAM trust. This repository currently uses GitHub's immutable
+owner/repository subject: `sub_claim_prefix` is
+`repo:dashpay@11511719/dash-network-go@1384209245`. An environment job appends
+`:environment:ENVIRONMENT_NAME`. The older name-only `repo:dashpay/dash-network-go`
+subject does not match this repository. Bind the exact observed prefix and
+protected environment, with audience `sts.amazonaws.com`; never use a broad
+repository/organization wildcard to get past a failed authentication. Never print
+the raw OIDC token. Check these settings again if authority is deliberately moved.

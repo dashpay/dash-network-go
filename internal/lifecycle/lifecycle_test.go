@@ -174,6 +174,129 @@ func TestAllTargetsPreflightBeforeMutation(t *testing.T) {
 		t.Fatal("lost interruption")
 	}
 }
+
+func TestHealthyFinalStageResumeUsesFreshReadOnlyProof(t *testing.T) {
+	for _, stage := range []string{"health", "ready"} {
+		t.Run(stage, func(t *testing.T) {
+			p, r, s, f := setup(t)
+			if _, err := execute(t, p, r); err != nil {
+				t.Fatal(err)
+			}
+			s.record.Deployment.Stage = stage
+			s.record.Deployment.Phase = "interrupted"
+			start := len(f.calls)
+			got, err := execute(t, p, r)
+			if err != nil || got.Deployment.Phase != "network-ready" {
+				t.Fatal("fresh resume verification failed", err)
+			}
+			reads := map[string]int{}
+			for _, q := range f.calls[start:] {
+				if q.Action != "inspect" && q.Action != "core-status" && q.Action != "platform-status" {
+					t.Fatal("healthy resume repeated a mutation", q.Action)
+				}
+				if q.Action == "core-status" {
+					reads[q.Target.Name]++
+				}
+			}
+			for _, target := range p.Targets {
+				if reads[target.Name] != 2 {
+					t.Fatal("resume trusted cached readiness", target.Name, reads[target.Name])
+				}
+			}
+		})
+	}
+}
+
+func TestStaleReadyMarkerDoesNotSkipRequiredReconciliation(t *testing.T) {
+	p, r, _, f := setup(t)
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	stopped, restarted := true, false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-start" {
+			stopped, restarted = false, true
+		}
+		return nil
+	}
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && q.Target.Name == p.Miner().Name && stopped {
+			o.Core.Mining.Running = false
+		}
+		return nil
+	}
+	got, err := execute(t, p, r)
+	if err != nil || !restarted || got.Deployment.Phase != "network-ready" {
+		t.Fatal("trusted a stale ready marker instead of repairing the stopped miner", err)
+	}
+}
+
+func TestStopFreezesMiningBeforeWithdrawingValidators(t *testing.T) {
+	for _, minerFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(minerFailure), func(t *testing.T) {
+			p, r, _, f := setup(t)
+			if _, err := execute(t, p, r); err != nil {
+				t.Fatal(err)
+			}
+			minerStopped, othersStopped := false, 0
+			f.before = func(q node.Request) error {
+				if q.Action != "stop" {
+					return nil
+				}
+				if q.Target.Name == p.Miner().Name {
+					if minerFailure {
+						return errors.New("miner unreachable")
+					}
+					minerStopped = true
+					return nil
+				}
+				if !minerStopped {
+					t.Error("validator stopped while miner could still advance DKG")
+				}
+				othersStopped++
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := r.Execute(ctx, p, true)
+			if minerFailure {
+				if err == nil || othersStopped != 0 {
+					t.Fatal("continued shutdown after unverified miner stop", err)
+				}
+			} else if err != nil || !minerStopped || othersStopped != len(p.Targets)-1 {
+				t.Fatal("incomplete ordered stop", err)
+			}
+		})
+	}
+}
+
+func TestQuorumWaitExplainsBlockingNode(t *testing.T) {
+	p, r, _, f := setup(t)
+	name := p.Validators()[3].Name
+	missing := false
+	mining := false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-start" {
+			mining = true
+		}
+		return nil
+	}
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && q.Target.Name == name && mining && !missing {
+			missing = true
+			delete(o.Core.Quorums, "llmq_devnet_platform")
+		}
+		return nil
+	}
+	var progress []string
+	r.Progress = func(s string) { progress = append(progress, s) }
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(progress, "\n"), name+": missing llmq_devnet_platform (Core height ") {
+		t.Fatal("quorum wait omitted the actual blocking node and reason", progress)
+	}
+}
 func TestLostRegistrationAndPlatformResponseResume(t *testing.T) {
 	for _, action := range []string{"register", "platform-start"} {
 		t.Run(action, func(t *testing.T) {
@@ -317,5 +440,68 @@ func TestLostCheckpointCancelsWorkAndRetainsRecoveryState(t *testing.T) {
 	s.failSave = nil
 	if _, err = execute(t, p, r); err != nil {
 		t.Fatal("cannot recover original plan", err)
+	}
+}
+
+func TestDoctorObservationWindowAndCancellation(t *testing.T) {
+	p, r, s, f := setup(t)
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	r.Wait = nil
+	r.ObservationWindow = 20 * time.Millisecond
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	health, err := r.Doctor(ctx, p, s.record)
+	if err != nil || !health.Healthy || time.Since(start) < r.ObservationWindow || health.ObservationWindow != "20ms" {
+		t.Fatal("observation interval not honored", health, err)
+	}
+	r.ObservationWindow = time.Minute
+	f.calls = nil
+	short, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	health, err = r.Doctor(short, p, s.record)
+	if !errors.Is(err, context.DeadlineExceeded) || health.Healthy {
+		t.Fatal("cancelled observation became healthy", health, err)
+	}
+	for _, q := range f.calls {
+		if q.Action != "core-status" && q.Action != "platform-status" {
+			t.Fatal("doctor mutated", q.Action)
+		}
+	}
+}
+
+func TestQuietMasternodeSyncBeforeStartingMining(t *testing.T) {
+	p, r, _, f := setup(t)
+	paused, started := false, false
+	f.before = func(q node.Request) error {
+		if q.Action == "mine-pause" {
+			paused = true
+		}
+		if q.Action == "mine-start" {
+			if !paused {
+				return errors.New("mined before the quiet sync interval")
+			}
+			started = true
+		}
+		return nil
+	}
+	f.after = func(q node.Request, o *node.Observation) error {
+		if q.Action == "core-status" && !paused {
+			o.Core.Synced = false
+		}
+		return nil
+	}
+	if _, err := execute(t, p, r); err != nil {
+		t.Fatal(err)
+	}
+	if !paused || !started {
+		t.Fatal("quiet interval did not complete before mining")
+	}
+	for _, q := range f.calls {
+		if q.Action == "stop" {
+			t.Fatal("quiet sync stopped Core")
+		}
 	}
 }

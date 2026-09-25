@@ -2,15 +2,21 @@ import base64
 import copy
 import importlib.util
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "worker", Path(__file__).parents[1] / "worker.py"
 )
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
+
+observer_scope = vars(worker).copy()
+exec((Path(__file__).parents[1] / "observer.py").read_text(), observer_scope)
+Observer = observer_scope["ReadOnlyWorker"]
 
 
 def request():
@@ -113,6 +119,98 @@ class Registration(worker.Worker):
 
 
 class Tests(unittest.TestCase):
+    def test_tenderdash_bare_and_jsonrpc_enveloped_reads(self):
+        class Response:
+            def __init__(self, value):
+                self.raw = json.dumps(value).encode()
+
+            def open(self, url, timeout):
+                return io.BytesIO(self.raw)
+
+        status = dict(node_info={}, sync_info=dict(latest_block_height="32"),
+                      validator_info={})
+        block = dict(block_id=dict(hash="a" * 64), block={})
+        for cls in [worker.Worker, Observer]:
+            w = cls(request())
+            for method, result in [("status", status), ("block?height=32", block)]:
+                for value in [result, dict(jsonrpc="2.0", result=result),
+                              dict(result=result, error=None)]:
+                    w.opener = Response(value)
+                    self.assertEqual(w.tenderdash(method), result)
+            for value in [[], {}, dict(error={}), dict(error=False),
+                          dict(error=dict(code=-1)), dict(result=None),
+                          dict(result=status, error=dict(code=-1)),
+                          dict(sync_info="not an object"),
+                          dict(result=status, padding="x" * 1024 * 1024)]:
+                w.opener = Response(value)
+                with self.assertRaises(worker.Failure):
+                    w.tenderdash("status")
+
+    def test_read_only_adapter_refuses_every_mutating_action(self):
+        for action in ["core-start", "core-finalize", "wallet", "identity",
+                       "fund", "register", "activate", "mine-start", "mine-pause",
+                       "platform-start", "stop", "upgrade-stage", "upgrade-apply"]:
+            q = request()
+            q["action"] = action
+            w = Observer(q)
+            with self.assertRaisesRegex(worker.Failure, "observation-only"):
+                w.execute()
+
+    def test_observer_reports_live_protocol_and_complete_membership(self):
+        class Response:
+            def __init__(self, value):
+                self.raw = json.dumps(value).encode()
+
+            def open(self, url, timeout):
+                return io.BytesIO(self.raw)
+
+        w = Observer(request())
+        w.tenderdash = lambda method: dict(node_info=dict(protocol_version=dict(app="14")))
+        value = dict(quorum_type=107, total="2", validators=[
+            dict(pro_tx_hash="A" * 64, voting_power="100"),
+            dict(pro_tx_hash="B" * 64, voting_power="100")])
+        with patch.object(worker.Worker, "platform_status", return_value={}):
+            for wrapped in [value, dict(result=value)]:
+                w.opener = Response(wrapped)
+                observed = w.platform_status()
+                self.assertEqual(observed["protocol"], 14)
+                self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
+            for invalid in [dict(value, total="3"), dict(value, quorum_type=101),
+                            dict(error=dict(code=-1)), []]:
+                w.opener = Response(invalid)
+                with self.assertRaises(worker.Failure):
+                    w.platform_status()
+
+    def test_activation_uses_core23_update_rpc_and_verifies_readback(self):
+        class Sporks(worker.Worker):
+            active = {"SPORK_17_QUORUM_DKG_ENABLED": False,
+                      "SPORK_19_CHAINLOCKS_ENABLED": False,
+                      "SPORK_21_QUORUM_ALL_CONNECTED": False}
+            updates = 0
+            accept = True
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "spork":
+                    assert params == ["active"], "spork is read-only in Core 23"
+                    return self.active.copy()
+                assert method == "sporkupdate" and params[1] == 0
+                self.updates += 1
+                if self.accept:
+                    self.active[params[0]] = True
+                return "success"
+
+        w = Sporks(request())
+        w.activate()
+        w.activate()
+        self.assertEqual(w.updates, 3)
+        w.accept = False
+        w.active["SPORK_19_CHAINLOCKS_ENABLED"] = False
+        with self.assertRaisesRegex(worker.Failure, "spork-not-active"):
+            w.activate()
+        del w.active["SPORK_19_CHAINLOCKS_ENABLED"]
+        with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
+            w.activate()
+
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
             q = request()

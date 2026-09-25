@@ -67,6 +67,9 @@ func Build(b bootstrap.Plan, live map[string]types.Instance, protocol uint32, no
 	return p, p.Validate()
 }
 func (p Plan) Validate() error {
+	if p.Bootstrap.Compute.Network.Chain.Type != "devnet" {
+		return errors.New("genesis lifecycle is devnet-only; existing chains require a join plan")
+	}
 	if err := p.Bootstrap.Validate(); err != nil {
 		return err
 	}

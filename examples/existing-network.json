@@ -1,0 +1,38 @@
+{
+  "apiVersion": "dash.network/v1alpha1",
+  "kind": "ExistingNetwork",
+  "metadata": {
+    "name": "testnet",
+    "displayName": "Managed testnet",
+    "description": "Example only: replace with inspected, explicitly owned targets",
+    "visibility": "private"
+  },
+  "chainType": "testnet",
+  "coreNetwork": "test",
+  "accountId": "123456789012",
+  "region": "us-west-2",
+  "networkTagKey": "DashNetwork",
+  "stateTable": "dashnet-managed-state",
+  "access": {
+    "user": "ubuntu",
+    "port": 22,
+    "address": "public"
+  },
+  "targets": [
+    {
+      "name": "hp-masternode-1",
+      "instanceId": "i-0123456789abcdef0",
+      "address": "192.0.2.10",
+      "architecture": "amd64",
+      "role": "validator",
+      "containers": {
+        "core": "dashmate_testnet-core-1",
+        "drive": "dashmate_testnet-drive_abci-1",
+        "tenderdash": "dashmate_testnet-drive_tenderdash-1",
+        "dapi": "dashmate_testnet-rs_dapi-1",
+        "gateway": "dashmate_testnet-gateway-1",
+        "helper": "dashmate_testnet-dashmate_helper-1"
+      }
+    }
+  ]
+}

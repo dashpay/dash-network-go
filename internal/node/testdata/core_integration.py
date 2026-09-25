@@ -49,6 +49,9 @@ def main():
             call("core-finalize")
             # Reload after Core restart before funding (wallet load is explicit).
             call("wallet")
+            call("activate")
+            # Exercise the live update RPC as well as readback/idempotent resume.
+            call("activate")
             q["requiredBalance"] = 4001
             call("fund")
             pair = w.rpc("bls", ["generate"])
@@ -115,6 +118,14 @@ def main():
                     time.monotonic() < deadline
                 ), "Persistent miner did not advance Core"
                 time.sleep(1)
+            miner_before = w.inspect_container("miner")["Id"]
+            core_before = w.inspect_container("core")["Id"]
+            call("mine-pause")
+            assert not w.inspect_container("miner")["State"]["Running"]
+            assert w.inspect_container("core")["Id"] == core_before
+            assert w.inspect_container("core")["State"]["Running"]
+            call("mine-start")
+            assert w.inspect_container("miner")["Id"] == miner_before
             call("stop")
             call("core-start")
             call("wallet")

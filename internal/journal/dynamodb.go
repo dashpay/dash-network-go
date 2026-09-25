@@ -176,7 +176,10 @@ func (d Dynamo) Save(ctx context.Context, r provision.Record, owner string) erro
 	if err != nil {
 		return err
 	}
-	_, err = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner AND #revision = :previous"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner", "#revision": "Revision"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner), ":next": number(r.Revision), ":previous": number(r.Revision - 1)}})
+	// AWS may commit a write before its acknowledgement is lost. An SDK retry
+	// of the exact accepted payload is a no-op, not a conflicting checkpoint.
+	// A later revision, different data, different plan or new owner still fails.
+	_, err = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner AND (#revision = :previous OR (#revision = :next AND #data = :data))"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner", "#revision": "Revision"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner), ":next": number(r.Revision), ":previous": number(r.Revision - 1)}})
 	if conditional(err) {
 		return errors.New("runner ownership or journal revision changed; stale write refused")
 	}

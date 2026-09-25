@@ -35,15 +35,29 @@ func ReadJSON(path string, value any) error {
 // WriteJSON publishes a complete file atomically and refuses to replace an
 // existing artifact. New output names keep deployment evidence immutable.
 func WriteJSON(path string, value any) error {
+	return write(path, func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(value)
+	})
+}
+
+// WriteText uses the same private, atomic, no-overwrite publication as JSON.
+func WriteText(path, value string) error {
+	return write(path, func(w io.Writer) error {
+		_, err := io.WriteString(w, value)
+		return err
+	})
+}
+
+func write(path string, encode func(io.Writer) error) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".dashnet-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
+	if err := encode(f); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {

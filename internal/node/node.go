@@ -32,7 +32,30 @@ import (
 //go:embed worker.py
 var recipe string
 
+//go:embed observer.py
+var observer string
+
 func RecipeDigest() string { s := sha256.Sum256([]byte(recipe)); return hex.EncodeToString(s[:]) }
+
+func ObservationDigest() string {
+	s := sha256.Sum256([]byte(observer))
+	return hex.EncodeToString(s[:])
+}
+
+func workerScript(action string) string {
+	if action == "join-start" || action == "join-status" {
+		return "__name__ = 'dashnet_join'\n" + recipe + "\n" + joinRecipe + "\nmain()\n"
+	}
+	if action == "upgrade-stage" || action == "upgrade-apply" {
+		return "__name__ = 'dashnet_upgrade'\n" + recipe + "\n" + observer + "\n" + upgradeRecipe + "\nmain()\n"
+	}
+	if action == "inspect" || action == "core-status" || action == "platform-status" {
+		// Do not execute the original entry point until the observation-only
+		// capability guard and compatible RPC reader have been installed.
+		return "__name__ = 'dashnet_observation'\n" + recipe + "\n" + observer + "\nmain()\n"
+	}
+	return recipe
+}
 
 type Target struct {
 	Name         string            `json:"name"`
@@ -97,17 +120,19 @@ type Peer struct {
 	ProTxHash         string `json:"proTxHash,omitempty"`
 }
 type Request struct {
-	Context               Context `json:"context"`
-	Target                Target  `json:"target"`
-	Action                string  `json:"action"`
-	SporkAddress          string  `json:"sporkAddress,omitempty"`
-	PayoutAddress         string  `json:"payoutAddress,omitempty"`
-	Registration          *Peer   `json:"registration,omitempty"`
-	Peers                 []Peer  `json:"peers,omitempty"`
-	GenesisCoreHeight     int64   `json:"genesisCoreHeight,omitempty"`
-	RequiredBalance       int64   `json:"requiredBalance,omitempty"`
-	RequiredConfirmations int     `json:"requiredConfirmations,omitempty"`
-	ReferenceHeight       int64   `json:"referenceHeight,omitempty"`
+	Join                  *CoreJoin    `json:"join,omitempty"`
+	Context               Context      `json:"context"`
+	Target                Target       `json:"target"`
+	Action                string       `json:"action"`
+	SporkAddress          string       `json:"sporkAddress,omitempty"`
+	PayoutAddress         string       `json:"payoutAddress,omitempty"`
+	Registration          *Peer        `json:"registration,omitempty"`
+	Peers                 []Peer       `json:"peers,omitempty"`
+	GenesisCoreHeight     int64        `json:"genesisCoreHeight,omitempty"`
+	RequiredBalance       int64        `json:"requiredBalance,omitempty"`
+	RequiredConfirmations int          `json:"requiredConfirmations,omitempty"`
+	ReferenceHeight       int64        `json:"referenceHeight,omitempty"`
+	Upgrade               *ImageChange `json:"upgrade,omitempty"`
 	// Transient input candidates. They are never journaled or printed, and the
 	// worker refuses to replace existing identity files on resume.
 	NodePrivateKey string `json:"nodePrivateKey,omitempty"`
@@ -120,6 +145,8 @@ type Mining struct {
 	Restarts    int    `json:"restarts"`
 }
 type Core struct {
+	CheckpointHash  string         `json:"checkpointHash,omitempty"`
+	StartedAt       string         `json:"startedAt,omitempty"`
 	Mining          *Mining        `json:"mining,omitempty"`
 	Genesis         string         `json:"genesis"`
 	Height          int64          `json:"height"`
@@ -136,6 +163,8 @@ type Core struct {
 	Quorums         map[string]int `json:"quorums"`
 }
 type Platform struct {
+	Protocol           uint32            `json:"protocol,omitempty"`
+	Validators         []string          `json:"validators,omitempty"`
 	Height             int64             `json:"height"`
 	DAPIHeight         int64             `json:"dapiHeight"`
 	CatchingUp         bool              `json:"catchingUp"`
@@ -171,7 +200,7 @@ type Remote struct {
 	Account, Region string
 }
 
-var actions = map[string]bool{"inspect": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "mine-start": true, "platform-start": true, "platform-status": true, "stop": true}
+var actions = map[string]bool{"inspect": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "mine-start": true, "mine-pause": true, "platform-start": true, "platform-status": true, "stop": true}
 var diagnostic = regexp.MustCompile(`^[a-z0-9:_-]{1,120}$`)
 
 func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
@@ -181,8 +210,17 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return Observation{}, errors.New("node operation requires a deadline")
 	}
-	if !actions[q.Action] {
-		return Observation{}, errors.New("unsupported node action")
+	if q.Action == "join-start" || q.Action == "join-status" {
+		if err := q.validateJoin(); err != nil {
+			return Observation{}, err
+		}
+	} else if !actions[q.Action] {
+		if q.Action != "upgrade-stage" && q.Action != "upgrade-apply" {
+			return Observation{}, errors.New("unsupported node action")
+		}
+		if err := q.validateUpgrade(); err != nil {
+			return Observation{}, err
+		}
 	}
 	if err := q.Target.Validate(); err != nil {
 		return Observation{}, err
@@ -206,7 +244,7 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	}
 	var compressed bytes.Buffer
 	z := zlib.NewWriter(&compressed)
-	_, _ = z.Write([]byte(recipe))
+	_, _ = z.Write([]byte(workerScript(q.Action)))
 	_ = z.Close()
 	command := "/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root /usr/bin/python3 -c \"import base64,zlib;exec(zlib.decompress(base64.b64decode('" + base64.StdEncoding.EncodeToString(compressed.Bytes()) + "')))\""
 	if r.Access.User != "root" {

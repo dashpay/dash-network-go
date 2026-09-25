@@ -30,8 +30,8 @@ That stage uses explicit existing networking, owner-pinned AMIs, a DynamoDB jour
 and non-expiring runner claims, and per-target launch reconciliation. The additive
 bootstrap stage shares that
 claim and journal, verifies SSH/instance identity, and prepares runtime/images
-without starting containers. Chain lifecycle, UI integration and web
-authentication remain future work.
+without starting containers. Chain lifecycle and scoped image-upgrade executors
+are implemented; UI integration and web authentication remain future work.
 See [provisioning and recovery](provisioning.md) for the exact boundary.
 
 ## Three kinds of state
@@ -82,6 +82,16 @@ views while replacing single-network inventory/name-keyed state. Existing
 unmerged/live status adaptations must be inspected and preserved before changing
 its implementation.
 
+## Existing Moutai and managed testnet
+
+The [existing-state path](managed-networks.md) imports explicit AWS/container
+bindings, enrolls them without recreation, and operates their captured workloads
+through the same CLI/Actions execution model. Public observation stays read-only;
+both networks are intended to have authenticated deploy/upgrade/recovery controls.
+It does not infer a fresh devnet genesis for testnet, regenerate operator keys or
+silently reset databases. Existing-state deployment/restoration is implemented;
+provisioning additional testnet nodes remains separate work.
+
 ## Execution boundaries
 
 The EC2 stage implements ownership/scope checks, shared exclusion, and durable
@@ -94,13 +104,19 @@ Verified SSH now uses explicit instance-scoped known_hosts trust and a local
 identity, with a second IMDSv2 identity check. The bootstrap recipe is hashed into
 the plan, rejects existing containers, and uses host-side flock plus fresh probes
 for interruption recovery. See [bootstrap](bootstrap.md) for its precise limits.
-A full-network executor still needs replay-safe chain operations. Funding and
-registration retries must inspect actual
-transactions before submitting duplicates. No arbitrary shell input from a UI.
+The chain executor persists signed transactions before broadcast and reconciles
+registration retries. The [live acceptance run](validation-2026-09-24.md) verified
+interrupted registration and full stop/resume without replacing identities.
+No arbitrary shell input comes from a UI.
 
 Platform-only operations must verify unchanged Core identity/process/configuration
 as well as Platform readiness. Rollout batches must reflect actual quorum and
 upgrade compatibility; independent fast restarts are not a universal strategy.
+The [upgrade executor](upgrades.md) stores current images separately from creation
+intent, stages exact artifacts, journals each withdrawal before SSH, and requires
+whole-fleet health/preservation before moving to the next validator. Unknown
+runtime journal fields fence older executors; migrated databases are never
+automatically downgraded.
 
 Actions should use short-lived AWS OIDC credentials restricted to trusted
 repository/ref/environment and intended resource scope. GitHub concurrency alone

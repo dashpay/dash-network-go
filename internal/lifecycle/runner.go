@@ -22,6 +22,9 @@ type Runner struct {
 	Remote         node.Backend
 	Owner, Version string
 	Progress       func(string)
+	// ObservationWindow is the minimum interval between health samples. Zero
+	// retains the default; it never relaxes identity, quorum or agreement gates.
+	ObservationWindow time.Duration
 	// Tests inject a clock wait; production uses context-aware timers.
 	Wait func(context.Context) error
 }
@@ -115,6 +118,15 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if err = prior.Validate(p.Bootstrap.Compute); err != nil {
 		return
 	}
+	if prior.Join != nil {
+		return result, errors.New("allocation belongs to an existing chain join, not genesis lifecycle")
+	}
+	if prior.Upgrade != nil && prior.Upgrade.Phase != "complete" {
+		return result, errors.New("unfinished upgrade owns runtime intent; resume that upgrade before deploy/stop")
+	}
+	if _, err = effectiveImages(p, prior); err != nil {
+		return
+	}
 	if prior.Bootstrap == nil || prior.Bootstrap.PlanID != p.Bootstrap.ID || prior.Bootstrap.Phase != "hosts-ready" {
 		return result, errors.New("finish exact node bootstrap first")
 	}
@@ -144,6 +156,12 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if err = e.r.Validate(p.Bootstrap.Compute); err != nil {
 		return
 	}
+	if e.r.Upgrade != nil && e.r.Upgrade.Phase != "complete" {
+		return result, errors.New("upgrade changed before claim; resume that upgrade")
+	}
+	if _, err = effectiveImages(p, e.r); err != nil {
+		return
+	}
 	if e.r.Bootstrap == nil || e.r.Bootstrap.PlanID != p.Bootstrap.ID || e.r.Bootstrap.Phase != "hosts-ready" {
 		return result, errors.New("bootstrap changed before claim")
 	}
@@ -153,6 +171,8 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	if stop && e.r.Deployment == nil {
 		return result, errors.New("cannot stop a deployment that has never started")
 	}
+	verifyFirst := e.r.Deployment != nil && e.r.Deployment.GenesisCoreHeight > 0 &&
+		(e.r.Deployment.Stage == "health" || e.r.Deployment.Stage == "ready")
 	if e.r.Deployment == nil {
 		e.r.Deployment = &provision.DeploymentProgress{PlanID: p.ID, Nodes: map[string]provision.DeploymentNode{}}
 	}
@@ -181,12 +201,42 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 		if err = e.stage("stopping"); err != nil {
 			return
 		}
-		if err = e.each(p.Targets, "stop", nil, nil); err != nil {
+		// Freeze block production before withdrawing validators. Otherwise a
+		// wallet at the end of the target list can keep mining DKG rounds while
+		// the earlier batches are intentionally offline.
+		if err = e.each([]node.Target{p.Miner()}, "stop", nil, nil); err != nil {
+			return
+		}
+		var remaining []node.Target
+		for _, t := range p.Targets {
+			if t.Name != p.Miner().Name {
+				remaining = append(remaining, t)
+			}
+		}
+		if err = e.each(remaining, "stop", nil, nil); err != nil {
 			return
 		}
 		e.r.Deployment.Phase = "stopped"
 		err = e.stage("stopped")
 		return
+	}
+	if verifyFirst {
+		// An interrupted final check must not repeat wallet/registration work
+		// when the exact intended fleet is already healthy. This is fresh
+		// two-sample evidence, not trust in a cached journal success flag.
+		if err = e.stage("health"); err != nil {
+			return
+		}
+		var health Health
+		health, err = r.Doctor(ctx, p, e.r)
+		if err != nil {
+			return
+		}
+		if health.Healthy {
+			err = e.acceptHealth(health)
+			return
+		}
+		e.report("existing fleet is not yet healthy; reconciling the original deployment")
 	}
 	err = e.deploy()
 	return
@@ -195,6 +245,10 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 // Bound concurrency while checkpointing on one goroutine. Every scheduled target
 // reports a result; one failed host never silently drops the remainder.
 func (e *execution) each(targets []node.Target, action string, prepare func(*node.Request), accept func(node.Target, node.Observation) error) error {
+	type job struct {
+		t node.Target
+		q node.Request
+	}
 	type reply struct {
 		t   node.Target
 		o   node.Observation
@@ -202,26 +256,32 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 	}
 	batchCtx, cancel := context.WithCancel(e.ctx)
 	defer cancel()
-	work := make(chan node.Target)
+	// Capture immutable intent before any checkpoint can change the journal.
+	// Workers must not copy/read e.r while the result loop updates it.
+	jobs := make([]job, 0, len(targets))
+	for _, t := range targets {
+		q := runtimeRequest(e.p, e.r, t, action)
+		if prepare != nil {
+			prepare(&q)
+		}
+		jobs = append(jobs, job{t, q})
+	}
+	work := make(chan job)
 	results := make(chan reply, len(targets))
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range work {
-				q := e.p.Request(t, action)
-				if prepare != nil {
-					prepare(&q)
-				}
-				o, err := e.runner.Remote.Call(batchCtx, q)
-				results <- reply{t, o, err}
+			for j := range work {
+				o, err := e.runner.Remote.Call(batchCtx, j.q)
+				results <- reply{j.t, o, err}
 			}
 		}()
 	}
 	go func() {
-		for _, t := range targets {
-			work <- t
+		for _, j := range jobs {
+			work <- j
 		}
 		close(work)
 		wg.Wait()
@@ -250,7 +310,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 	return errors.Join(failures...)
 }
 func (e *execution) call(t node.Target, action string, prepare func(*node.Request)) (node.Observation, error) {
-	q := e.p.Request(t, action)
+	q := runtimeRequest(e.p, e.r, t, action)
 	if prepare != nil {
 		prepare(&q)
 	}
@@ -355,6 +415,40 @@ func (e *execution) deploy() error {
 	if _, err = e.call(p.Wallet(), "activate", nil); err != nil {
 		return err
 	}
+	// With <=3 ordinary peers Core requires a quiet interval before mnsync
+	// finishes. Starting ten-second mining first can reset that timer forever.
+	// Keep Core running; stop only the owned miner if a resumed run needs quiet.
+	if err = e.stage("core-sync"); err != nil {
+		return err
+	}
+	paused := false
+	for {
+		ready := true
+		if err = e.each(p.Targets, "core-status", nil, func(t node.Target, o node.Observation) error {
+			if err := e.core(t, o); err != nil {
+				return err
+			}
+			if !o.Core.Synced || o.Core.IBD || o.Core.Headers > o.Core.Height || o.Core.Peers == 0 {
+				ready = false
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if ready {
+			break
+		}
+		if !paused {
+			if _, err = e.call(p.Miner(), "mine-pause", nil); err != nil {
+				return err
+			}
+			paused = true
+		}
+		e.report("waiting for masternode sync with mining paused; Core remains running")
+		if err = e.wait(); err != nil {
+			return err
+		}
+	}
 	if _, err = e.call(p.Miner(), "mine-start", func(q *node.Request) { q.PayoutAddress = d.PayoutAddress }); err != nil {
 		return err
 	}
@@ -363,6 +457,7 @@ func (e *execution) deploy() error {
 	}
 	for {
 		ready := true
+		var waiting []string
 		minLock := int64(0)
 		err = e.each(p.Targets, "core-status", nil, func(t node.Target, o node.Observation) error {
 			if err := e.core(t, o); err != nil {
@@ -370,6 +465,7 @@ func (e *execution) deploy() error {
 			}
 			if err := coreHealthy(t, d.Nodes[t.Name], o.Core, p.Miner().Name); err != nil {
 				ready = false
+				waiting = append(waiting, fmt.Sprintf("%s: %s (Core height %d)", t.Name, err, o.Core.Height))
 			}
 			if minLock == 0 || o.Core.ChainLockHeight < minLock {
 				minLock = o.Core.ChainLockHeight
@@ -388,6 +484,7 @@ func (e *execution) deploy() error {
 			}
 			break
 		}
+		e.report("waiting for Core readiness: " + strings.Join(waiting, "; "))
 		if err = e.wait(); err != nil {
 			return fmt.Errorf("waiting for READY masternodes, all devnet quorums and ChainLocks: %w", err)
 		}
@@ -413,23 +510,31 @@ func (e *execution) deploy() error {
 			return probeErr
 		}
 		if health.Healthy {
-			for name, v := range health.Nodes {
-				n := d.Nodes[name]
-				n.Phase = "ready"
-				n.ObservedAt = health.ObservedAt
-				n.CoreHeight = v.CoreHeight
-				n.PlatformHeight = v.PlatformHeight
-				d.Nodes[name] = n
-			}
-			d.Phase = "network-ready"
-			d.ObservedAt = health.ObservedAt
-			return e.stage("ready")
+			return e.acceptHealth(health)
 		}
 		e.report("waiting for advancing, consistent consensus and DAPI: " + strings.Join(health.Problems, "; "))
 		if err = e.wait(); err != nil {
 			return fmt.Errorf("application verification incomplete: %w", err)
 		}
 	}
+}
+
+func (e *execution) acceptHealth(health Health) error {
+	d := e.r.Deployment
+	for name, v := range health.Nodes {
+		n := d.Nodes[name]
+		n.Phase = "ready"
+		n.ObservedAt = health.ObservedAt
+		n.CoreHeight = v.CoreHeight
+		n.PlatformHeight = v.PlatformHeight
+		d.Nodes[name] = n
+	}
+	d.Phase = "network-ready"
+	d.ObservedAt = health.ObservedAt
+	// A completed recovery must not present the preceding failure as current.
+	// Failed attempts remain in their retained operation logs/checkpoints.
+	e.r.LastError = ""
+	return e.stage("ready")
 }
 func (e *execution) peers() []node.Peer {
 	var peers []node.Peer
@@ -440,8 +545,14 @@ func (e *execution) peers() []node.Peer {
 	return peers
 }
 func coreHealthy(t node.Target, n provision.DeploymentNode, c *node.Core, miner string) error {
-	if c == nil || !c.Synced || c.IBD || c.Peers < 1 || c.Height < c.Headers || c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
-		return errors.New("Core sync/peers/ChainLock not ready")
+	if c == nil {
+		return errors.New("Core observation missing")
+	}
+	if !c.Synced || c.IBD || c.Peers < 1 || c.Height < c.Headers {
+		return fmt.Errorf("Core not synchronized (height=%d headers=%d peers=%d mnsync=%t ibd=%t)", c.Height, c.Headers, c.Peers, c.Synced, c.IBD)
+	}
+	if c.ChainLockHeight < 1 || c.ChainLockHeight < c.Height-12 {
+		return fmt.Errorf("ChainLock not ready/fresh (locked=%d tip=%d)", c.ChainLockHeight, c.Height)
 	}
 	if t.Name == miner && (c.Mining == nil || !c.Mining.Running || len(c.Mining.ContainerID) != 64) {
 		return errors.New("persistent miner unavailable")

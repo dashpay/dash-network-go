@@ -23,7 +23,9 @@ example are placeholders. Keep the real definition and plan private.
   an IPv6-enabled subnet can still assign IPv6. Security groups remain authoritative.
 - One exact AMI **and owner account** per requested architecture. The CLI checks
   architecture, HVM/Linux/EBS, availability, root size, and absence of marketplace
-  product codes/extra disks. These checks do not audit the AMI's content. Select a
+  product codes/extra EBS disks. Canonical's ephemeral instance-store mappings are
+  allowed; they do not allocate extra EBS volumes. These checks do not audit the
+  AMI's content. Select a
   trusted image; it will boot as supplied, without user-data or an IAM profile.
 - Explicit instance types/counts, at most 100 instances. No capacity or exact cost
   guarantee. The footprint summary lists instance count, total root storage, and
@@ -129,6 +131,11 @@ Normal completion, failure, or cancellation records progress and releases its
 runner claim. A hard kill or ambiguous DynamoDB response can leave the claim.
 Claims have **no TTL or automatic stealing**: timing out is not proof a process
 or in-flight AWS request has stopped.
+
+Checkpoint retries are idempotent only for the exact same plan, current owner,
+revision and serialized payload. A delayed retry cannot overwrite a later
+revision, and different data at an accepted revision is refused. This handles a
+lost write acknowledgement without weakening the persistent runner claim.
 
 1. Inspect `dashnet operation` and identify the exact `owner` (also printed to
    stderr when the invocation starts).

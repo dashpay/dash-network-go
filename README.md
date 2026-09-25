@@ -3,7 +3,7 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
-**Current milestone: integrated devnet lifecycle (not live-fleet proved).**
+**Current milestone: live-proved devnet lifecycle and health-gated image upgrades.**
 The CLI plans/provisions EC2, prepares owned Ubuntu hosts, starts Core, funds and
 registers EvoNodes, starts Platform, and runs independent health gates. It has
 inspect/resume and explicit stop-preserving-data commands, backed by a shared
@@ -11,8 +11,14 @@ DynamoDB journal/runner claim. No AI session is required.
 
 Use the [complete lifecycle/runbook](docs/lifecycle.md) and
 [13-validator + wallet example](examples/devnet-lifecycle.yaml).
-No testnet mutation, existing-network adoption, upgrade, reset or destroy executor
-is exposed yet. Real-container contract tests are not proof of a running AWS fleet.
+The [operator-assisted AWS proof](docs/validation-2026-09-24.md) covered 13 validators,
+interruption, stop/resume, DAPI and complete scoped cleanup. [Image upgrades](docs/upgrades.md)
+support owned devnets with Core preserved. Existing Moutai/testnet workloads have
+an explicit [import/enrollment/management path](docs/managed-networks.md), and new
+[Core fullnodes can join an existing chain](docs/join-existing-chain.md). A fresh
+AWS version-upgrade proof is in progress; do not infer compatibility from CI.
+Protocol migrations, adding existing-network EvoNodes, resets and generalized
+destroy remain unimplemented.
 
 ## Quick start
 
@@ -86,8 +92,10 @@ EC2 `running` is **not** application health. This snapshot explicitly reports
 ## Resumable EC2 provisioning
 
 See the [human command and recovery guide](docs/provisioning.md) and
-[small compute example](examples/devnet-compute.yaml). Provisioning is devnet-only,
-uses explicit existing networking/AMIs, and requires the exact reviewed plan ID:
+[small compute example](examples/devnet-compute.yaml). Provisioning uses explicit
+existing networking/AMIs and requires the exact reviewed plan ID. Devnets support
+the native lifecycle; testnet allocations are restricted to fresh Core fullnodes
+using the existing-chain join path:
 
 ```sh
 # Real AWS IDs and an existing state table are required; read-only preflight.
@@ -106,9 +114,9 @@ Normal retries reconcile existing instances. Lost-response ambiguity never cause
 a blind relaunch. Claims do not expire automatically; a crashed runner requires
 explicit stopped-runner recovery. A changed generation/plan cannot bypass the
 existing operation. Root volumes are retained on termination; there is no
-automatic cleanup/rollback yet. **EC2 launch remains fake-client tested, not live-launch verified.** The next
-commands implement application services; their evidence boundary is documented
-separately in the lifecycle guide.
+automatic cleanup/rollback yet. Direct EC2 launch and recovery are covered by the
+[disposable AWS acceptance run](docs/validation-2026-09-24.md); its teardown used a
+separately scoped helper, not a general-purpose CLI destroy command.
 
 ## Authenticated node bootstrap
 
@@ -129,8 +137,9 @@ skip it. Shared and host-side locks protect interrupted-run recovery. No Dash
 containers start, and `hosts-ready` is **not** application health.
 
 The same `operation` command shows per-host bootstrap progress. Trust enrollment
-is currently manual; no insecure host-key learning fallback exists. SSH identities
-stay local. This stage is integration-tested, **not live-node verified**.
+supports fresh authenticated EC2 console keys through `host-trust`; no insecure
+host-key learning fallback exists. SSH identities stay local. This stage was
+verified on all 14 hosts in the disposable AWS run.
 
 ## Complete devnet execution
 
@@ -139,6 +148,16 @@ After bootstrap, `deployment-plan` binds exact instances and immutable genesis.
 node and exits nonzero for unknown/degraded health. `stop` verifies owned services
 are stopped and preserves all state (EC2 billing continues). See
 [commands, compatibility assumptions and recovery](docs/lifecycle.md).
+
+## Existing-state upgrades
+
+`upgrade-plan` records exact old/new images for a completed owned deployment;
+`upgrade` stages artifacts and rolls one validator at a time, with whole-fleet
+health and Core-process/configuration preservation gates between withdrawals.
+Runtime images live separately from the immutable creation plan, so later
+inspection/recovery cannot silently revert the release. See the
+[upgrade command and recovery guide](docs/upgrades.md) for supported profiles,
+interrupted-run behavior and the remaining live-version validation boundary.
 
 ## Public and operator data
 
@@ -156,9 +175,9 @@ counts, observation source/time, and staleness. It never includes instance IDs,
 addresses, account IDs, raw tags, or internal errors. Display name and description
 are operator-authored public copy; do not put private information in them.
 
-This is the data boundary for the future public showcase and authenticated
-operator interface in [`dashpay/status`](https://github.com/dashpay/status).
-**This repository does not yet serve a web UI or implement authentication.**
+The public showcase and authenticated operator interface are implemented
+separately in [`dashpay/status` PR #6](https://github.com/dashpay/status/pull/6).
+**This CLI repository does not serve a web UI or implement browser authentication.**
 Public projection is not a substitute for backend authorization.
 
 All `--out` files are mode 0600, atomically published, and never overwritten.
@@ -179,6 +198,11 @@ are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
   using OIDC, reviewed private plans, explicit plan confirmation and the same CLI.
   Private reports stay in S3/DynamoDB, never public Actions artifacts. Inert until
   separately configured; see [setup](docs/lifecycle.md#github-actions-execution).
+- **Existing networks:** separate Moutai/testnet environment policies, reviewed
+  enrollment and management inputs; see [managed operations](docs/managed-networks.md).
+- **New Core fullnodes:** the allocation workflow includes existing-chain join
+  planning/execution, with a separate protected testnet allocation environment.
+  This does not register a new validator or expand an enrolled fleet implicitly.
 - **Container contracts:** real Core wallet/registration/recovery and real
   Tenderdash/Envoy/DAPI configuration/TLS/gRPC; no AWS access or fleet-health claim.
 
@@ -203,3 +227,13 @@ interrupted checkpoints, footprint drift, strict SSH host trust, bounded output,
 host preparation/readback, and cancellation without target loss.
 
 See [architecture](docs/architecture.md) and [the implementation roadmap](docs/roadmap.md).
+
+## Existing Moutai and managed testnet
+
+The `managed-*` commands support explicit existing-state import/enrollment,
+scoped image upgrades and captured-container deployment/recovery. They preserve
+identities/data and use live per-network health/quorum gates. See the
+[managed-network commands, cutover and recovery guide](docs/managed-networks.md).
+This is not a read-only product boundary: authorized operators can manage both
+networks. New testnet-node provisioning, protocol migrations, live rollout proof,
+and the authenticated dashboard remain separate work.

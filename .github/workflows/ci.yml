@@ -1,20 +1,64 @@
 name: CI
+run-name: "${{ inputs.proof_operation || 'checks' }} / ${{ inputs.proof_request_id || github.sha }}"
 
 on:
   pull_request:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      proof_operation:
+        description: Temporary isolated AWS acceptance; requires separately scoped environment
+        type: choice
+        options: [none, doctor, upgrade, upgrade-interrupt]
+        default: none
+      proof_plan_id:
+        description: Exact reviewed upgrade plan ID; required for upgrade
+        type: string
+        required: false
+      proof_request_id:
+        description: Unique acceptance request correlation ID
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.proof_operation || 'none' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  aws-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.proof_operation != 'none'
+    environment: dashnet-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ vars.DASHNET_PROOF_ROLE }}
+          aws-region: ${{ vars.DASHNET_PROOF_REGION }}
+          role-session-name: proof-${{ github.run_id }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+      - name: Execute pinned proof artifact with private reports
+        env:
+          PROOF_OPERATION: ${{ inputs.proof_operation }}
+          PROOF_PLAN_ID: ${{ inputs.proof_plan_id }}
+          PROOF_BUCKET: ${{ vars.DASHNET_PROOF_BUCKET }}
+          PROOF_GROUP: ${{ vars.DASHNET_PROOF_GROUP }}
+          PROOF_BINARY_SHA256: ${{ vars.DASHNET_PROOF_BINARY_SHA256 }}
+          PROOF_SSH_KEY: ${{ secrets.DASHNET_PROOF_SSH_KEY }}
+        run: bash .github/scripts/aws-acceptance.sh
   check:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -35,8 +79,18 @@ jobs:
         run: go vet ./...
       - name: Tests and race detector
         run: go test -race -coverprofile=coverage.out ./...
+      - name: Prove shared claims and replay with disposable DynamoDB Local
+        run: |
+          set -euo pipefail
+          docker run -d --name dashnet-journal -p 127.0.0.1:8000:8000 \
+            amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -sharedDb
+          trap 'docker rm -f dashnet-journal >/dev/null' EXIT
+          DASHNET_TEST_DYNAMODB=http://127.0.0.1:8000 DASHNET_DISPOSABLE_CI=1 \
+            go test -race -count=1 -v ./internal/managed -run '^TestManagedDynamoLocalClaimsAndRecovery$'
       - name: Node worker failure-path tests
-        run: python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'
+        run: |
+          python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'
+          python3 -m unittest discover -s internal/managed/testdata -p 'test_*.py'
       - name: Examples and command boundary
         run: |
           go build -trimpath -o bin/dashnet ./cmd/dashnet
@@ -44,7 +98,7 @@ jobs:
           bin/dashnet validate --network examples/testnet.yaml
           bin/dashnet validate --network examples/devnet-compute.yaml
           bin/dashnet validate --network examples/devnet-lifecycle.yaml
-          for command in deployment-plan deploy doctor stop; do
+          for command in join-plan join deployment-plan deploy doctor stop host-trust upgrade-plan upgrade managed-import managed-enroll managed-plan managed-deploy managed-upgrade managed-doctor managed-operation managed-unlock; do
             if bin/dashnet "$command"; then
               echo "$command accepted missing explicit intent"
               exit 1
@@ -64,6 +118,7 @@ jobs:
           fi
 
   bootstrap-recipe:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -76,6 +131,7 @@ jobs:
           docker run --rm --network none dashnet-recipe-test
 
   core-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -90,8 +146,10 @@ jobs:
           docker pull dashpay/drive:4.2.0-beta.3
           drive=$(docker image inspect dashpay/drive:4.2.0-beta.3 --format '{{index .RepoDigests 0}}')
           sudo env CORE_IMAGE="$image" DRIVE_IMAGE="$drive" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
+          sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
 
   platform-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -111,7 +169,42 @@ jobs:
           done
           sudo env PLATFORM_IMAGES="$images" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/platform_contract.py
 
+  upgrade-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prove real Compose image replacement, preservation and lost-response replay
+        run: |
+          set -euo pipefail
+          docker pull busybox:1.36.1
+          before=$(docker image inspect busybox:1.36.1 --format '{{index .RepoDigests 0}}')
+          docker pull busybox:1.37.0
+          after=$(docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}')
+          sudo env UPGRADE_FROM="$before" UPGRADE_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/upgrade_contract.py
+
+  managed-contract:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Existing-container enrollment, replacement and interrupted deployment
+        run: |
+          set -euo pipefail
+          docker pull busybox:1.36.1
+          before=$(docker image inspect busybox:1.36.1 --format '{{index .RepoDigests 0}}')
+          docker pull busybox:1.37.0
+          after=$(docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}')
+          sudo env MANAGED_FROM="$before" MANAGED_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/managed/testdata/contract.py
+
   binaries:
+    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
