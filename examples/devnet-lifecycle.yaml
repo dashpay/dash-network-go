@@ -22,6 +22,8 @@ aws:
     - sg-00000001
     keyName: YOUR_EMERGENCY_SSH_KEY
     publicIpv4: false
+    # For public nodes, set true above and supply your owned regional BYOIP pool:
+    # ipamPoolId: ipam-pool-00000000000000001
     rootVolumeGiB: 100
     amis:
       arm64:

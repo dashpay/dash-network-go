@@ -58,6 +58,7 @@ type Provision struct {
 	SecurityGroupIDs []string       `json:"securityGroupIds" yaml:"securityGroupIds"`
 	KeyName          string         `json:"keyName" yaml:"keyName"`
 	PublicIPv4       bool           `json:"publicIpv4" yaml:"publicIpv4"`
+	IPAMPoolID       string         `json:"ipamPoolId,omitempty" yaml:"ipamPoolId,omitempty"`
 	RootVolumeGiB    int32          `json:"rootVolumeGiB" yaml:"rootVolumeGiB"`
 	AMIs             map[string]AMI `json:"amis" yaml:"amis"`
 }

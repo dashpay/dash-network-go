@@ -36,8 +36,8 @@ func runProvision(ctx context.Context, args []string, out, stderr io.Writer, ver
 	} else {
 		fs.StringVar(&planPath, "plan", "", "immutable EC2 provision plan")
 	}
-	if command == "provision" {
-		fs.StringVar(&confirm, "confirm", "", "exact reviewed plan ID; authorizes billable EC2 creation")
+	if command == "provision" || command == "release-addresses" {
+		fs.StringVar(&confirm, "confirm", "", "exact reviewed plan ID; authorizes the requested creation or detached-address cleanup")
 	}
 	if command == "operation-unlock" {
 		fs.StringVar(&expectedOwner, "expected-owner", "", "exact runner ID from operation inspection")
@@ -78,7 +78,7 @@ func runProvision(ctx context.Context, args []string, out, stderr io.Writer, ver
 		}
 		n = p.Network
 	}
-	if command == "provision" && confirm != p.ID {
+	if (command == "provision" || command == "release-addresses") && confirm != p.ID {
 		return errors.New("--confirm must equal the exact reviewed plan ID; no AWS requests made")
 	}
 	if command == "operation-unlock" && (!stopped || expectedOwner == "") {
@@ -142,12 +142,20 @@ func runProvision(ctx context.Context, args []string, out, stderr io.Writer, ver
 			Released string `json:"releasedOwner"`
 			PlanID   string `json:"planId"`
 		}{expectedOwner, p.ID})
-	case "provision":
+	case "provision", "release-addresses":
 		var random [16]byte
 		if _, err = rand.Read(random[:]); err != nil {
 			return err
 		}
 		owner := hex.EncodeToString(random[:])
+		if command == "release-addresses" {
+			fmt.Fprintln(stderr, "runner:", owner)
+			r, err := provision.ReleaseAddresses(ctx, p, identity, cloud, store, owner)
+			if err != nil {
+				return err
+			}
+			return emit(out, output, r)
+		}
 		fmt.Fprintln(stderr, p.Footprint())
 		fmt.Fprintln(stderr, "runner:", owner)
 		r, err := provision.Execute(ctx, p, identity, cloud, store, owner, version, 5*time.Second, func(s string) { fmt.Fprintln(stderr, s) })

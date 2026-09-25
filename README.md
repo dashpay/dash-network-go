@@ -3,6 +3,10 @@
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
 
+New public-facing allocations require an explicit [AWS BYOIP/IPAM pool](docs/ipam.md).
+Their Elastic IPs are ownership-tagged and journaled through allocation, resume
+and explicit post-termination cleanup; automatic Amazon public IPv4 is disabled.
+
 **Current milestone: live-proved devnet lifecycle and health-gated image upgrades.**
 The CLI plans/provisions EC2, prepares owned Ubuntu hosts, starts Core, funds and
 registers EvoNodes, starts Platform, and runs independent health gates. It has

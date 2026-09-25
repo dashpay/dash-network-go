@@ -11,11 +11,12 @@ import (
 )
 
 type NodeProgress struct {
-	Phase       string    `json:"phase"` // pending, launching, present
-	AttemptedAt time.Time `json:"attemptedAt,omitempty"`
-	InstanceID  string    `json:"instanceId,omitempty"`
-	EC2State    string    `json:"ec2State"`
-	ObservedAt  time.Time `json:"observedAt,omitempty"`
+	Phase       string           `json:"phase"` // pending, launching, present
+	AttemptedAt time.Time        `json:"attemptedAt,omitempty"`
+	InstanceID  string           `json:"instanceId,omitempty"`
+	EC2State    string           `json:"ec2State"`
+	ObservedAt  time.Time        `json:"observedAt,omitempty"`
+	Address     *AddressProgress `json:"address,omitempty"`
 }
 
 type Record struct {
@@ -55,7 +56,7 @@ func (r Record) Validate(p Plan) error {
 		return errors.New("operation journal identity, schema, or target set mismatch")
 	}
 	switch r.Phase {
-	case "pending", "provisioning", "interrupted", "compute-ready":
+	case "pending", "provisioning", "interrupted", "compute-ready", "addresses-released":
 	default:
 		return errors.New("invalid operation phase")
 	}
@@ -79,6 +80,12 @@ func (r Record) Validate(p Plan) error {
 			}
 		default:
 			return errors.New("invalid target phase")
+		}
+		if err := validateAddress(p, node); err != nil {
+			return err
+		}
+		if r.Phase == "addresses-released" && (!p.Network.AWS.Provision.PublicIPv4 || (node.Address != nil && node.Address.Phase != "released")) {
+			return errors.New("retired allocation retains unfinished address state")
 		}
 	}
 	if err := r.validateBootstrap(p); err != nil {
@@ -132,7 +139,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err != nil && r.Validate(p) == nil {
+		if err != nil && r.Phase != "addresses-released" && r.Validate(p) == nil {
 			r.Phase = "interrupted"
 			r.LastError = err.Error()
 			if len(r.LastError) > 4096 {
@@ -151,6 +158,14 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	}()
 	if err = r.Validate(p); err != nil {
 		return
+	}
+	if r.Phase == "addresses-released" {
+		return result, errors.New("allocation retired; IPAM addresses have been released")
+	}
+	for _, n := range r.Nodes {
+		if n.Address != nil && (n.Address.Phase == "releasing" || n.Address.Phase == "released") {
+			return result, errors.New("address cleanup began; provisioning cannot recreate the footprint")
+		}
 	}
 	r.LastRunner = owner
 	r.CLIVersion = version
@@ -173,6 +188,12 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	}
 	if err = reconcile(p, &r, live, false); err != nil {
 		return
+	}
+	if p.Network.AWS.Provision.PublicIPv4 {
+		// Validate all address ownership before launching or changing any target.
+		if _, err = discoverAddresses(ctx, p, cloud.(IPAM), r, live); err != nil {
+			return
+		}
 	}
 	if err = save(); err != nil {
 		return
@@ -220,6 +241,11 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 		for _, n := range r.Nodes {
 			if n.EC2State != "running" {
 				ready = false
+			}
+		}
+		if ready && p.Network.AWS.Provision.PublicIPv4 {
+			if err = ensureAddresses(ctx, p, cloud.(IPAM), &r, live, save, report); err != nil {
+				return
 			}
 		}
 		if ready {
