@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	"github.com/dashpay/dash-network-go/internal/testutil"
 )
 
@@ -22,6 +23,7 @@ type addressCloud struct {
 	poolHook                                      func(*types.IpamPool)
 	releases                                      int
 	releaseAfter                                  func() error
+	exactAddressRead                              func() (*ec2.DescribeAddressesOutput, error)
 }
 
 func (c *addressCloud) DescribeIpamPools(context.Context, *ec2.DescribeIpamPoolsInput, ...func(*ec2.Options)) (*ec2.DescribeIpamPoolsOutput, error) {
@@ -50,10 +52,30 @@ func (c *addressCloud) DescribeInstances(ctx context.Context, in *ec2.DescribeIn
 	return o, nil
 }
 func (c *addressCloud) DescribeAddresses(_ context.Context, in *ec2.DescribeAddressesInput, _ ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
+	if len(in.AllocationIds) == 1 && len(in.Filters) == 0 {
+		if c.exactAddressRead != nil {
+			return c.exactAddressRead()
+		}
+		for _, a := range c.addresses {
+			if aws.ToString(a.AllocationId) == in.AllocationIds[0] {
+				return &ec2.DescribeAddressesOutput{Addresses: []types.Address{a}}, nil
+			}
+		}
+		return nil, &smithy.GenericAPIError{Code: "InvalidAllocationID.NotFound", Message: "allocation no longer exists"}
+	}
 	if len(in.Filters) != 1 || aws.ToString(in.Filters[0].Name) != "tag:"+c.Network.AWS.NetworkTagKey || len(in.Filters[0].Values) != 1 || in.Filters[0].Values[0] != c.Network.Metadata.Name {
 		return nil, errors.New("unscoped address read")
 	}
-	return &ec2.DescribeAddressesOutput{Addresses: c.addresses}, nil
+	out := &ec2.DescribeAddressesOutput{}
+	for _, a := range c.addresses {
+		for _, tag := range a.Tags {
+			if aws.ToString(tag.Key) == c.Network.AWS.NetworkTagKey && aws.ToString(tag.Value) == c.Network.Metadata.Name {
+				out.Addresses = append(out.Addresses, a)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 func (c *addressCloud) AllocateAddress(_ context.Context, in *ec2.AllocateAddressInput, opts ...func(*ec2.Options)) (*ec2.AllocateAddressOutput, error) {
 	o := ec2.Options{}
@@ -356,6 +378,42 @@ func TestIPAMReleaseAndLostResponseReplay(t *testing.T) {
 			}
 			if _, err = ipamRun(p, c, s); err == nil || len(c.Requests) != 2 || c.allocations != 2 {
 				t.Fatal("retired footprint was reprovisioned")
+			}
+		})
+	}
+}
+
+func TestIPAMReleaseCannotInferAbsenceFromTagsOrReadFailure(t *testing.T) {
+	for _, fault := range []string{"tag-removed", "denied", "transport", "other-not-found", "empty-success", "nil-success"} {
+		t.Run(fault, func(t *testing.T) {
+			p, c, s := ipamSetup(t)
+			if _, err := ipamRun(p, c, s); err != nil {
+				t.Fatal(err)
+			}
+			terminateFixture(c)
+			// Model a journaled release whose outcome was lost.
+			s.record.Nodes[p.Targets[0].Name].Address.Phase = "releasing"
+			if fault == "tag-removed" {
+				c.addresses[0].Tags = nil
+			} else {
+				c.addresses = c.addresses[1:]
+				c.exactAddressRead = func() (*ec2.DescribeAddressesOutput, error) {
+					switch fault {
+					case "denied":
+						return nil, &smithy.GenericAPIError{Code: "UnauthorizedOperation"}
+					case "transport":
+						return nil, errors.New("connection lost")
+					case "other-not-found":
+						return nil, &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound"}
+					case "nil-success":
+						return nil, nil
+					default:
+						return &ec2.DescribeAddressesOutput{}, nil
+					}
+				}
+			}
+			if _, err := ipamRelease(p, c, s); err == nil || c.releases != 0 || s.record.Nodes[p.Targets[0].Name].Address.Phase != "releasing" {
+				t.Fatal("unproven deletion accepted or another address released", err)
 			}
 		})
 	}

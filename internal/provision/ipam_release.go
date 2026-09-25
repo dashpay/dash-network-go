@@ -9,12 +9,28 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	"github.com/dashpay/dash-network-go/internal/inventory"
 )
 
 type addressReleaser interface {
 	IPAM
 	ReleaseAddress(context.Context, *ec2.ReleaseAddressInput, ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error)
+}
+
+// A missing tag-search result is not proof of deletion: tags may have changed.
+// Require AWS to report the exact allocation ID as gone. Permissions, transport
+// failures and empty/malformed responses remain unresolved.
+func verifyAddressReleased(ctx context.Context, c IPAM, id string) error {
+	_, err := c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{AllocationIds: []string{id}})
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidAllocationID.NotFound" {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify exact released allocation: %w", err)
+	}
+	return errors.New("released allocation not proven absent by ID; inspect before resuming")
 }
 
 // ReleaseAddresses never terminates or disassociates. Every original instance
@@ -142,6 +158,11 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 		if !found && n.Address != nil && n.Address.Phase != "releasing" && n.Address.Phase != "released" {
 			return result, fmt.Errorf("unresolved address on %s; no release inferred", t.Name)
 		}
+		if !found && n.Address != nil {
+			if err = verifyAddressReleased(ctx, c, n.Address.AllocationID); err != nil {
+				return result, fmt.Errorf("%s: %w", t.Name, err)
+			}
+		}
 		if found && (n.Address.AllocationID != "" && (n.Address.AllocationID != aws.ToString(a.AllocationId) || n.Address.PublicIP != aws.ToString(a.PublicIp))) {
 			return result, fmt.Errorf("cleanup address identity drift on %s", t.Name)
 		}
@@ -171,17 +192,8 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 			if err != nil {
 				return result, fmt.Errorf("release %s; resume reconciles address absence: %w", t.Name, err)
 			}
-			check, e := c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: []types.Filter{{Name: aws.String("tag:" + p.Network.AWS.NetworkTagKey), Values: []string{p.Network.Metadata.Name}}}})
-			if e != nil {
-				return result, e
-			}
-			if check == nil {
-				return result, errors.New("empty release readback")
-			}
-			for _, current := range check.Addresses {
-				if aws.ToString(current.AllocationId) == aws.ToString(a.AllocationId) {
-					return result, errors.New("released address remains visible; resume later")
-				}
+			if err = verifyAddressReleased(ctx, c, n.Address.AllocationID); err != nil {
+				return
 			}
 		}
 		n.Address.Phase = "released"

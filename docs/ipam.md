@@ -67,8 +67,10 @@ If AWS has already removed the terminated-instance records, the tool fails close
 retain evidence and review the resource scope manually. Stopped instances do not
 qualify. It will never release an address from a still-running server.
 
-Release intent is checkpointed before AWS. A lost reply is reconciled by absence,
-not repeated against a potentially reused address. Successful cleanup marks the
+Release intent is checkpointed before AWS. A lost reply is reconciled by AWS's
+`InvalidAllocationID.NotFound` for that exact allocation ID, not absence from a
+tag search or a failed read. This cannot hide a retained address whose tags were
+changed. Successful cleanup marks the
 allocation retired; provisioning cannot resurrect it. Partial cleanup remains
 resumable. Root disks and other resources need their own reviewed cleanup.
 
