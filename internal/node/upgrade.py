@@ -12,6 +12,10 @@ import socket
 import time
 
 
+# Failures a retry cannot cure: stop waiting and report them.
+PERMANENT = ["wrong-chain", "running-image-drift", "image-platform-drift"]
+
+
 class UpgradeWorker(Worker):
     def wait_abci(self):
         deadline = time.monotonic() + 150
@@ -84,7 +88,7 @@ class UpgradeWorker(Worker):
                 if not synced or (status["synced"] and not status["ibd"] and status["height"] >= status["headers"]):
                     return status
             except Failure as error:
-                if str(error) in ["wrong-chain", "upgrade-image-proof"]:
+                if str(error) in PERMANENT:
                     raise
             except (RPCFailure, urllib.error.URLError, ConnectionError, OSError):
                 pass
@@ -93,14 +97,20 @@ class UpgradeWorker(Worker):
             time.sleep(3)
 
     def wait_dkg_quiet(self, pin):
-        """Restart a validator's Core only in the quiet part of the 24-block DKG
-        cycle (after the mining window, before the next session), so the node
-        is back before its quorums' next contribution phase (PoSe)."""
+        """Restart a validator's Core only early in the quiet part of the
+        24-block DKG cycle (sessions end by block 12; the next starts at 24), so
+        the node is back before its quorums' next contribution phase (PoSe)."""
         deadline = time.monotonic() + 600
         while True:
-            height = self.core_observe(pin)["height"]
-            if 13 <= height % 24 <= 16:
-                return height
+            try:
+                height = self.core_observe(pin)["height"]
+                if 13 <= height % 24 <= 14:
+                    return height
+            except Failure as error:
+                if str(error) in PERMANENT:
+                    raise
+            except (RPCFailure, urllib.error.URLError, ConnectionError, OSError):
+                pass
             if time.monotonic() >= deadline:
                 raise Failure("core-upgrade-no-quiet-dkg-window")
             time.sleep(2)
@@ -179,7 +189,8 @@ class UpgradeWorker(Worker):
                         self.wait_dkg_quiet(before["core"])
                     # Stop Core (it may take up to its grace period) before the
                     # recreate, so Compose never times out mid-replacement.
-                    self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
+                    if self.inspect_container("core"):
+                        self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
                     services = self.read("core/compose.json")["services"]
                     services["core"]["image"] = after["core"]
                     self.compose("core", services)
