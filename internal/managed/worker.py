@@ -317,7 +317,7 @@ class Worker:
                              coreHeight=info['blocks'],coreSynced=not info['initialblockdownload'] and sync['IsSynced'] and sync['IsBlockchainSynced'],
                              chainLockHeight=self.rpc(selected,'getbestchainlock')['height'])
                 require(info['chain']==self.f['coreNetwork'],'wrong-core-chain')
-                if self.t['role']=='validator':
+                if self.t['role'] in ['validator','masternode']:
                     mn=self.rpc(selected,'masternode','status');chain.update(masternodeState=mn.get('state',''),proTxHash=mn.get('proTxHash',''))
             except Exception:problems.append('core-health-unavailable')
         if self.t['role']=='validator':

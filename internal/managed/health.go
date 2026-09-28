@@ -49,25 +49,42 @@ func Observe(ctx context.Context, f Fleet, remote Backend, reference int64) Snap
 	return result
 }
 
+type NodeHealth struct {
+	Healthy  bool     `json:"healthy"`
+	Status   string   `json:"status"`
+	Problems []string `json:"problems"`
+}
+
 type Health struct {
-	Healthy    bool      `json:"healthy"`
-	ObservedAt time.Time `json:"observedAt"`
-	Window     string    `json:"window"`
-	Problems   []string  `json:"problems"`
-	Snapshot   Snapshot  `json:"snapshot"`
+	Nodes      map[string]NodeHealth `json:"nodes,omitempty"`
+	Healthy    bool                  `json:"healthy"`
+	ObservedAt time.Time             `json:"observedAt"`
+	Window     string                `json:"window"`
+	Problems   []string              `json:"problems"`
+	Snapshot   Snapshot              `json:"snapshot"`
 }
 
 func (o Observation) Healthy(t Target) error {
 	if o.Error != "" || len(o.Problems) > 0 {
 		return errors.New("observation incomplete")
 	}
-	for _, c := range o.Components {
+	if o.InstanceID != t.InstanceID || len(o.Components) != len(t.Containers) {
+		return errors.New("missing workload observation")
+	}
+	for name := range t.Containers {
+		c, ok := o.Components[name]
+		if !ok {
+			return errors.New("missing workload observation")
+		}
 		if !c.Running {
 			return errors.New("service not running")
 		}
 	}
 	if t.Containers["core"] != "" && (!o.Chain.CoreSynced || o.Chain.ChainLockHeight <= 0) {
 		return errors.New("Core not synced/ChainLocked")
+	}
+	if t.Role == "masternode" && o.Chain.MasternodeState != "READY" {
+		return errors.New("masternode not ready")
 	}
 	if t.Role == "validator" && (o.Chain.MasternodeState != "READY" || o.Chain.CatchingUp || !o.Chain.DAPIHealthy || o.Chain.PlatformHeight < 1 || o.Chain.DAPIHeight < 1) {
 		return errors.New("validator/consensus/DAPI unhealthy")
@@ -87,8 +104,8 @@ func SameIdentity(old, new Observation, t Target) bool {
 	return true
 }
 func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error) (Health, error) {
-	h := Health{Window: window.String(), Problems: []string{}}
-	if err := s.Complete(); err != nil {
+	h := Health{Window: window.String(), Problems: []string{}, Nodes: map[string]NodeHealth{}}
+	if err := s.Validate(); err != nil {
 		return h, err
 	}
 	if window <= 0 {
@@ -112,13 +129,19 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 	block := ""
 	for _, t := range s.Fleet.Targets {
 		a, b := first.Nodes[t.Name], second.Nodes[t.Name]
+		start := len(h.Problems)
+		if a.Error != "" || b.Error != "" {
+			h.Nodes[t.Name] = NodeHealth{Status: "unknown", Problems: []string{"Observation unavailable"}}
+			h.Problems = append(h.Problems, t.Name+": observation unavailable")
+			continue
+		}
 		if err := a.Healthy(t); err != nil {
 			h.Problems = append(h.Problems, t.Name+": first "+err.Error())
 		}
 		if err := b.Healthy(t); err != nil {
 			h.Problems = append(h.Problems, t.Name+": "+err.Error())
 		}
-		if !SameIdentity(s.Nodes[t.Name], b, t) {
+		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !SameIdentity(baseline, b, t) {
 			h.Problems = append(h.Problems, t.Name+": identity/configuration/protocol changed")
 		}
 		if t.Containers["core"] != "" && (b.Chain.CoreHeight <= a.Chain.CoreHeight || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {
@@ -132,6 +155,29 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 				h.Problems = append(h.Problems, t.Name+": consensus block disagreement")
 			}
 			block = b.Chain.PlatformHash
+		}
+		problems := slices.Clone(h.Problems[start:])
+		status := "healthy"
+		if len(problems) > 0 {
+			status = "degraded"
+		}
+		h.Nodes[t.Name] = NodeHealth{Healthy: len(problems) == 0, Status: status, Problems: problems}
+	}
+	conflict := false
+	for _, p := range h.Problems {
+		if strings.Contains(p, "consensus block disagreement") {
+			conflict = true
+		}
+	}
+	if conflict {
+		for _, t := range s.Fleet.Targets {
+			if t.Role == "validator" && h.Nodes[t.Name].Status != "unknown" {
+				n := h.Nodes[t.Name]
+				n.Healthy = false
+				n.Status = "degraded"
+				n.Problems = append(n.Problems, "consensus block disagreement")
+				h.Nodes[t.Name] = n
+			}
 		}
 	}
 	h.Healthy = len(h.Problems) == 0
