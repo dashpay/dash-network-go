@@ -14,9 +14,13 @@ The current profiles are:
   DAPI and Drive are stopped gracefully (Tenderdash first), Core's Compose image is
   replaced, Core must come back synced (and the masternode READY in the next
   health gate), then Drive, Tenderdash and DAPI restart in place; the gateway keeps
-  serving. A validator's Core stops only in the quiet part of the 24-block DKG
-  cycle (height mod 24 in 13..16), so it is back before its quorums' next
-  contribution phase and is not PoSe-punished. Allow about 8 minutes per node:
+  serving. Because DKG sessions advance only with blocks and the devnet's miner is
+  dash-network-go's own, the runner waits for the quiet part of the 24-block DKG
+  cycle (height mod 24 in 13..14), **pauses mining** while that validator's Core
+  is replaced, gives it 30 seconds to reconnect, then resumes mining: no DKG
+  session can start while it is away, so it is not PoSe-punished. (A restart
+  timed only by height was observed to miss a session.) A Platform quorum that
+  formed with fewer members (at least the minimum of 9) does not stop a rollout. Allow about 8 minutes per node:
   a 13-validator devnet needs `--timeout 240m` or more (it resumes if exceeded). On the mining node the miner pauses and is recreated on the new image.
   `dash.conf`, genesis, keys, wallets and chain data are kept; every step is
   journaled in the host marker, so a lost response resumes at the same step and

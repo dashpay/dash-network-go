@@ -499,3 +499,54 @@ func TestCoreUpgradeResumesWhileTheCurrentNodeIsMidReplacement(t *testing.T) {
 		t.Fatal("resumed Core upgrade incomplete", result.Upgrade.Phase)
 	}
 }
+
+func TestCoreUpgradePausesMiningAroundEachValidatorAtAQuietHeight(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	if _, err := f.run(t, u); err != nil {
+		t.Fatal(err)
+	}
+	var seq []string
+	started := false
+	for _, q := range f.remote.calls {
+		started = started || q.Action == "upgrade-stage"
+		if !started {
+			continue // the original deployment's own mining start
+		}
+		switch q.Action {
+		case "mine-pause", "mine-start":
+			seq = append(seq, q.Action)
+		case "upgrade-apply":
+			seq = append(seq, q.Action+":"+q.Target.Role)
+		}
+	}
+	// Every validator's apply is bracketed by a pause and a resume; the
+	// wallet/mining node (last) needs no network-wide pause.
+	want := []string{}
+	for range f.plan.Validators() {
+		want = append(want, "mine-pause", "upgrade-apply:validator", "mine-start")
+	}
+	want = append(want, "upgrade-apply:wallet")
+	if strings.Join(seq, ",") != strings.Join(want, ",") {
+		t.Fatal("mining not paused around validator Core replacements:", seq)
+	}
+	for _, q := range f.remote.calls {
+		if q.Action == "mine-start" && q.PayoutAddress == "" {
+			t.Fatal("mining resumed without the payout address")
+		}
+	}
+}
+
+func TestUpgradeAcceptsAPlatformQuorumAboveTheMinimum(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if o.Platform != nil {
+			o.Platform.Validators = o.Platform.Validators[:11] // one member missed a DKG
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err != nil {
+		t.Fatal("an 11-member Platform quorum stopped the upgrade:", err)
+	}
+}

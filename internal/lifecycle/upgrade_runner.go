@@ -14,6 +14,9 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
+// platformQuorumMinimum is llmq_devnet_platform's minimum size (12/9/8).
+const platformQuorumMinimum = 9
+
 func preservedCore(c *node.Core, b provision.Preservation) bool {
 	return c != nil && c.ContainerID == b.CoreID && c.StartedAt == b.CoreStarted && c.ConfigSHA256 == b.CoreConfig && c.Genesis == b.CoreGenesis
 }
@@ -87,7 +90,9 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 				}
 				return nil, missingUpgradeObservation("Platform observation missing", t.Name, s.problems)
 			}
-			if x.Protocol != p.InitialProtocolVersion || len(x.Validators) != 12 {
+			// Platform quorums are 12 members; one that formed with fewer (at
+			// least the minimum of 9, e.g. after a member missed a DKG) is live.
+			if x.Protocol != p.InitialProtocolVersion || len(x.Validators) < platformQuorumMinimum || len(x.Validators) > 12 {
 				return nil, fmt.Errorf("unsupported live protocol or quorum size at %s", t.Name)
 			}
 			seen := map[string]bool{}
@@ -358,8 +363,26 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 			e.report("upgrade " + t.Name + "; Core preserved")
 		}
 		e.report("upgrade-applying")
+		// DKG sessions advance only with blocks, and this network's miner is
+		// ours: hold block production while a validator's Core is replaced, so
+		// no session can start before it is back and reconnected (PoSe).
+		paused := false
+		if u.Scope == "core" && t.Role == "validator" {
+			if err = e.pauseMiningQuietly(); err != nil {
+				return
+			}
+			paused = true
+		}
 		var observed node.Observation
 		observed, err = r.Remote.Call(ctx, e.upgradeRequest(u, t, "upgrade-apply"))
+		if paused {
+			if err == nil {
+				e.settle()
+			}
+			if startErr := e.resumeMining(); startErr != nil && err == nil {
+				err = startErr
+			}
+		}
 		if err != nil {
 			return
 		}
@@ -395,4 +418,50 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	e.r.Upgrade.ObservedAt = health.ObservedAt
 	err = e.acceptHealth(health)
 	return
+}
+
+// pauseMiningQuietly waits for the quiet part of the 24-block DKG cycle
+// (sessions end by block 12; the next starts at 24), then pauses the miner.
+func (e *execution) pauseMiningQuietly() error {
+	deadline := time.Now().Add(10 * time.Minute)
+	for {
+		o, err := e.call(e.p.Miner(), "core-status", nil)
+		if err == nil && o.Core != nil && o.Core.Height%24 >= 13 && o.Core.Height%24 <= 14 {
+			e.report(fmt.Sprintf("mining paused at height %d (quiet DKG window) for the Core replacement", o.Core.Height))
+			_, err = e.call(e.p.Miner(), "mine-pause", nil)
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errors.New("no quiet DKG window observed for the Core replacement")
+		}
+		if err = e.pause(2 * time.Second); err != nil {
+			return err
+		}
+	}
+}
+
+// settle gives the replaced validator time to re-establish its masternode and
+// quorum connections before blocks (and so DKG sessions) resume.
+func (e *execution) settle() { _ = e.pause(30 * time.Second) }
+
+func (e *execution) resumeMining() error {
+	_, err := e.call(e.p.Miner(), "mine-start", func(q *node.Request) { q.PayoutAddress = e.r.Deployment.PayoutAddress })
+	if err == nil {
+		e.report("mining resumed")
+	}
+	return err
+}
+
+func (e *execution) pause(d time.Duration) error {
+	if e.runner.Wait != nil {
+		return e.runner.Wait(e.ctx)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-e.ctx.Done():
+		return e.ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
