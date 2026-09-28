@@ -44,7 +44,9 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 		}
 	}
 	id := digest(q.Target.Name)
-	f.counts[q.Target.Name]++
+	if q.Action != "mine-pause" && q.Action != "mine-start" {
+		f.counts[q.Target.Name]++ // pausing or resuming the miner mines no block
+	}
 	height := int64(500 + f.counts[q.Target.Name])
 	switch q.Action {
 	case "core-start", "core-finalize", "core-status":
