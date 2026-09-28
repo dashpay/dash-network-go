@@ -42,6 +42,9 @@ type UpgradeProgress struct {
 	Baseline    map[string]Preservation `json:"baseline"`
 	Completed   map[string]bool         `json:"completed"`
 	ObservedAt  time.Time               `json:"observedAt,omitempty"`
+	// Scope "core" replaces only Core (and the miner) on every node; other
+	// scopes replace Platform components on validators and preserve Core.
+	Scope string `json:"scope,omitempty"`
 }
 
 func (images FleetImages) Validate(p Plan) error {
@@ -91,7 +94,11 @@ func (r Record) validateUpgrade(p Plan) error {
 	if len(u.Baseline) != len(p.Targets) {
 		return errors.New("upgrade preservation baseline is incomplete")
 	}
-	validators := 0
+	if u.Scope != "" && u.Scope != "core" {
+		return errors.New("invalid upgrade scope")
+	}
+	core := u.Scope == "core"
+	tracked := 0
 	currentKnown := u.CurrentNode == ""
 	for _, t := range p.Targets {
 		b := u.Baseline[t.Name]
@@ -101,23 +108,42 @@ func (r Record) validateUpgrade(p Plan) error {
 		if _, err := time.Parse(time.RFC3339Nano, b.CoreStarted); err != nil {
 			return errors.New("missing Core start evidence")
 		}
-		if u.From[t.Name]["core"] != u.To[t.Name]["core"] || r.Runtime.Images[t.Name]["core"] != u.From[t.Name]["core"] {
-			return errors.New("upgrade attempted to alter preserved Core")
-		}
-		if t.Role == "validator" {
-			validators++
+		if core {
+			// Only Core changes; every other component keeps its image.
+			for component, pin := range u.From[t.Name] {
+				if component != "core" && u.To[t.Name][component] != pin {
+					return errors.New("Core upgrade attempted to alter another component")
+				}
+			}
+			tracked++
 			if _, ok := u.Completed[t.Name]; !ok {
-				return errors.New("upgrade lost validator progress")
+				return errors.New("Core upgrade lost node progress")
 			}
 			if t.Name == u.CurrentNode {
 				currentKnown = true
+			}
+			if u.Phase == "complete" && !u.Completed[t.Name] {
+				return errors.New("Core upgrade complete without every node")
+			}
+		} else if u.From[t.Name]["core"] != u.To[t.Name]["core"] || r.Runtime.Images[t.Name]["core"] != u.From[t.Name]["core"] {
+			return errors.New("upgrade attempted to alter preserved Core")
+		}
+		if t.Role == "validator" {
+			if !core {
+				tracked++
+				if _, ok := u.Completed[t.Name]; !ok {
+					return errors.New("upgrade lost validator progress")
+				}
+				if t.Name == u.CurrentNode {
+					currentKnown = true
+				}
 			}
 			for _, service := range []string{"drive", "tenderdash", "dapi", "gateway"} {
 				if !hex64.MatchString(b.Containers[service]) || b.Restarts[service] < 0 {
 					return errors.New("invalid Platform preservation baseline")
 				}
 			}
-			if u.Phase == "complete" && !u.Completed[t.Name] {
+			if !core && u.Phase == "complete" && !u.Completed[t.Name] {
 				return errors.New("upgrade complete without every validator")
 			}
 		}
@@ -130,7 +156,7 @@ func (r Record) validateUpgrade(p Plan) error {
 			}
 		}
 	}
-	if !currentKnown || len(u.Completed) != validators {
+	if !currentKnown || len(u.Completed) != tracked {
 		return errors.New("invalid upgrade target scope")
 	}
 	if u.Phase == "complete" && (u.CurrentNode != "" || u.ObservedAt.IsZero()) {

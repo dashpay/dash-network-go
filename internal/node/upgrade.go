@@ -27,19 +27,39 @@ type ImageChange struct {
 	From       provision.ImageSet     `json:"from"`
 	To         provision.ImageSet     `json:"to"`
 	Preserve   provision.Preservation `json:"preserve"`
+	// Scope "core": only Core (and the miner) change, on any node role.
+	Scope string `json:"scope,omitempty"`
 }
 
 var changeID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (q Request) validateUpgrade() error {
-	if q.Upgrade == nil || !changeID.MatchString(q.Upgrade.ID) || (q.Upgrade.PreviousID != "" && !changeID.MatchString(q.Upgrade.PreviousID)) || q.Target.Role != "validator" {
-		return errors.New("upgrade requires exact validator and reviewed change identity")
+	if q.Upgrade == nil || !changeID.MatchString(q.Upgrade.ID) || (q.Upgrade.PreviousID != "" && !changeID.MatchString(q.Upgrade.PreviousID)) {
+		return errors.New("upgrade requires a reviewed change identity")
 	}
 	u := q.Upgrade
-	if len(u.From) != 6 || len(u.To) != 6 || u.From["core"] != u.To["core"] {
-		return errors.New("upgrade requires complete image sets and unchanged Core")
+	components := spec.Components
+	switch {
+	case u.Scope == "core":
+		if q.Target.Role != "validator" {
+			components = []string{"core"}
+		}
+		if len(u.From) != len(components) || len(u.To) != len(components) {
+			return errors.New("Core upgrade requires the node's complete image set")
+		}
+		for _, c := range components {
+			if c != "core" && u.From[c] != u.To[c] {
+				return errors.New("Core upgrade may change only Core")
+			}
+		}
+	case u.Scope == "" && q.Target.Role == "validator":
+		if len(u.From) != 6 || len(u.To) != 6 || u.From["core"] != u.To["core"] {
+			return errors.New("upgrade requires complete image sets and unchanged Core")
+		}
+	default:
+		return errors.New("Platform upgrades apply to validators only")
 	}
-	for _, component := range spec.Components {
+	for _, component := range components {
 		for _, pins := range []provision.ImageSet{u.From, u.To} {
 			ref, err := name.NewDigest(pins[component], name.StrictValidation)
 			if err != nil || len(ref.DigestStr()) != 71 || ref.DigestStr()[:7] != "sha256:" || !changeID.MatchString(ref.DigestStr()[7:]) {

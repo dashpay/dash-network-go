@@ -23,15 +23,19 @@ class Disposable(Upgrade):
         # separately exercises the actual TCP readiness check.
         self.require(self.inspect_container('drive')['State']['Running'], 'fixture-drive-not-running')
 
+    def wait_drive(self):
+        self.require(self.inspect_container('drive')['State']['Running'], 'fixture-drive-not-running')
+
     def verify_instance(self):
         self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
 
     def core_status(self):
         value=self.inspect_container('core')
         self.require(value and value['State']['Running'],'fixture-core-not-running')
+        self.verify_image(value,self.images['core'])
         return dict(containerId=value['Id'],startedAt=value['State']['StartedAt'],
                     configSha256=hashlib.sha256((self.root/'core/dash.conf').read_bytes()).hexdigest(),
-                    genesis='c'*64)
+                    genesis='c'*64,synced=True,ibd=False,height=13,headers=13)
 
     def docker(self,*args,timeout=120):
         if self.remove_before_apply and args[0]=='compose' and 'up' in args:
@@ -120,6 +124,29 @@ def main():
             for k in ['drive','tenderdash','dapi','gateway']:
                 assert resumed.docker('exec',resumed.container_name(k),'cat','/data/sentinel').decode()=='original-state'
             print('Real Platform image replacement survives a lost response; Core, configuration and persistent mounts are preserved.',flush=True)
+            # Core scope: only Core's image changes. Platform is withdrawn and
+            # restored in place; configuration and mounts are kept; a lost
+            # response resumes without replacing Core twice.
+            state=baseline(resumed)
+            before=after;after=dict(before,core=second)
+            q['target']['images']=[dict(component=k,pinned=v) for k,v in after.items()]
+            q.update(action='upgrade-apply',upgrade=dict(id='a'*64,previousId='e'*64,scope='core',**{'from':before},to=after,preserve=state))
+            c=Disposable(q,root,root/'lock');c.lose_after_apply=True
+            try:c.execute()
+            except worker.Failure as e:assert str(e)=='simulated-lost-apply-response'
+            else:raise AssertionError('expected a lost Core replacement response')
+            assert c.read('upgrade.json')['step']=='withdrawn'
+            replaced=c.inspect_container('core')['Id']
+            done=Disposable(q,root,root/'lock');done.execute()
+            core=done.core_status()
+            assert core['containerId']==replaced!=state['coreId'],'Core replaced exactly once'
+            assert core['configSha256']==state['coreConfig'],'dash.conf changed'
+            for k in ['drive','tenderdash','dapi','gateway']:
+                v=done.inspect_container(k)
+                assert v['Id']==state['containers'][k] and v['State']['Running'],k+' not restored in place'
+                assert done.docker('exec',done.container_name(k),'cat','/data/sentinel').decode()=='original-state'
+            assert done.read('upgrade.json')['phase']=='applied'
+            print('Real Core image replacement withdraws and restores Platform, keeps configuration and mounts, and survives a lost response.',flush=True)
         finally:
             for k in ['drive','tenderdash','dapi','gateway','core']:
                 subprocess.run(['docker','rm','-f',w.container_name(k)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)

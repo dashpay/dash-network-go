@@ -1,6 +1,9 @@
-"""Fixed in-place image rollout. Never renders new configuration or touches Core.
+"""Fixed in-place image rollout. Never renders new configuration.
 
-Only the image fields in the existing owned Platform Compose document may change.
+A Platform rollout changes only image fields in the owned Platform Compose
+document and never touches Core. A Core rollout ("core" scope) changes only the
+Core (and miner) image in their owned Compose documents; dash.conf, genesis,
+keys, wallets and chain data are kept.
 An on-host write-ahead marker reconciles lost SSH responses with the same plan.
 There is deliberately no downgrade/rollback/reset action.
 """
@@ -41,9 +44,180 @@ class UpgradeWorker(Worker):
             self.require(value["container_name"] == self.container_name(service)
                          and value["labels"] == self.labels(), "upgrade-compose-owner")
 
+    def core_observe(self, pin):
+        """Core status with the running image checked against the given pin.
+
+        The miner is withdrawn and replaced separately during a Core upgrade,
+        so it is verified explicitly by the caller, not here."""
+        saved, miner = self.images["core"], self.c.get("miningNodeName")
+        self.images["core"], self.c["miningNodeName"] = pin, None
+        try:
+            return self.core_status()
+        finally:
+            self.images["core"], self.c["miningNodeName"] = saved, miner
+
+    def stage_image(self, pin):
+        try:
+            image = json.loads(self.docker("image", "inspect", pin))[0]
+        except Failure:
+            self.docker("pull", "--platform", "linux/" + self.t["architecture"], pin, timeout=600)
+            image = json.loads(self.docker("image", "inspect", pin))[0]
+        self.require(image["Architecture"] == self.t["architecture"] and image["Os"] == "linux"
+                     and any(v.split("@")[-1] == pin.split("@")[-1] for v in image.get("RepoDigests", [])),
+                     "upgrade-image-proof")
+
+    def running(self, name, pin):
+        value = self.inspect_container(name)
+        if not value or not value["State"]["Running"]:
+            return False
+        try:
+            self.verify_image(value, pin)
+            return True
+        except Failure:
+            return False
+
+    def wait_core(self, pin, synced):
+        deadline = time.monotonic() + (1800 if synced else 180)
+        while True:
+            try:
+                status = self.core_observe(pin)
+                if not synced or (status["synced"] and not status["ibd"] and status["height"] >= status["headers"]):
+                    return status
+            except Failure as error:
+                if str(error) in ["wrong-chain", "upgrade-image-proof"]:
+                    raise
+            except (RPCFailure, urllib.error.URLError, ConnectionError, OSError):
+                pass
+            if time.monotonic() >= deadline:
+                raise Failure("core-upgrade-not-ready")
+            time.sleep(3)
+
+    def wait_dkg_quiet(self, pin):
+        """Restart a validator's Core only in the quiet part of the 24-block DKG
+        cycle (after the mining window, before the next session), so the node
+        is back before its quorums' next contribution phase (PoSe)."""
+        deadline = time.monotonic() + 600
+        while True:
+            height = self.core_observe(pin)["height"]
+            if 13 <= height % 24 <= 16:
+                return height
+            if time.monotonic() >= deadline:
+                raise Failure("core-upgrade-no-quiet-dkg-window")
+            time.sleep(2)
+
+    def wait_drive(self):
+        # Tenderdash exits on a missing ABCI listener: start it after Drive's.
+        deadline = time.monotonic() + 150
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", self.ports["driveABCI"]), timeout=2):
+                    return
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise Failure("upgrade-drive-abci-timeout") from None
+                time.sleep(1)
+
+    def execute_core(self):
+        """Replace Core's image on this node, withdrawing its dependants first.
+
+        Steps are journaled in upgrade.json before they run, so a lost response
+        or interrupted run resumes at the same step with the same plan."""
+        change = self.q["upgrade"]
+        before, after = change["from"], change["to"]
+        self.require(set(before) == set(after) and "core" in before
+                     and all(before[k] == after[k] for k in before if k != "core"), "core-upgrade-scope")
+        self.verify_instance()
+        with self.lock.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Failure("host-busy") from None
+            self.owned()
+            self.require(self.read("deployment.json") == {"planId": self.c["planId"]}, "upgrade-missing-deployment")
+            self.stage = self.q["action"]
+            expected = change["preserve"]
+            marker = self.read("upgrade.json")
+            same = bool(marker and marker.get("id") == change["id"])
+            if same:
+                self.require(marker["from"] == before and marker["to"] == after and marker.get("scope") == "core"
+                             and marker.get("phase") in ["applying", "applied"], "upgrade-marker-drift")
+            else:
+                # Platform upgrades leave no marker on non-validators, so a node's
+                # last marker may be older than previousId; only an unfinished
+                # different operation blocks.
+                self.require(marker is None or marker.get("phase") == "applied", "upgrade-previous-operation")
+            self.stage_image(after["core"])
+            fresh = not same or marker.get("step") == "start"
+            if fresh:
+                core = self.core_observe(before["core"])
+                self.require(core["containerId"] == expected["coreId"] and core["configSha256"] == expected["coreConfig"]
+                             and core["genesis"] == expected["coreGenesis"], "upgrade-core-changed")
+            if self.q["action"] == "upgrade-stage":
+                # A node already in progress is reconciled by its apply.
+                return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"],
+                            **({"core": core} if fresh else {}))
+            validator = self.t["role"] == "validator"
+            miner = self.read("miner/compose.json")
+            if not same:
+                marker = dict(id=change["id"], previousId=change.get("previousId", ""), scope="core",
+                              **{"from": before}, to=after, preserve=expected, phase="applying", step="start")
+                self.atomic("upgrade.json", marker)
+            step = lambda name: (marker.update(step=name), self.atomic("upgrade.json", marker))
+            if marker["step"] == "start":
+                # Mining and Platform depend on Core RPC/ZMQ: withdraw them
+                # gracefully (Tenderdash before Drive) instead of letting them crash.
+                if miner and self.inspect_container("miner"):
+                    self.docker("stop", "-t", "20", self.container_name("miner"), timeout=30)
+                if validator:
+                    for name in ["tenderdash", "dapi", "drive"]:
+                        self.docker("stop", "--time", "120", self.container_name(name), timeout=150)
+                step("withdrawn")
+            if marker["step"] == "withdrawn":
+                if not self.running("core", after["core"]):
+                    # Core itself stops only in the quiet part of the DKG cycle.
+                    if validator and self.running("core", before["core"]):
+                        self.wait_dkg_quiet(before["core"])
+                    # Stop Core (it may take up to its grace period) before the
+                    # recreate, so Compose never times out mid-replacement.
+                    self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
+                    services = self.read("core/compose.json")["services"]
+                    services["core"]["image"] = after["core"]
+                    self.compose("core", services)
+                self.wait_core(after["core"], synced=False)
+                step("replaced")
+            if marker["step"] == "replaced":
+                core = self.wait_core(after["core"], synced=True)
+                self.require(core["configSha256"] == expected["coreConfig"] and core["genesis"] == expected["coreGenesis"],
+                             "core-upgrade-identity-changed")
+                if validator:
+                    self.docker("start", self.container_name("drive"))
+                    self.wait_drive()
+                    for name in ["tenderdash", "dapi"]:
+                        self.docker("start", self.container_name(name))
+                if miner:
+                    services = miner["services"]
+                    services["miner"]["image"] = after["core"]
+                    self.compose("miner", services)
+                marker["phase"] = "applied"
+                step("done")
+            core = self.core_observe(after["core"])
+            self.require(core["configSha256"] == expected["coreConfig"] and core["genesis"] == expected["coreGenesis"],
+                         "core-upgrade-identity-changed")
+            if validator:
+                for name in ["drive", "tenderdash", "dapi", "gateway"]:
+                    value = self.inspect_container(name)
+                    self.require(value and value["State"]["Running"] and value["Id"] == expected["containers"][name],
+                                 "core-upgrade-platform-not-restored")
+            if miner:
+                self.require(self.running("miner", after["core"]) and self.inspect_container("miner")["State"]["Running"],
+                             "core-upgrade-miner-not-restored")
+            return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"], core=core)
+
     def execute(self):
         self.require(self.q["action"] in ["upgrade-stage", "upgrade-apply"],
                      "upgrade-action-refused")
+        if self.q["upgrade"].get("scope") == "core":
+            return self.execute_core()
         self.require(self.t["role"] == "validator", "upgrade-validator-only")
         change = self.q["upgrade"]
         before, after = change["from"], change["to"]

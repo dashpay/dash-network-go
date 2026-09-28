@@ -396,3 +396,106 @@ func TestUpgradeKeepsTheACMEClientOutOfImageSets(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCoreUpgradeReplacesOnlyCoreOnEveryNodeMiningNodeLast(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	for _, x := range f.plan.Targets {
+		for component, pin := range u.From[x.Name] {
+			if component == "core" && pin == u.To[x.Name]["core"] {
+				t.Fatal("Core not changed on", x.Name)
+			}
+			if component != "core" && pin != u.To[x.Name][component] {
+				t.Fatal("Core upgrade changed", component, "on", x.Name)
+			}
+		}
+	}
+	result, err := f.run(t, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Upgrade.Phase != "complete" || result.Upgrade.Scope != "core" || len(result.Upgrade.Completed) != len(f.plan.Targets) {
+		t.Fatal("Core upgrade incomplete", result.Upgrade.Phase, result.Upgrade.Scope, len(result.Upgrade.Completed))
+	}
+	var order []string
+	for _, q := range f.remote.calls {
+		if q.Action == "upgrade-apply" {
+			if q.Upgrade.Scope != "core" {
+				t.Fatal("apply request lacks the Core scope")
+			}
+			order = append(order, q.Target.Name)
+		}
+	}
+	if len(order) != len(f.plan.Targets) || order[len(order)-1] != f.plan.Miner().Name || !strings.HasPrefix(order[0], "validators-") {
+		t.Fatal("unexpected Core upgrade order", order)
+	}
+	for _, x := range f.plan.Targets {
+		if result.Runtime.Images[x.Name]["core"] != u.To[x.Name]["core"] {
+			t.Fatal("runtime Core not recorded", x.Name)
+		}
+	}
+	// A later Platform upgrade starts from the upgraded Core and keeps it.
+	f.store.record = result
+	next := f.change(t, "platform", "c")
+	for _, x := range f.plan.Targets {
+		if next.To[x.Name]["core"] != u.To[x.Name]["core"] {
+			t.Fatal("Platform upgrade after a Core upgrade changed Core", x.Name)
+		}
+	}
+	if _, err := f.run(t, next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoreUpgradeRefusesChangedConfiguration(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if q.Action == "upgrade-apply" {
+			o.Core.ConfigSHA256 = digest("rewritten")
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err == nil || !strings.Contains(err.Error(), "configuration/genesis") {
+		t.Fatal("Core upgrade accepted a changed configuration", err)
+	}
+}
+
+func TestCoreUpgradeKeepsCoreRepository(t *testing.T) {
+	f := upgradeSetup(t)
+	candidate := f.plan.Bootstrap.Compute.Network
+	candidate.Images = maps.Clone(candidate.Images)
+	candidate.Images["core"] = "docker.io/dashpay/dashd-develop:upgrade-b"
+	lock := testutil.Lock(t, candidate)
+	if _, err := BuildUpgrade(f.plan, f.store.record, candidate, lock, "core", time.Now()); err == nil || !strings.Contains(err.Error(), "repository") {
+		t.Fatal("Core repository change accepted", err)
+	}
+}
+
+func TestCoreUpgradeResumesWhileTheCurrentNodeIsMidReplacement(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	first := ""
+	f.remote.before = func(q node.Request) error {
+		if q.Action == "upgrade-apply" && first == "" {
+			first = q.Target.Name
+			return errors.New("host-busy")
+		}
+		// Until its apply resumes, the interrupted node's Core answers on
+		// neither image (stopped mid-replacement).
+		if q.Action == "core-status" && q.Target.Name == first && callsFor(f.remote, "upgrade-apply") < 2 {
+			return errors.New("running-image-drift")
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err == nil {
+		t.Fatal("expected the first apply to fail")
+	}
+	result, err := f.run(t, u)
+	if err != nil {
+		t.Fatal("resume blocked by the mid-replacement node:", err)
+	}
+	if result.Upgrade.Phase != "complete" {
+		t.Fatal("resumed Core upgrade incomplete", result.Upgrade.Phase)
+	}
+}

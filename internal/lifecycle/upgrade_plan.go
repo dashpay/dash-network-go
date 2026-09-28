@@ -44,6 +44,16 @@ type UpgradePlan struct {
 	Recovery     string                `json:"recovery"`
 }
 
+// coreUpgradeRecovery describes a Core-scope rollout.
+const coreUpgradeRecovery = "forward-only; one node at a time: validators, then fullnodes, then the mining node; Platform services and mining are withdrawn gracefully around the Core replacement and restarted after Core is synced; configuration, genesis, keys, wallets and chain data are preserved; stop on failure; no automatic downgrade"
+
+func recoveryFor(scope string) string {
+	if scope == "core" {
+		return coreUpgradeRecovery
+	}
+	return upgradeRecovery
+}
+
 const upgradeRecovery = "forward-only; Drive replacement gracefully stops Tenderdash then restarts it after ABCI readiness; Core remains running; stop on failure; no automatic downgrade, database reset or protocol migration"
 
 func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from provision.FleetImages, scope string) (provision.FleetImages, error) {
@@ -64,17 +74,41 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 	if !reflect.DeepEqual(unchanged, p.Bootstrap.Compute.Network) {
 		return nil, errors.New("upgrade cannot change network identity, topology, cloud placement or metadata")
 	}
-	if scope != "platform" && scope != "tenderdash" {
-		return nil, errors.New("executable upgrades currently support platform or tenderdash scope only")
+	if scope != "platform" && scope != "tenderdash" && scope != "core" {
+		return nil, errors.New("executable upgrades support platform, tenderdash or core scope")
 	}
 	to := cloneImages(from)
 	changed := false
-	for _, t := range p.Targets {
-		for _, image := range t.Images {
-			if image.Component == "core" && from[t.Name]["core"] != image.Pinned {
-				return nil, errors.New("upgrade source differs from preserved Core image")
+	if scope == "core" {
+		// Every node runs Core; only its image changes.
+		for _, t := range p.Targets {
+			for _, image := range lock.Images {
+				if image.Component != "core" {
+					continue
+				}
+				repo, err := name.NewDigest(image.Pinned, name.StrictValidation)
+				if err != nil {
+					return nil, err
+				}
+				current, err := name.NewDigest(from[t.Name]["core"], name.StrictValidation)
+				if err != nil || current.Context().Name() != repo.Context().Name() {
+					return nil, errors.New("a Core upgrade keeps Core's image repository")
+				}
+				for _, platform := range image.Platforms {
+					if platform.Architecture == t.Architecture {
+						pin := repo.Context().Digest(platform.Digest).Name()
+						changed = changed || pin != from[t.Name]["core"]
+						to[t.Name]["core"] = pin
+					}
+				}
 			}
 		}
+		if !changed {
+			return nil, errors.New("Core image is unchanged; no upgrade operation needed")
+		}
+		return to, to.Validate(p.Bootstrap.Compute)
+	}
+	for _, t := range p.Targets {
 		if t.Role != "validator" {
 			continue
 		}
@@ -121,7 +155,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 	if err != nil {
 		return UpgradePlan{}, err
 	}
-	u := UpgradePlan{APIVersion: spec.Version, Kind: "DevnetUpgradePlan", Deployment: p, Candidate: candidate, Release: lock, Scope: scope, CreatedAt: now.UTC(), From: from, To: to, RecipeSHA256: node.UpgradeDigest(), Recovery: upgradeRecovery}
+	u := UpgradePlan{APIVersion: spec.Version, Kind: "DevnetUpgradePlan", Deployment: p, Candidate: candidate, Release: lock, Scope: scope, CreatedAt: now.UTC(), From: from, To: to, RecipeSHA256: node.UpgradeDigest(), Recovery: recoveryFor(scope)}
 	if record.Runtime != nil {
 		u.PreviousID = record.Runtime.UpgradeID
 	}
@@ -132,7 +166,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 func (u UpgradePlan) Validate() error {
 	copy := u
 	copy.ID = ""
-	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || u.RecipeSHA256 != node.UpgradeDigest() || u.Recovery != upgradeRecovery || u.CreatedAt.IsZero() {
+	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || u.RecipeSHA256 != node.UpgradeDigest() || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {
 		return errors.New("upgrade plan altered or recipe changed; retain exact plan/binary")
 	}
 	if u.PreviousID != "" && (len(u.PreviousID) != 64 || u.PreviousID == u.ID) {
