@@ -26,6 +26,11 @@ class Disposable(Upgrade):
     def wait_drive(self):
         self.require(self.inspect_container('drive')['State']['Running'], 'fixture-drive-not-running')
 
+    def refresh_quorum_links(self):
+        # A one-node fixture forms no quorum; the reconnect and link wait are
+        # unit-tested and exercised by live Core upgrades.
+        pass
+
     def verify_instance(self):
         self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
 

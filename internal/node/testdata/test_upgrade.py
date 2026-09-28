@@ -218,6 +218,8 @@ class CoreFixture(Upgrade):
         q.update(action='upgrade-apply', upgrade=dict(id='f' * 64, previousId='', scope='core', **{'from': before}, to=after, preserve=preserve))
         super().__init__(q, root, root / 'lock')
         self.commands, self.lose_after_replace, self.heights = [], False, [13]
+        # Quorum members still unverified after each dkgstatus call (the last repeats).
+        self.links, self.valid = [set()], {'m1', 'm2', 'm3'}
         self.atomic('deployment.json', dict(planId=self.c['planId']))
         self.atomic('core/compose.json', dict(name=self.project, services={'core': self.service('core', before['core'])}))
         if role == 'wallet':
@@ -246,6 +248,24 @@ class CoreFixture(Upgrade):
         self.commands.append(('height', height))
         return dict(containerId=value['Id'], startedAt='t', configSha256='b' * 64, genesis='c' * 64,
                     synced=True, ibd=False, height=height, headers=height)
+
+    def rpc(self, method, params=None, wallet=False):
+        self.commands.append(('rpc', method, *(params or [])))
+        if method == 'getpeerinfo':
+            return [dict(id=7), dict(id=9)]
+        if method == 'disconnectnode':
+            if params[1] == 9:
+                raise worker.RPCFailure(method, -29)
+            return None
+        if method == 'getconnectioncount':
+            return 12
+        if method == 'protx':
+            return sorted(self.valid)
+        if method == 'quorum':
+            missing = self.links.pop(0) if len(self.links) > 1 else self.links[0]
+            members = [dict(proTxHash=m, connected=m not in missing) for m in ['m1', 'm2', 'm3', 'banned']]
+            return dict(quorumConnections=[dict(llmqType='llmq_devnet', quorumConnections=members)])
+        raise AssertionError('unexpected rpc ' + method)
 
     def docker(self, *args, timeout=120):
         self.commands.append(args)
@@ -336,6 +356,34 @@ class CoreUpgradeReviewTests(unittest.TestCase):
             last_height = max(i for i, c in enumerate(w.commands[:stop]) if c[0] == 'height')
             self.assertIn(w.commands[last_height][1] % 24, range(13, 15), 'Core stopped outside the quiet window')
             self.assertLess(next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('tenderdash') in c), stop, 'Platform withdrawn first')
+
+    def test_validator_reconnects_once_synced_and_waits_for_every_quorum_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            # One-sided links survive until the reconnect; a banned member never connects.
+            w.links = [{'m2', 'banned'}, {'m2', 'banned'}, {'banned'}]
+            with mock.patch.object(scope['time'], 'sleep', lambda s: None):
+                w.execute()
+            index = lambda cmd: next(i for i, c in enumerate(w.commands) if c[:len(cmd)] == cmd)
+            self.assertLess(max(i for i, c in enumerate(w.commands) if c[0] == 'height'
+                                and i < index(('rpc', 'getpeerinfo'))), index(('rpc', 'getpeerinfo')))
+            self.assertLess(index(('rpc', 'disconnectnode', '', 9)), index(('start', w.container_name('drive'))))
+            self.assertEqual(sum(1 for c in w.commands if c[:2] == ('rpc', 'quorum')), 3, 'waited for m2')
+            self.assertEqual(w.read('upgrade.json')['step'], 'done')
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            w.links = [{'m1'}]
+            clock = iter(range(0, 10000, 10))
+            with mock.patch.object(scope['time'], 'sleep', lambda s: None), \
+                    mock.patch.object(scope['time'], 'monotonic', lambda: next(clock)):
+                with self.assertRaisesRegex(worker.Failure, 'core-upgrade-quorum-links-missing'):
+                    w.execute()
+            self.assertEqual(w.read('upgrade.json')['step'], 'replaced', 'a resume reconnects again')
+            self.assertFalse(w.containers['drive']['State']['Running'])
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp), 'wallet')
+            w.execute()
+            self.assertFalse(any(c[0] == 'rpc' for c in w.commands), 'only masternodes verify quorum links')
 
     def test_nodes_an_earlier_upgrade_did_not_touch_accept_an_older_or_missing_marker(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -115,6 +115,42 @@ class UpgradeWorker(Worker):
                 raise Failure("core-upgrade-no-quiet-dkg-window")
             time.sleep(2)
 
+    def missing_quorum_links(self):
+        """Valid quorum members this masternode has no MNAUTH-verified link to."""
+        valid = set(self.rpc("protx", ["list", "valid"]))
+        missing = set()
+        for quorum in self.rpc("quorum", ["dkgstatus"]).get("quorumConnections", []):
+            for member in quorum.get("quorumConnections", []):
+                if not member.get("connected") and member.get("proTxHash") in valid:
+                    missing.add(member["proTxHash"])
+        return missing
+
+    def refresh_quorum_links(self):
+        """Reconnect a restarted masternode's peers once it is synced.
+
+        Core ignores MNAUTH until its own blockchain sync completes, and a
+        connection carries only one, so peers that reconnect during startup
+        verify this node while it never verifies them. Masternode
+        de-duplication then keeps those one-sided links and the node misses
+        quorum connections (lost DKG contributions, then PoSe). Reconnecting
+        once synced makes every link verify both ways."""
+        for peer in self.rpc("getpeerinfo"):
+            try:
+                self.rpc("disconnectnode", ["", peer["id"]])
+            except RPCFailure as error:
+                if error.code != -29:  # already disconnected
+                    raise
+        deadline = time.monotonic() + 300
+        while True:
+            try:
+                if self.rpc("getconnectioncount") > 0 and not self.missing_quorum_links():
+                    return
+            except (RPCFailure, urllib.error.URLError, ConnectionError, OSError):
+                pass
+            if time.monotonic() >= deadline:
+                raise Failure("core-upgrade-quorum-links-missing")
+            time.sleep(3)
+
     def wait_drive(self):
         # Tenderdash exits on a missing ABCI listener: start it after Drive's.
         deadline = time.monotonic() + 150
@@ -201,6 +237,7 @@ class UpgradeWorker(Worker):
                 self.require(core["configSha256"] == expected["coreConfig"] and core["genesis"] == expected["coreGenesis"],
                              "core-upgrade-identity-changed")
                 if validator:
+                    self.refresh_quorum_links()
                     self.docker("start", self.container_name("drive"))
                     self.wait_drive()
                     for name in ["tenderdash", "dapi"]:
