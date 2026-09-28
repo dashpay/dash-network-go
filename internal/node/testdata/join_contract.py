@@ -11,8 +11,8 @@ class NewNode(JoinWorker):
  peer_container=''
  def docker(self,*args,**kwargs):
   value=super().docker(*args,**kwargs)
-  if args==('container','ls','-a','--format','{{.Names}}'):
-   value='\n'.join(n for n in value.decode().splitlines() if n!=self.peer_container).encode()
+  if args[:4]==('container','ls','-a','--format'):
+   value='\n'.join(n for n in value.decode().splitlines() if n.split('\t')[0]!=self.peer_container).encode()
   return value
  def verify_instance(self):self.require(os.environ.get('DASHNET_DISPOSABLE_CI')=='1','disposable-ci-only')
 
