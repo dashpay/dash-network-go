@@ -366,3 +366,38 @@ func TestCompletedHostWithLostCheckpointIsNotReapplied(t *testing.T) {
 		t.Fatal("checkpoint loss caused a duplicate or missing apply", f.applies, err)
 	}
 }
+func TestFleetStartsNothingPastAFailedCheckpoint(t *testing.T) {
+	targets := make([]Target, parallelHosts+4)
+	for i := range targets {
+		targets[i] = Target{Name: fmt.Sprintf("h%02d", i)}
+	}
+	var mu sync.Mutex
+	started, running, peak := 0, 0, 0
+	work := func(_ context.Context, target Target) (provision.BootstrapNode, error) {
+		mu.Lock()
+		started++
+		running++
+		peak = max(peak, running)
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		mu.Lock()
+		running--
+		mu.Unlock()
+		if target.Name == "h01" {
+			return provision.BootstrapNode{Phase: "unknown"}, errors.New("prepare h01: apt failed")
+		}
+		return provision.BootstrapNode{Phase: "ready"}, nil
+	}
+	recorded := 0
+	if err := fleet(context.Background(), targets, work, func(Target, provision.BootstrapNode) error { recorded++; return nil }); err == nil || !strings.Contains(err.Error(), "apt failed") {
+		t.Fatal("work error lost", err)
+	}
+	if started != len(targets) || recorded != len(targets) || peak > parallelHosts || peak < 2 {
+		t.Fatalf("started %d recorded %d peak %d", started, recorded, peak)
+	}
+	started = 0
+	err := fleet(context.Background(), targets, work, func(Target, provision.BootstrapNode) error { return errors.New("lost claim") })
+	if err == nil || !strings.Contains(err.Error(), "lost claim") || started != parallelHosts {
+		t.Fatalf("a host started past a failed checkpoint (started %d): %v", started, err)
+	}
+}

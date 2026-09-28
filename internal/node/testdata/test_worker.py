@@ -250,7 +250,9 @@ class Tests(unittest.TestCase):
         w.height, w.batches, w.dkg = 4100, [], True
         self.assertEqual(w.fast_forward()["height"], 4100)
         self.assertEqual(w.batches, [], "never fast-forward once DKG runs")
-        w.dkg, w.registered = False, [6000]
+        w.registered = [6000]  # a user's masternode, registered long after creation
+        self.assertEqual(w.fast_forward()["height"], 4100, "DKG on: later registrations never block a redeploy")
+        w.dkg = False
         with self.assertRaisesRegex(worker.Failure, "fast-forward-height"):
             w.fast_forward()
 

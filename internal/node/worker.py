@@ -740,7 +740,8 @@ class Worker:
         """Mine the cycles a rotated quorum waits for at minimum difficulty.
 
         A DIP-0024 quorum is assembled from quarters picked at the three previous
-        cycle bases, each from the masternode list 8 blocks earlier, so the first
+        cycle bases, each from the masternode list 8 blocks earlier in which a
+        masternode counts once confirmed (so from 10 blocks after it registered), so the first
         full llmq_devnet_dip0024 (48-block cycle) forms three cycles after the
         EvoNodes registered. Block processing records those picks whether or not
         DKG runs. Before activation SPORK_17 is off: no DKG session exists and no
@@ -749,17 +750,20 @@ class Worker:
         at the normal pace (with every quorum type). Idempotent: the target
         follows from registration heights, and nothing is mined once DKG is on."""
         self.require(self.t["role"] == "wallet", "wallet-only")
-        cycle, depth, quarters, lead = 48, 8, 3, 6
+        # Once DKG is on (a resume, or a redeploy after users registered their
+        # own masternodes), never mine and never judge later registrations.
+        if self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is not False:
+            return self.core_status()
+        cycle, depth, quarters, lead = 48, 8 + 2, 3, 6
         registered = max(m["state"]["registeredHeight"] for m in self.rpc("protx", ["list", "registered", True]))
         forming = -(-(registered + depth + quarters * cycle) // cycle) * cycle
         target = forming - lead
         premine = int(self.c.get("premineHeight", 0))
         self.require(0 < target <= premine + 1000, "fast-forward-height")
-        if self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is False:
-            address = self.address("dashnet:payout")
-            while (height := self.rpc("getblockcount")) < target:
-                self.stage = "fast-forward"
-                self.rpc("generatetoaddress", [min(250, target - height), address, 100000000])
+        address = self.address("dashnet:payout")
+        while (height := self.rpc("getblockcount")) < target:
+            self.stage = "fast-forward"
+            self.rpc("generatetoaddress", [min(250, target - height), address, 100000000])
         return self.core_status()
 
     def mine_pause(self):

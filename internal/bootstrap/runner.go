@@ -215,60 +215,52 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud provisio
 // the time of one host.
 const parallelHosts = 16
 
-// fleet runs work for every target in a bounded pool and passes each result to
-// record on the calling goroutine, in completion order. A work error is kept
-// and the others still finish (each host's state is rechecked on resume); a
-// record error cancels the remaining work.
+// fleet runs work for every target, at most parallelHosts at a time, and passes
+// each result to record on the calling goroutine in completion order. A new
+// target starts only after the previous result was recorded, so no host is
+// touched past a failed checkpoint (a lost claim). A work error is kept and the
+// others still finish; each host's state is rechecked on resume. After a record
+// error nothing further starts; work already running finishes unrecorded.
 func fleet(ctx context.Context, targets []Target, work func(context.Context, Target) (provision.BootstrapNode, error), record func(Target, provision.BootstrapNode) error) error {
 	type reply struct {
 		t   Target
 		n   provision.BootstrapNode
 		err error
 	}
-	batch, cancel := context.WithCancel(ctx)
-	defer cancel()
-	jobs := make(chan Target)
 	replies := make(chan reply)
-	var wg sync.WaitGroup
-	for range min(parallelHosts, len(targets)) {
-		wg.Add(1)
+	next, active := 0, 0
+	start := func() {
+		t := targets[next]
+		next++
+		active++
 		go func() {
-			defer wg.Done()
-			for t := range jobs {
-				n, err := work(batch, t)
-				replies <- reply{t, n, err}
-			}
+			n, err := work(ctx, t)
+			replies <- reply{t, n, err}
 		}()
 	}
-	go func() {
-		defer close(replies)
-		defer wg.Wait()
-		defer close(jobs)
-		for _, t := range targets {
-			select {
-			case jobs <- t:
-			case <-batch.Done():
-				return
-			}
-		}
-	}()
+	for next < len(targets) && active < parallelHosts {
+		start()
+	}
 	var errs []error
 	var recordErr error
-	for x := range replies {
+	for active > 0 {
+		x := <-replies
+		active--
 		if x.err != nil {
 			errs = append(errs, x.err)
 		}
-		if recordErr == nil {
-			if recordErr = record(x.t, x.n); recordErr != nil {
-				cancel()
-			}
+		if recordErr != nil {
+			continue
+		}
+		if recordErr = record(x.t, x.n); recordErr == nil && next < len(targets) && ctx.Err() == nil {
+			start()
 		}
 	}
 	if recordErr != nil {
-		return recordErr
+		return errors.Join(append([]error{recordErr}, errs...)...)
 	}
-	if err := ctx.Err(); err != nil {
-		errs = append(errs, err)
+	if next < len(targets) {
+		errs = append(errs, ctx.Err())
 	}
 	return errors.Join(errs...)
 }

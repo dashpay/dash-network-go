@@ -89,7 +89,8 @@ The controller runs named stages:
    quorums 21), start persistent mining, wait for READY masternodes, all three
    quorum types and ChainLocks. A rotated `llmq_devnet_dip0024` quorum (48-block
    cycle) is assembled from quarters picked at the three previous cycle bases,
-   each from the masternode list 8 blocks earlier, so its first full instance
+   each from the masternode list 8 blocks earlier (a masternode counts once
+   confirmed), so its first full instance
    forms three cycles after the last registration: about 190 blocks, over 30
    minutes at ten seconds a block. Block processing records those picks whether
    or not DKG runs, and before activation (SPORK_17 off) no DKG session exists,
