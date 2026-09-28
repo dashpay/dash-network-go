@@ -211,6 +211,41 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
             w.activate()
 
+    def test_fund_premines_in_batches_before_registration(self):
+        class Chain(worker.Worker):
+            def __init__(self, q, root):
+                super().__init__(q, root, root / "lock")
+                self.height, self.calls = 0, []
+
+            def address(self, label):
+                return "y" + "1" * 33
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "getblockcount":
+                    return self.height
+                if method == "generatetoaddress":
+                    self.calls.append(params[0])
+                    self.height += params[0]
+                    return ["00" * 32] * params[0]
+                if method == "listlockunspent":
+                    return []
+                if method == "listunspent":
+                    return [dict(txid="t", vout=0, amount=500000, spendable=True, safe=True)] if self.height >= 4032 else []
+                raise AssertionError(method)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            q = request()
+            q["context"]["premineHeight"] = 4032
+            q["requiredBalance"] = 60000
+            w = Chain(q, Path(tmp))
+            self.assertEqual(w.fund()["balance"], 500000)
+            self.assertEqual(w.height, 4032)
+            self.assertTrue(all(n <= 250 for n in w.calls))
+            # An already advanced chain (resume) mines nothing further.
+            w.calls = []
+            w.fund()
+            self.assertEqual(w.calls, [])
+
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
             q = request()

@@ -78,7 +78,12 @@ The controller runs named stages:
 1. Check exact AWS ownership/placement/addresses and **all hosts** before mutation.
 2. Start Core, verify the same devnet genesis on every target.
 3. Persist wallet/spork/BLS/Ed25519/TLS identities; configure Core for masternodes.
-4. Mine local devnet collateral; register every validator serially on the wallet.
+4. Advance the chain at minimum difficulty to the plan's `premineHeight` (4032, as
+   the legacy devnet tooling does with `minimumdifficultyblocks=4032`) before any
+   EvoNode exists, then mine local collateral and register every validator
+   serially on the wallet. Quorums and the Platform genesis ChainLock therefore
+   form on a mature chain instead of during the first few hundred blocks, where
+   DKG sessions were observed to PoSe-ban late-registered validators.
 5. Activate available devnet sporks, start persistent mining, wait for READY
    masternodes, all three quorum types and ChainLocks.
 6. Persist the initial chainlocked Core height once, render immutable Platform

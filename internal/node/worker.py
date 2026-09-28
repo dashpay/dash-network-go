@@ -576,7 +576,15 @@ class Worker:
         self.require(0 < target <= 150000, "funding-target")
         address = self.address("dashnet:payout")
         # Mining is an explicit create-devnet action. No faucet/testnet funds are
-        # used. Observe balance each retry; cap initial mining to 1,000 blocks.
+        # used. First advance to the premine height at minimum difficulty, before
+        # any EvoNode exists, so quorums form on a mature chain (legacy devnets
+        # use minimumdifficultyblocks=4032). Then observe balance each retry.
+        premine = int(self.c.get("premineHeight", 0))
+        self.require(0 <= premine <= 20000, "premine-height")
+        while self.rpc("getblockcount") < premine:
+            self.stage = "premine"
+            self.rpc("generatetoaddress", [min(250, premine - self.rpc("getblockcount")), address, 100000000])
+        limit = max(1000, premine + 1000)
         for _ in range(1000):
             locked = {
                 (v["txid"], v["vout"]) for v in self.rpc("listlockunspent", [], True)
@@ -595,7 +603,7 @@ class Worker:
             )
             if balance >= target:
                 return dict(balance=balance)
-            self.require(self.rpc("getblockcount") < 1000, "bootstrap-mining-limit")
+            self.require(self.rpc("getblockcount") < limit, "bootstrap-mining-limit")
             self.rpc("generatetoaddress", [1, address, 1000000])
         raise Failure("funding-not-reached")
 
@@ -663,7 +671,7 @@ class Worker:
         for _ in range(required + 1):
             if tx.get("confirmations", 0) >= required:
                 break
-            self.require(self.rpc("getblockcount") < 2000, "registration-mining-limit")
+            self.require(self.rpc("getblockcount") < max(2000, int(self.c.get("premineHeight", 0)) + 2000), "registration-mining-limit")
             self.rpc("generatetoaddress", [1, self.address("dashnet:payout"), 1000000])
             tx = self.rpc("getrawtransaction", [saved["txid"], True])
         info = self.rpc("protx", ["info", saved["txid"]])

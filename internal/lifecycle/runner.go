@@ -45,7 +45,7 @@ func (p Plan) Request(t node.Target, action string) node.Request {
 			CoreNetwork: p.CoreNetwork, PlatformChainID: p.PlatformChainID,
 			GenesisTime:            p.GenesisTime.Format(time.RFC3339Nano),
 			InitialProtocolVersion: p.InitialProtocolVersion,
-			MiningIntervalSeconds:  p.MiningIntervalSeconds, MiningNodeName: p.Miner().Name,
+			MiningIntervalSeconds:  p.MiningIntervalSeconds, MiningNodeName: p.Miner().Name, PremineHeight: p.PremineHeight,
 			CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
 		},
 	}
