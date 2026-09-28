@@ -42,7 +42,7 @@ func (r Record) Validate(f Fleet) error {
 		if _, ok := r.Enrolled[t.Name]; !ok {
 			return errors.New("managed record lost target")
 		}
-		if r.OperationID != "" && !r.Enrolled[t.Name] {
+		if r.OperationID != "" && !r.Enrolled[t.Name] && (!r.Completed[t.Name] || r.Current == t.Name) {
 			return errors.New("unenrolled target in operation")
 		}
 		if t.Name == r.Current {

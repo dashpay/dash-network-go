@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/dashpay/dash-network-go/internal/files"
+	"github.com/dashpay/dash-network-go/internal/journal"
 	"github.com/dashpay/dash-network-go/internal/managed"
 	"github.com/dashpay/dash-network-go/internal/release"
 	"github.com/dashpay/dash-network-go/internal/transport"
@@ -29,7 +30,10 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	var manifestPath, snapshotPath, planPath, key, hosts, profile, output, confirm, scope, operation, choicesPath, expectedOwner string
 	var timeout, window time.Duration
 	var stopped bool
-	var source string
+	var source, selectedNodes string
+	if command == "managed-plan" || command == "managed-enroll" {
+		fs.StringVar(&selectedNodes, "nodes", "", "comma-separated explicit target names; omitted means whole fleet")
+	}
 	if command == "managed-join-profile" {
 		fs.StringVar(&source, "source", "", "exact existing source node name; public chain parameters only")
 	}
@@ -56,7 +60,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		fs.StringVar(&confirm, "confirm", "", "exact snapshot/plan ID")
 	}
 	if command == "managed-plan" {
-		fs.StringVar(&scope, "scope", "platform", "core, platform, tenderdash or all")
+		fs.StringVar(&scope, "scope", "platform", "component names (comma separated), platform or all")
 		fs.StringVar(&operation, "operation", "upgrade", "deploy (same-image restoration) or upgrade")
 		fs.StringVar(&choicesPath, "images", "", "JSON component to image candidate map; omitted components retain exact existing images")
 	}
@@ -69,6 +73,10 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 			return nil
 		}
 		return e
+	}
+	var targets []string
+	if selectedNodes != "" {
+		targets = strings.Split(selectedNodes, ",")
 	}
 	healthOperation := command == "managed-doctor" || command == "managed-upgrade" || command == "managed-deploy"
 	if fs.NArg() != 0 || timeout <= 0 || window <= 0 || (healthOperation && window >= timeout) {
@@ -88,7 +96,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		if e := files.ReadJSON(snapshotPath, &s); e != nil {
 			return e
 		}
-		if e := s.Complete(); e != nil {
+		if e := s.Validate(); e != nil {
 			return e
 		}
 		f = s.Fleet
@@ -211,6 +219,10 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	}
 	if command == "managed-plan" {
 		record, owner, e := store.Read(ctx, f)
+		if errors.Is(e, journal.ErrNotFound) {
+			e = nil
+			record.Phase = "enrolled"
+		}
 		if e != nil {
 			return e
 		}
@@ -226,11 +238,11 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		if operation == "deploy" && len(choices) > 0 {
 			return errors.New("deploy restores existing images; use upgrade for version changes")
 		}
-		images, e := managed.Resolve(ctx, s, scope, choices, release.Registry{})
+		images, e := managed.ResolveSelected(ctx, s, scope, choices, targets, release.Registry{})
 		if e != nil {
 			return e
 		}
-		p, e = managed.Build(s, operation, scope, record.OperationID, images, time.Now())
+		p, e = managed.BuildSelected(s, operation, scope, record.OperationID, images, targets, time.Now())
 		if e != nil {
 			return e
 		}
@@ -242,7 +254,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	}
 	owner := hex.EncodeToString(ownerBytes[:])
 	fmt.Fprintln(stderr, "runner:", owner)
-	runner := managed.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: remote, Owner: owner, Window: window, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
+	runner := managed.Runner{Targets: targets, Identity: identity, Cloud: cloud, Store: store, Remote: remote, Owner: owner, Window: window, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
 	var record managed.Record
 	if command == "managed-enroll" {
 		record, e = runner.Enroll(ctx, s)

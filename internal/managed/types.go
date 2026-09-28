@@ -89,8 +89,8 @@ func (f Fleet) Validate() error {
 		if t.Architecture != "amd64" && t.Architecture != "arm64" {
 			return errors.New("invalid architecture")
 		}
-		if t.Role != "validator" && t.Role != "seed" && t.Role != "core" {
-			return errors.New("supported roles: validator, seed, core")
+		if t.Role != "validator" && t.Role != "seed" && t.Role != "core" && t.Role != "masternode" {
+			return errors.New("supported roles: validator, seed, core, masternode")
 		}
 		containers := map[string]bool{}
 		for c, n := range t.Containers {
@@ -106,7 +106,7 @@ func (f Fleet) Validate() error {
 				}
 			}
 		}
-		if (t.Role == "core" && (len(t.Containers) != 1 || t.Containers["core"] == "")) || (t.Role == "seed" && t.Containers["tenderdash"] == "") {
+		if ((t.Role == "core" || t.Role == "masternode") && (len(t.Containers) != 1 || t.Containers["core"] == "")) || (t.Role == "seed" && t.Containers["tenderdash"] == "") {
 			return errors.New("role lacks required workload")
 		}
 	}
@@ -182,12 +182,22 @@ func (s Snapshot) Validate() error {
 	}
 	return nil
 }
-func (s Snapshot) Complete() error {
+func (s Snapshot) Complete() error { return s.CompleteTargets(nil) }
+
+func (s Snapshot) CompleteTargets(names []string) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
+	for _, name := range names {
+		if !slices.ContainsFunc(s.Fleet.Targets, func(t Target) bool { return t.Name == name }) {
+			return errors.New("selected node outside fleet")
+		}
+	}
 	var genesis, chain string
 	for _, t := range s.Fleet.Targets {
+		if len(names) > 0 && !slices.Contains(names, t.Name) {
+			continue
+		}
 		o := s.Nodes[t.Name]
 		if o.Error != "" || len(o.Problems) > 0 || !digestRE.MatchString(o.FilesHash) || len(o.Components) != len(t.Containers) {
 			return fmt.Errorf("%s: incomplete/unsupported observation", t.Name)
@@ -230,6 +240,7 @@ func validPin(pin string) bool {
 }
 
 type Plan struct {
+	Targets    []string  `json:"targets,omitempty"`
 	APIVersion string    `json:"apiVersion"`
 	Kind       string    `json:"kind"`
 	ID         string    `json:"id"`
@@ -243,7 +254,36 @@ type Plan struct {
 }
 
 func Selected(scope, component string) bool {
-	return scope == "all" || (scope == "core" && component == "core") || (scope == "platform" && component != "core" && component != "helper") || (scope == "tenderdash" && component == "tenderdash")
+	if scope == "all" {
+		return true
+	}
+	if scope == "platform" {
+		return component != "core" && component != "helper"
+	}
+	parts := strings.Split(scope, ",")
+	// Drive's ABCI connection must be drained and restored with Tenderdash.
+	return slices.Contains(parts, component) || component == "tenderdash" && slices.Contains(parts, "drive")
+}
+func ValidScope(scope string) bool {
+	if scope == "all" || scope == "platform" {
+		return true
+	}
+	seen := map[string]bool{}
+	for _, c := range strings.Split(scope, ",") {
+		if !slices.Contains(Components, c) || seen[c] {
+			return false
+		}
+		seen[c] = true
+	}
+	return true
+}
+func (p Plan) Selects(t Target) bool {
+	return len(p.Targets) == 0 || slices.Contains(p.Targets, t.Name)
+}
+func BuildSelected(s Snapshot, operation, scope, previous string, images Images, targets []string, now time.Time) (Plan, error) {
+	p := Plan{APIVersion: spec.Version, Kind: "ExistingOperation", Snapshot: s, Operation: operation, Scope: scope, PreviousID: previous, Images: images, Recipe: RecipeDigest(), CreatedAt: now.UTC(), Targets: targets}
+	p.ID = hash(p)
+	return p, p.Validate()
 }
 func Build(s Snapshot, operation, scope, previous string, images Images, now time.Time) (Plan, error) {
 	p := Plan{APIVersion: spec.Version, Kind: "ExistingOperation", Snapshot: s, Operation: operation, Scope: scope, PreviousID: previous, Images: images, Recipe: RecipeDigest(), CreatedAt: now.UTC()}
@@ -256,7 +296,7 @@ func (p Plan) Validate() error {
 	if p.APIVersion != spec.Version || p.Kind != "ExistingOperation" || p.ID != hash(c) || p.Recipe != RecipeDigest() || p.CreatedAt.IsZero() {
 		return errors.New("managed plan altered or executor recipe changed")
 	}
-	if err := p.Snapshot.Complete(); err != nil {
+	if err := p.Snapshot.CompleteTargets(p.Targets); err != nil {
 		return err
 	}
 	if p.PreviousID != "" && !digestRE.MatchString(p.PreviousID) {
@@ -265,15 +305,22 @@ func (p Plan) Validate() error {
 	if p.Operation != "upgrade" && p.Operation != "deploy" {
 		return errors.New("supported existing operations: deploy, upgrade")
 	}
-	if !slices.Contains([]string{"core", "platform", "tenderdash", "all"}, p.Scope) {
+	if !ValidScope(p.Scope) {
 		return errors.New("unsupported component scope")
+	}
+	seen := map[string]bool{}
+	for _, name := range p.Targets {
+		if seen[name] {
+			return errors.New("duplicate selected target")
+		}
+		seen[name] = true
 	}
 	count := 0
 	for _, t := range p.Snapshot.Fleet.Targets {
 		pins := p.Images[t.Name]
 		expected := 0
 		for c := range t.Containers {
-			if Selected(p.Scope, c) {
+			if p.Selects(t) && Selected(p.Scope, c) {
 				expected++
 				if !validPin(pins[c]) {
 					return fmt.Errorf("missing immutable image %s/%s", t.Name, c)

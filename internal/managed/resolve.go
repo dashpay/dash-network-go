@@ -12,7 +12,13 @@ import (
 
 // Resolve captures each reference once per architecture, never once per node.
 func Resolve(ctx context.Context, s Snapshot, scope string, choices map[string]string, registry release.Inspector) (Images, error) {
-	if err := s.Complete(); err != nil {
+	return ResolveSelected(ctx, s, scope, choices, nil, registry)
+}
+func ResolveSelected(ctx context.Context, s Snapshot, scope string, choices map[string]string, targets []string, registry release.Inspector) (Images, error) {
+	if !ValidScope(scope) {
+		return nil, errors.New("invalid component selection")
+	}
+	if err := s.CompleteTargets(targets); err != nil {
 		return nil, err
 	}
 	for c := range choices {
@@ -25,7 +31,7 @@ func Resolve(ctx context.Context, s Snapshot, scope string, choices map[string]s
 	for _, t := range s.Fleet.Targets {
 		result[t.Name] = map[string]string{}
 		for c := range t.Containers {
-			if !Selected(scope, c) {
+			if (len(targets) > 0 && !slices.Contains(targets, t.Name)) || !Selected(scope, c) {
 				continue
 			}
 			ref := choices[c]

@@ -91,6 +91,7 @@ jobs:
         run: |
           python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'
           python3 -m unittest discover -s internal/managed/testdata -p 'test_*.py'
+          python3 .github/scripts/test_console_operation.py
       - name: Examples and command boundary
         run: |
           go build -trimpath -o bin/dashnet ./cmd/dashnet

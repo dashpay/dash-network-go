@@ -15,6 +15,7 @@ import (
 )
 
 type Runner struct {
+	Targets  []string
 	Identity inventory.STS
 	Cloud    inventory.EC2
 	Store    Store
@@ -63,7 +64,7 @@ func (r Runner) health(ctx context.Context, s Snapshot) (Health, error) {
 	return Doctor(ctx, s, r.Remote, w, r.wait)
 }
 func (r Runner) Enroll(ctx context.Context, s Snapshot) (record Record, err error) {
-	if err = s.Complete(); err != nil {
+	if err = s.CompleteTargets(r.Targets); err != nil {
 		return
 	}
 	f := s.Fleet
@@ -81,14 +82,14 @@ func (r Runner) Enroll(ctx context.Context, s Snapshot) (record Record, err erro
 			err = errors.Join(err, e)
 		}
 	}()
-	if record.SnapshotID != s.ID {
+	if record.SnapshotID != s.ID && record.Phase == "enrolling" {
 		return record, errors.New("resume enrollment with its original snapshot")
 	}
-	if record.OperationID != "" {
+	if record.OperationID != "" && record.Phase != "complete" && record.Phase != "enrolled" {
 		return record, errors.New("already in managed operation; enrollment is not redeployment")
 	}
 	for _, t := range f.Targets {
-		if record.Enrolled[t.Name] {
+		if record.Enrolled[t.Name] || len(r.Targets) > 0 && !slices.Contains(r.Targets, t.Name) {
 			continue
 		}
 		q := request(f, t, "enroll")
@@ -123,7 +124,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		return
 	}
 	for _, t := range f.Targets {
-		if !prior.Enrolled[t.Name] {
+		if p.Selects(t) && !prior.Enrolled[t.Name] {
 			return record, errors.New("finish explicit enrollment first")
 		}
 	}
@@ -155,6 +156,9 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 		current := Observe(ctx, f, r.Remote, 0)
 		for _, t := range f.Targets {
+			if !p.Selects(t) {
+				continue
+			}
 			selected := []string{}
 			if p.Operation == "deploy" {
 				for c := range p.Images[t.Name] {
@@ -178,8 +182,8 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			if e != nil {
 				return record, e
 			}
-			if !h.Healthy {
-				return record, errors.New("upgrade requires whole managed fleet healthy: " + strings.Join(h.Problems, "; "))
+			if !healthSelected(h, p) {
+				return record, errors.New("selected upgrade targets failed health checks: " + strings.Join(h.Problems, "; "))
 			}
 		}
 		record.OperationID = p.ID
@@ -199,7 +203,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if e != nil {
 			return record, e
 		}
-		if !h.Healthy {
+		if !healthSelected(h, p) {
 			return record, errors.New("completed operation is currently unhealthy")
 		}
 		return record, nil
@@ -238,10 +242,10 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			if e != nil {
 				return record, e
 			}
-			if !h.Healthy {
+			if !healthSelected(h, p) {
 				return record, errors.New("fleet unhealthy before next withdrawal")
 			}
-			if err = CanWithdraw(h.Snapshot, t); err != nil {
+			if err = canWithdrawSelected(h.Snapshot, t, p.Images[t.Name]); err != nil {
 				return
 			}
 		}
@@ -293,8 +297,11 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 		if e != nil {
 			return e
 		}
-		if h.Healthy {
+		if healthSelected(h, p) {
 			for _, t := range p.Snapshot.Fleet.Targets {
+				if !p.Selects(t) {
+					continue
+				}
 				selected := []string{}
 				if record.Completed[t.Name] || record.Current == t.Name {
 					for c := range p.Images[t.Name] {
@@ -327,4 +334,27 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 			return e
 		}
 	}
+}
+
+// Display/monitoring is per-node. Operations require the selected nodes healthy;
+// withdrawing a validator additionally proves the remaining observed quorum.
+func healthSelected(h Health, p Plan) bool {
+	if len(p.Targets) == 0 {
+		return h.Healthy
+	}
+	for _, name := range p.Targets {
+		if !h.Nodes[name].Healthy {
+			return false
+		}
+	}
+	return true
+}
+
+func canWithdrawSelected(s Snapshot, t Target, pins map[string]string) error {
+	for _, c := range []string{"core", "drive", "tenderdash"} {
+		if pins[c] != "" {
+			return CanWithdraw(s, t)
+		}
+	}
+	return nil
 }

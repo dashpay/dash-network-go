@@ -1,0 +1,55 @@
+name: Reviewed console operation
+run-name: '${{ inputs.network }} / ${{ inputs.operation }} / ${{ inputs.request_id }}'
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        type: choice
+        options: [testnet, devnet-moutai]
+        required: true
+      operation:
+        type: choice
+        options: [upgrade, deploy, doctor, import, enroll]
+        required: true
+      request_id:
+        description: Immutable console request UUID
+        type: string
+        required: true
+      confirm:
+        description: Exact reviewed plan or snapshot digest
+        type: string
+        required: true
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: operate-${{ inputs.network }}
+  cancel-in-progress: false
+jobs:
+  execute:
+    if: github.ref == 'refs/heads/main' && github.repository == 'dashpay/dash-network-go'
+    environment: ${{ inputs.network == 'testnet' && 'testnet-operations' || 'devnet-operations' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c
+        with:
+          role-to-assume: ${{ vars.DASHNET_AWS_ROLE }}
+          aws-region: ${{ vars.DASHNET_AWS_REGION }}
+          role-session-name: status-${{ github.run_id }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+      - name: Execute only the reviewed immutable request
+        env:
+          NETWORK: ${{ inputs.network }}
+          OPERATION: ${{ inputs.operation }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          CONFIRM: ${{ inputs.confirm }}
+          BUCKET: ${{ vars.DASHNET_ARTIFACT_BUCKET }}
+          DASHNET_AWS_ACCOUNT: ${{ vars.DASHNET_AWS_ACCOUNT }}
+          DASHNET_STATE_TABLE: ${{ vars.DASHNET_STATE_TABLE }}
+          SSH_KEY: ${{ secrets.DASHNET_SSH_KEY }}
+        run: python3 .github/scripts/console-operation.py
