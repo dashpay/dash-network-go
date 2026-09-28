@@ -58,13 +58,16 @@ func workerScript(action string) string {
 }
 
 type Target struct {
-	Name         string            `json:"name"`
-	Role         string            `json:"role"`
-	Architecture string            `json:"architecture"`
-	InstanceID   string            `json:"instanceId"`
-	SSHAddress   string            `json:"sshAddress"`
-	PeerAddress  string            `json:"peerAddress"`
-	Images       []bootstrap.Image `json:"images"`
+	Name         string `json:"name"`
+	Role         string `json:"role"`
+	Architecture string `json:"architecture"`
+	InstanceID   string `json:"instanceId"`
+	SSHAddress   string `json:"sshAddress"`
+	PeerAddress  string `json:"peerAddress"`
+	// PrivateAddress is the VPC address when PeerAddress is a public Elastic
+	// IP (which is not bound to the instance's interface). Omitted in older plans.
+	PrivateAddress string            `json:"privateAddress,omitempty"`
+	Images         []bootstrap.Image `json:"images"`
 }
 
 var resourceID = regexp.MustCompile(`^i-([0-9a-f]{8}|[0-9a-f]{17})$`)
@@ -74,7 +77,11 @@ func (t Target) Validate() error {
 	if !nodeName.MatchString(t.Name) || !resourceID.MatchString(t.InstanceID) {
 		return errors.New("invalid node name or instance ID")
 	}
-	for _, s := range []string{t.SSHAddress, t.PeerAddress} {
+	addresses := []string{t.SSHAddress, t.PeerAddress}
+	if t.PrivateAddress != "" {
+		addresses = append(addresses, t.PrivateAddress)
+	}
+	for _, s := range addresses {
 		ip := net.ParseIP(s)
 		if ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
 			return errors.New("node requires usable IPv4 addresses")
@@ -99,19 +106,22 @@ type Ports struct {
 var DefaultPorts = Ports{20001, 20002, 29998, 26656, 26657, 26658, 26670, 3010, 3009, 1443}
 
 type Context struct {
-	PlanID                 string   `json:"planId"`
-	ComputePlanID          string   `json:"computePlanId"`
-	BootstrapID            string   `json:"bootstrapId"`
-	Network                string   `json:"network"`
-	CoreNetwork            string   `json:"coreNetwork"`
-	PlatformChainID        string   `json:"platformChainId"`
-	GenesisTime            string   `json:"genesisTime"`
-	InitialProtocolVersion uint32   `json:"initialProtocolVersion"`
-	MiningIntervalSeconds  int      `json:"miningIntervalSeconds"`
-	MiningNodeName         string   `json:"miningNodeName"`
-	PremineHeight          int      `json:"premineHeight,omitempty"`
-	CorePeers              []string `json:"corePeers"`
-	Ports                  Ports    `json:"ports"`
+	PlanID                 string `json:"planId"`
+	ComputePlanID          string `json:"computePlanId"`
+	BootstrapID            string `json:"bootstrapId"`
+	Network                string `json:"network"`
+	CoreNetwork            string `json:"coreNetwork"`
+	PlatformChainID        string `json:"platformChainId"`
+	GenesisTime            string `json:"genesisTime"`
+	InitialProtocolVersion uint32 `json:"initialProtocolVersion"`
+	MiningIntervalSeconds  int    `json:"miningIntervalSeconds"`
+	MiningNodeName         string `json:"miningNodeName"`
+	PremineHeight          int    `json:"premineHeight,omitempty"`
+	// Advertise is "public" when nodes register and advertise their public
+	// Elastic IPs; empty means private VPC addresses (older plans).
+	Advertise string   `json:"advertise,omitempty"`
+	CorePeers []string `json:"corePeers"`
+	Ports     Ports    `json:"ports"`
 }
 type Peer struct {
 	Name              string `json:"name"`

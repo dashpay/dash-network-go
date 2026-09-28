@@ -38,8 +38,13 @@ type Plan struct {
 	// PremineHeight is mined at minimum difficulty before any EvoNode is
 	// registered, as long-running devnets do (minimumdifficultyblocks=4032):
 	// quorums and Platform then start on a mature chain. Omitted in older plans.
-	PremineHeight int           `json:"premineHeight,omitempty"`
-	Targets       []node.Target `json:"targets"`
+	PremineHeight int `json:"premineHeight,omitempty"`
+	// Advertise "public": masternodes register, and Core/Tenderdash advertise,
+	// the IPAM Elastic IP of each host, as long-running devnets do; clients
+	// outside the VPC can then use the masternode list. Empty: private VPC
+	// addresses (older plans, or networks without IPAM addresses).
+	Advertise string        `json:"advertise,omitempty"`
+	Targets   []node.Target `json:"targets"`
 }
 
 // DefaultPremineHeight matches the legacy devnet tooling.
@@ -50,13 +55,24 @@ func hash(v any) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
 }
+
+// Build binds private VPC service addresses.
 func Build(b bootstrap.Plan, live map[string]types.Instance, protocol uint32, now time.Time) (Plan, error) {
+	return BuildAdvertising(b, live, nil, protocol, now)
+}
+
+// BuildAdvertising binds public service addresses when public maps every
+// target to its journaled IPAM Elastic IP; nil keeps private addresses.
+func BuildAdvertising(b bootstrap.Plan, live map[string]types.Instance, public map[string]string, protocol uint32, now time.Time) (Plan, error) {
 	if err := b.Validate(); err != nil {
 		return Plan{}, err
 	}
 	p := Plan{APIVersion: spec.Version, Kind: "DevnetDeploymentPlan", Bootstrap: b, Profile: Profile, RecipeSHA256: node.RecipeDigest(), InitialProtocolVersion: protocol, MiningIntervalSeconds: 10, PremineHeight: DefaultPremineHeight, GenesisTime: now.UTC()}
 	p.CoreNetwork = fmt.Sprintf("%s-g%d", strings.TrimPrefix(b.Compute.Network.Metadata.Name, "devnet-"), b.Compute.Network.Chain.Generation)
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
+	if public != nil {
+		p.Advertise = "public"
+	}
 	for i, t := range b.Compute.Targets {
 		instance, ok := live[t.Name]
 		if !ok {
@@ -66,9 +82,17 @@ func Build(b bootstrap.Plan, live map[string]types.Instance, protocol uint32, no
 		if b.Access.Address == "public" {
 			ip = aws.ToString(instance.PublicIpAddress)
 		}
-		// Use the actual private VPC network for peer traffic; Core explicitly allows
-		// private devnet addresses. Public exposure still follows the existing SGs.
-		p.Targets = append(p.Targets, node.Target{Name: t.Name, Role: t.Role, Architecture: t.Architecture, InstanceID: aws.ToString(instance.InstanceId), SSHAddress: ip, PeerAddress: aws.ToString(instance.PrivateIpAddress), Images: b.Targets[i].Images})
+		target := node.Target{Name: t.Name, Role: t.Role, Architecture: t.Architecture, InstanceID: aws.ToString(instance.InstanceId), SSHAddress: ip, PeerAddress: aws.ToString(instance.PrivateIpAddress), Images: b.Targets[i].Images}
+		if public != nil {
+			// The Elastic IP must be the one this network allocated from IPAM and
+			// currently associated with exactly this instance.
+			eip := aws.ToString(instance.PublicIpAddress)
+			if public[t.Name] == "" || public[t.Name] != eip {
+				return Plan{}, fmt.Errorf("%s: public address %q is not its journaled IPAM Elastic IP", t.Name, eip)
+			}
+			target.PeerAddress, target.PrivateAddress = eip, aws.ToString(instance.PrivateIpAddress)
+		}
+		p.Targets = append(p.Targets, target)
 	}
 	p.ID = hash(p)
 	return p, p.Validate()
@@ -95,6 +119,9 @@ func (p Plan) Validate() error {
 	if len(p.Targets) != len(p.Bootstrap.Targets) {
 		return errors.New("deployment target set incomplete")
 	}
+	if p.Advertise != "" && p.Advertise != "public" {
+		return errors.New("advertise must be public or omitted (private)")
+	}
 	counts := map[string]int{}
 	ids := map[string]bool{}
 	ips := map[string]bool{}
@@ -106,11 +133,17 @@ func (p Plan) Validate() error {
 		if err := t.Validate(); err != nil {
 			return err
 		}
-		if ids[t.InstanceID] || ips[t.PeerAddress] {
+		if err := advertised(p.Advertise, t); err != nil {
+			return err
+		}
+		if ids[t.InstanceID] || ips[t.PeerAddress] || (t.PrivateAddress != "" && ips[t.PrivateAddress]) {
 			return errors.New("duplicate instance or peer address")
 		}
 		ids[t.InstanceID] = true
 		ips[t.PeerAddress] = true
+		if t.PrivateAddress != "" {
+			ips[t.PrivateAddress] = true
+		}
 		if t.Role != "validator" && t.Role != "wallet" && t.Role != "miner" && t.Role != "fullnode" {
 			return errors.New("full devnet profile supports validator, wallet, miner and fullnode roles; seeds must not be silently omitted")
 		}
@@ -123,6 +156,30 @@ func (p Plan) Validate() error {
 	}
 	return nil
 }
+
+// advertised checks that a target's addresses match the plan's address mode.
+func advertised(mode string, t node.Target) error {
+	peer, private := net.ParseIP(t.PeerAddress), net.ParseIP(t.PrivateAddress)
+	if mode == "public" {
+		if peer == nil || peer.IsPrivate() || !peer.IsGlobalUnicast() || private == nil || !private.IsPrivate() {
+			return fmt.Errorf("%s: public advertising requires a public peer address and a private VPC address", t.Name)
+		}
+		return nil
+	}
+	if t.PrivateAddress != "" {
+		return fmt.Errorf("%s: a private-address plan carries no separate private address", t.Name)
+	}
+	return nil
+}
+
+// VPCAddress is the address bound on the instance's interface.
+func VPCAddress(t node.Target) string {
+	if t.PrivateAddress != "" {
+		return t.PrivateAddress
+	}
+	return t.PeerAddress
+}
+
 func (p Plan) Wallet() node.Target {
 	for _, t := range p.Targets {
 		if t.Role == "wallet" {
