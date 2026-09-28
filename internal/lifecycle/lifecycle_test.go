@@ -71,6 +71,10 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 }
 func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 	t.Helper()
+	return setupAddresses(t, false)
+}
+func setupAddresses(t *testing.T, public bool) (Plan, Runner, *memoryStore, *fakeRemote) {
+	t.Helper()
 	n := testutil.ProvisionNetwork(t)
 	n.Nodes[0].Count = 13
 	n.Nodes = append(n.Nodes, spec.NodeGroup{Name: "wallet", Role: "wallet", Count: 1, Architecture: n.Nodes[0].Architecture, InstanceType: n.Nodes[0].InstanceType})
@@ -86,6 +90,7 @@ func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 	}
 	for i := range c.Instances {
 		c.Instances[i].PrivateIpAddress = aws.String(fmt.Sprintf("10.0.0.%d", i+10))
+		c.Instances[i].PublicIpAddress = aws.String(fmt.Sprintf("198.51.100.%d", i+10))
 	}
 	b, err := bootstrap.Build(p, testutil.Lock(t, n), bootstrap.Access{User: "ubuntu", Port: 22, Address: "private"})
 	if err != nil {
@@ -99,7 +104,14 @@ func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := Build(b, live, 14, time.Now())
+	var addresses map[string]string
+	if public {
+		addresses = map[string]string{}
+		for name, v := range live {
+			addresses[name] = aws.ToString(v.PublicIpAddress)
+		}
+	}
+	plan, err := BuildAdvertising(b, live, addresses, 14, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,5 +515,65 @@ func TestQuietMasternodeSyncBeforeStartingMining(t *testing.T) {
 		if q.Action == "stop" {
 			t.Fatal("quiet sync stopped Core")
 		}
+	}
+}
+
+func TestPublicAdvertisingBindsJournaledElasticIPs(t *testing.T) {
+	p, _, _, _ := setupAddresses(t, true)
+	if p.Advertise != "public" {
+		t.Fatal("public mode not recorded", p.Advertise)
+	}
+	for _, x := range p.Targets {
+		if !strings.HasPrefix(x.PeerAddress, "198.51.100.") || !strings.HasPrefix(x.PrivateAddress, "10.0.0.") || VPCAddress(x) != x.PrivateAddress {
+			t.Fatal("peer must be the Elastic IP and the VPC address kept", x)
+		}
+	}
+	for _, peer := range p.PeerAddresses() {
+		if !strings.HasPrefix(peer, "198.51.100.") {
+			t.Fatal("Core peers must be public", peer)
+		}
+	}
+	if q := p.Request(p.Targets[0], "inspect"); q.Context.Advertise != "public" {
+		t.Fatal("worker context lacks the address mode")
+	}
+	// A private or altered peer address is refused, and so is a plan without the VPC address.
+	for _, change := range []func(*Plan){
+		func(x *Plan) { x.Targets[0].PeerAddress = "10.9.9.9" },
+		func(x *Plan) { x.Targets[0].PrivateAddress = "" },
+		func(x *Plan) { x.Advertise = "everywhere" },
+	} {
+		q := p
+		q.Targets = append([]node.Target(nil), p.Targets...)
+		change(&q)
+		q.ID = ""
+		q.ID = hash(q)
+		if q.Validate() == nil {
+			t.Fatal("invalid public plan accepted", q.Targets[0], q.Advertise)
+		}
+	}
+	// Private plans never carry a separate private address.
+	private, _, _, _ := setup(t)
+	if private.Advertise != "" || private.Targets[0].PrivateAddress != "" || !strings.HasPrefix(private.Targets[0].PeerAddress, "10.0.0.") {
+		t.Fatal("private plan changed", private.Targets[0])
+	}
+}
+
+func TestPublicAdvertisingRefusesForeignElasticIP(t *testing.T) {
+	p, r, s, _ := setupAddresses(t, true)
+	c := r.Cloud.(*testutil.Cloud)
+	c.Instances[0].PublicIpAddress = aws.String("203.0.113.7")
+	if err := liveScope(context.Background(), p, s.record, c); err == nil || !strings.Contains(err.Error(), "drift") {
+		t.Fatal("changed Elastic IP not detected", err)
+	}
+}
+
+func TestPublicAdvertisingDeploysEndToEnd(t *testing.T) {
+	p, r, _, _ := setupAddresses(t, true)
+	a, err := execute(t, p, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Deployment.Phase != "network-ready" {
+		t.Fatal("public-address deployment incomplete", a.Deployment.Phase)
 	}
 }

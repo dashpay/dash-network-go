@@ -46,7 +46,7 @@ func (p Plan) Request(t node.Target, action string) node.Request {
 			GenesisTime:            p.GenesisTime.Format(time.RFC3339Nano),
 			InitialProtocolVersion: p.InitialProtocolVersion,
 			MiningIntervalSeconds:  p.MiningIntervalSeconds, MiningNodeName: p.Miner().Name, PremineHeight: p.PremineHeight,
-			CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
+			Advertise: p.Advertise, CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
 		},
 	}
 }
@@ -89,7 +89,11 @@ func liveScope(ctx context.Context, p Plan, r provision.Record, cloud provision.
 		if p.Bootstrap.Access.Address == "public" {
 			ip = aws.ToString(v.PublicIpAddress)
 		}
-		if aws.ToString(v.InstanceId) != t.InstanceID || ip != t.SSHAddress || aws.ToString(v.PrivateIpAddress) != t.PeerAddress {
+		peer := aws.ToString(v.PrivateIpAddress)
+		if p.Advertise == "public" {
+			peer = aws.ToString(v.PublicIpAddress)
+		}
+		if aws.ToString(v.InstanceId) != t.InstanceID || ip != t.SSHAddress || peer != t.PeerAddress || aws.ToString(v.PrivateIpAddress) != VPCAddress(t) {
 			return fmt.Errorf("instance/address drift at %s; deployment plan is bound to exact hosts", t.Name)
 		}
 	}

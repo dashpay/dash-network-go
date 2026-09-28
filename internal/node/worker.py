@@ -353,7 +353,8 @@ class Worker:
             "timestampindex=1",
             "dnsseed=0",
             "discover=0",
-            "allowprivatenet=1",
+            # Public advertising uses the Elastic IPs only, as long-running devnets do.
+            "allowprivatenet=" + ("0" if self.c.get("advertise") == "public" else "1"),
             "listen=1",
             "maxconnections=256",
             "fallbackfee=0.00001",
@@ -705,7 +706,13 @@ class Worker:
 
     def activate(self):
         self.require(self.t["role"] == "wallet", "wallet-only")
+        # As long-running devnets do: InstantSend (2, 3) and superblocks (9)
+        # as well as DKG, ChainLocks and all-connected quorums. Core 23 sporks
+        # default to off, so without 2 no transaction is ever InstantSend-locked.
         required = [
+            "SPORK_2_INSTANTSEND_ENABLED",
+            "SPORK_3_INSTANTSEND_BLOCK_FILTERING",
+            "SPORK_9_SUPERBLOCKS_ENABLED",
             "SPORK_17_QUORUM_DKG_ENABLED",
             "SPORK_19_CHAINLOCKS_ENABLED",
             "SPORK_21_QUORUM_ALL_CONNECTED",

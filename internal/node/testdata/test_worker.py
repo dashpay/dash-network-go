@@ -183,7 +183,10 @@ class Tests(unittest.TestCase):
 
     def test_activation_uses_core23_update_rpc_and_verifies_readback(self):
         class Sporks(worker.Worker):
-            active = {"SPORK_17_QUORUM_DKG_ENABLED": False,
+            active = {"SPORK_2_INSTANTSEND_ENABLED": False,
+                      "SPORK_3_INSTANTSEND_BLOCK_FILTERING": False,
+                      "SPORK_9_SUPERBLOCKS_ENABLED": False,
+                      "SPORK_17_QUORUM_DKG_ENABLED": False,
                       "SPORK_19_CHAINLOCKS_ENABLED": False,
                       "SPORK_21_QUORUM_ALL_CONNECTED": False}
             updates = 0
@@ -202,7 +205,7 @@ class Tests(unittest.TestCase):
         w = Sporks(request())
         w.activate()
         w.activate()
-        self.assertEqual(w.updates, 3)
+        self.assertEqual(w.updates, 6)
         w.accept = False
         w.active["SPORK_19_CHAINLOCKS_ENABLED"] = False
         with self.assertRaisesRegex(worker.Failure, "spork-not-active"):
@@ -281,6 +284,20 @@ class Tests(unittest.TestCase):
             w.accepted = False
             w.register()
             self.assertEqual((w.prepared, w.sent), (1, 2))
+
+    def test_public_advertising_disables_private_addresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = request()
+            q["target"]["peerAddress"] = "198.51.100.10"
+            q["context"]["corePeers"] = ["198.51.100.10:20001", "198.51.100.11:20001"]
+            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
+            self.assertIn("allowprivatenet=1\n", w.core_config())
+            q["context"]["advertise"] = "public"
+            config = worker.Worker(q, Path(tmp), Path(tmp) / "lock").core_config()
+            self.assertIn("allowprivatenet=0\n", config)
+            self.assertIn("externalip=198.51.100.10:20001\n", config)
+            self.assertIn("addnode=198.51.100.11:20001\n", config)
+            self.assertNotIn("addnode=198.51.100.10:20001", config)
 
     def test_only_labelled_auxiliary_containers_share_the_host(self):
         class Listing(worker.Worker):

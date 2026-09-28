@@ -30,7 +30,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
-	var candidatePath, lockPath, scope string
+	var candidatePath, lockPath, scope, advertise string
 	var timeout, observationWindow time.Duration
 	var protocol uint
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
@@ -40,6 +40,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	if args[0] == "deployment-plan" {
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
+		fs.StringVar(&advertise, "advertise", "auto", "service addresses to register: public (IPAM Elastic IPs), private (VPC), or auto (public when every host has an IPAM address)")
 	} else if args[0] == "upgrade-plan" {
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
@@ -73,6 +74,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	if args[0] == "deployment-plan" {
 		if bootstrapPath == "" || protocol < 1 || protocol > 100 {
 			return errors.New("--bootstrap-plan and explicit --protocol (1..100) required")
+		}
+		if advertise != "auto" && advertise != "public" && advertise != "private" {
+			return errors.New("--advertise must be auto, public or private")
 		}
 		if err := files.ReadJSON(bootstrapPath, &b); err != nil {
 			return err
@@ -180,11 +184,21 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err != nil {
 			return err
 		}
-		p, err = lifecycle.Build(b, live, uint32(protocol), time.Now())
+		public := ipamAddresses(b, record)
+		if advertise == "private" || (advertise == "auto" && public == nil) {
+			public = nil
+		} else if public == nil {
+			return errors.New("--advertise public requires an IPAM Elastic IP on every host")
+		}
+		p, err = lifecycle.BuildAdvertising(b, live, public, uint32(protocol), time.Now())
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(stderr, "Devnet plan: start Core, mine local collateral, register EvoNodes, start Platform and TLS gateway. Existing security groups unchanged. Self-signed TLS; no public DNS/certificates. Review the exact plan and retain this binary.")
+		mode := "private VPC service addresses"
+		if p.Advertise == "public" {
+			mode = "public IPAM service addresses (security groups must allow Core 20001 and Tenderdash 26656 from the fleet's public IPs)"
+		}
+		fmt.Fprintln(stderr, "Devnet plan: start Core, mine local collateral, register EvoNodes with "+mode+", start Platform and TLS gateway. Existing security groups unchanged. Review the exact plan and retain this binary.")
 		return emit(out, output, p)
 	}
 	var random [16]byte
@@ -233,4 +247,21 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		return fmt.Errorf("%w; inspect operation using the original EC2 plan; resume deploy with the same deployment plan/binary. Never unlock until the prior runner and remote operations are stopped", err)
 	}
 	return emit(out, output, result)
+}
+
+// ipamAddresses maps every target to the Elastic IP this network allocated
+// from IPAM, or returns nil when any host has none.
+func ipamAddresses(b bootstrap.Plan, r provision.Record) map[string]string {
+	if !b.Compute.Network.AWS.Provision.PublicIPv4 || b.Compute.Network.AWS.Provision.IPAMPoolID == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, t := range b.Compute.Targets {
+		n, ok := r.Nodes[t.Name]
+		if !ok || n.Address == nil || n.Address.PublicIP == "" {
+			return nil
+		}
+		out[t.Name] = n.Address.PublicIP
+	}
+	return out
 }

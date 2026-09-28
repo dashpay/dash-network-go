@@ -84,7 +84,7 @@ The controller runs named stages:
    serially on the wallet. Quorums and the Platform genesis ChainLock therefore
    form on a mature chain instead of during the first few hundred blocks, where
    DKG sessions were observed to PoSe-ban late-registered validators.
-5. Activate available devnet sporks, start persistent mining, wait for READY
+5. Activate devnet sporks (InstantSend 2/3, superblocks 9, DKG 17, ChainLocks 19, all-connected quorums 21), start persistent mining, wait for READY
    masternodes, all three quorum types and ChainLocks.
 6. Persist the initial chainlocked Core height once, render immutable Platform
    genesis/node identity, and start Drive/Tenderdash/rs-dapi/Envoy on validators.
@@ -135,8 +135,20 @@ or faucet): a container labelled `dashnet.auxiliary=<network>/<node>` for that
 exact network and node is ignored, provided its name is outside dashnet's
 `dashnet-<compute>-<node>-` namespace. Such services must not bind the ports above.
 
-Existing SGs must permit fleet Core/Tenderdash P2P and operator SSH. Peer discovery
-uses private VPC IPs with Core's devnet private-address setting. The tool does not
+Existing SGs must permit fleet Core/Tenderdash P2P and operator SSH.
+
+**Service addresses.** When every host has an Elastic IP allocated from the
+network's IPAM pool, `deployment-plan --advertise auto` (the default) binds those
+public addresses, as long-running devnets do: EvoNodes register
+`<public-ip>:20001`, Core advertises it (`externalip`, `allowprivatenet=0`),
+Tenderdash advertises `<public-ip>:26656`, and peers connect over public
+addresses. Clients outside the VPC (SDKs, the quorum list server's masternode
+list) can then reach every node. Each target keeps its VPC `privateAddress`;
+drift checks require both addresses to stay associated with the same instance.
+Security groups must allow Core 20001 and Tenderdash 26656 from the fleet's
+public addresses (rules that reference a security group match only private
+traffic). `--advertise private` keeps private VPC addresses with Core's private
+address setting; networks without IPAM addresses always use private addresses. The tool does not
 open SGs, create DNS/load balancers, or provision public CA certificates. TLS uses
 persisted per-node self-signed certificates (one-year lifetime); probes pin that
 certificate, never `--insecure`. The gateway serves native gRPC, gRPC-Web (trailers
