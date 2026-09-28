@@ -1,14 +1,24 @@
 # Health-gated image upgrades
 
 `upgrade-plan` and `upgrade` operate on **an existing, owned devnet deployment**.
-They do not create/adopt networks, operate testnet, reset state, migrate protocols,
-or implement Core upgrades. The original deployment/genesis plan stays immutable.
+They do not create/adopt networks, operate testnet, reset state or migrate
+protocols. The original deployment/genesis plan stays immutable.
 
 The current profiles are:
 
 - `platform`: update selected release images other than Core on validator hosts.
   The helper image is cached only; no helper container is started.
 - `tenderdash`: replace Tenderdash only; Drive, DAPI, gateway and Core stay intact.
+- `core`: replace the Core image on **every node**, one at a time: validators,
+  then fullnodes and other nodes, then the mining node. On a validator, Tenderdash,
+  DAPI and Drive are stopped gracefully (Tenderdash first), Core's Compose image is
+  replaced, Core must come back synced (and the masternode READY in the next
+  health gate), then Drive, Tenderdash and DAPI restart in place; the gateway keeps
+  serving. On the mining node the miner pauses and is recreated on the new image.
+  `dash.conf`, genesis, keys, wallets and chain data are kept; every step is
+  journaled in the host marker, so a lost response resumes at the same step and
+  never replaces Core twice. Other images are unchanged. A Core release that needs
+  new configuration or a hard-fork activation is not handled by this profile.
 
 Image availability is not a compatibility guarantee. The executor requires the
 live protocol to remain the deployment's initial protocol, the supported 12-member
@@ -30,6 +40,8 @@ dashnet resolve --network candidate.yaml --out candidate.lock.json
 dashnet upgrade-plan --deployment-plan deployment.json \
   --network candidate.yaml --lock candidate.lock.json --scope platform \
   --profile YOUR_AWS_PROFILE --out upgrade.json
+
+# --scope tenderdash, or --scope core to replace only Core on every node.
 
 # SSH/journal mutation using the exact reviewed upgrade plan ID.
 dashnet upgrade --plan upgrade.json --confirm UPGRADE_PLAN_ID \

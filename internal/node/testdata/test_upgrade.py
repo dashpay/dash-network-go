@@ -193,3 +193,129 @@ class UpgradeTests(unittest.TestCase):
             w=Fixture(Path(tmp));w.q['action']='stop'
             with self.assertRaisesRegex(worker.Failure,'upgrade-action-refused'):w.execute()
             self.assertFalse(w.accessed)
+
+
+class CoreFixture(Upgrade):
+    """A node whose Core image is replaced; Platform/miner are fakes."""
+    def __init__(self, root, role='validator'):
+        q = request()
+        q['target'].update(role=role, name=role + '-1')
+        q['context']['miningNodeName'] = 'wallet-1'
+        components = ['core', 'drive', 'dapi', 'gateway', 'tenderdash', 'helper'] if role == 'validator' else ['core']
+        before = {k: 'docker.io/example/' + k + '@sha256:' + 'd' * 64 for k in components}
+        after = dict(before, core=before['core'].replace('d' * 64, 'e' * 64))
+        q['target']['images'] = [dict(component=k, pinned=v) for k, v in after.items()]
+        names = ['drive', 'tenderdash', 'dapi', 'gateway'] if role == 'validator' else []
+        if role == 'wallet':
+            names = ['miner']
+        self.containers = {k: dict(Id=hashlib.sha256(k.encode()).hexdigest(), Image='image-' + (before['core'] if k == 'miner' else before[k]),
+                                   State=dict(Running=True), RestartCount=3) for k in names}
+        self.containers['core'] = dict(Id='a' * 64, Image='image-' + before['core'], State=dict(Running=True), RestartCount=0)
+        preserve = dict(coreId='a' * 64, coreStarted='2026-09-24T00:00:00Z', coreConfig='b' * 64, coreGenesis='c' * 64)
+        if role == 'validator':
+            preserve.update(containers={k: self.containers[k]['Id'] for k in names}, restarts={k: 3 for k in names})
+        q.update(action='upgrade-apply', upgrade=dict(id='f' * 64, previousId='', scope='core', **{'from': before}, to=after, preserve=preserve))
+        super().__init__(q, root, root / 'lock')
+        self.commands, self.lose_after_replace = [], False
+        self.atomic('deployment.json', dict(planId=self.c['planId']))
+        self.atomic('core/compose.json', dict(name=self.project, services={'core': self.service('core', before['core'])}))
+        if role == 'wallet':
+            self.atomic('miner/compose.json', dict(name=self.project, services={'miner': self.service('miner', before['core'])}))
+
+    def verify_instance(self):
+        pass
+
+    def owned(self):
+        pass
+
+    def inspect_container(self, service):
+        return self.containers.get(service)
+
+    def verify_image(self, value, pinned):
+        self.require(value['Image'] == 'image-' + pinned, 'running-image-drift')
+
+    def wait_drive(self):
+        self.commands.append(('wait-drive',))
+        self.require(self.containers['drive']['State']['Running'], 'upgrade-drive-abci-timeout')
+
+    def core_status(self):
+        value = self.containers['core']
+        self.verify_image(value, self.images['core'])
+        return dict(containerId=value['Id'], startedAt='t', configSha256='b' * 64, genesis='c' * 64,
+                    synced=True, ibd=False, height=10, headers=10)
+
+    def docker(self, *args, timeout=120):
+        self.commands.append(args)
+        if args[0] in ['stop', 'start']:
+            service = next(k for k in self.containers if self.container_name(k) == args[-1])
+            self.containers[service]['State']['Running'] = args[0] == 'start'
+            if args[0] == 'start':
+                self.containers[service]['RestartCount'] = 0
+        if args[:2] == ('image', 'inspect'):
+            return json.dumps([dict(Id='image-' + args[2], Architecture='amd64', Os='linux', RepoDigests=[args[2]])]).encode()
+        if args[0] == 'compose' and 'up' in args:
+            service = args[-1]
+            image = self.read(service + '/compose.json')['services'][service]['image']
+            if self.containers[service]['Image'] != 'image-' + image:
+                self.containers[service] = dict(Id=hashlib.sha256(image.encode()).hexdigest(), Image='image-' + image, State=dict(Running=True), RestartCount=0)
+            if service == 'core' and self.lose_after_replace:
+                self.lose_after_replace = False
+                raise worker.Failure('lost-apply-response')
+        return b''
+
+
+class CoreUpgradeTests(unittest.TestCase):
+    def test_validator_withdraws_platform_replaces_core_and_restores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            platform = {k: w.containers[k]['Id'] for k in ['drive', 'tenderdash', 'dapi', 'gateway']}
+            result = w.execute()
+            index = lambda cmd: next(i for i, c in enumerate(w.commands) if c[:len(cmd)] == cmd)
+            name = w.container_name
+            self.assertLess(index(('stop', '--time', '120', name('tenderdash'))), index(('stop', '--time', '120', name('drive'))))
+            replace = next(i for i, c in enumerate(w.commands) if c[0] == 'compose' and 'up' in c and c[-1] == 'core')
+            self.assertLess(index(('stop', '--time', '120', name('drive'))), replace)
+            self.assertLess(replace, index(('start', name('drive'))))
+            self.assertLess(index(('start', name('drive'))), index(('start', name('tenderdash'))))
+            self.assertEqual({k: w.containers[k]['Id'] for k in platform}, platform, 'Platform containers kept')
+            self.assertTrue(all(w.containers[k]['State']['Running'] for k in platform))
+            self.assertNotEqual(result['core']['containerId'], 'a' * 64)
+            self.assertEqual(w.read('core/compose.json')['services']['core']['image'], w.q['upgrade']['to']['core'])
+            self.assertEqual(w.read('upgrade.json')['phase'], 'applied')
+            self.assertFalse(any(c[0] == 'stop' and name('gateway') in c for c in w.commands), 'gateway keeps serving')
+
+    def test_lost_response_after_replacement_resumes_without_a_second_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            w.lose_after_replace = True
+            with self.assertRaisesRegex(worker.Failure, 'lost-apply-response'):
+                w.execute()
+            self.assertEqual(w.read('upgrade.json')['step'], 'withdrawn')
+            core = w.containers['core']['Id']
+            w.execute()
+            replaced = [c for c in w.commands if c[0] == 'compose' and 'up' in c and c[-1] == 'core']
+            self.assertEqual(len(replaced), 1, 'Core already on the new image is not replaced again')
+            self.assertEqual(w.containers['core']['Id'], core)
+            self.assertEqual(w.read('upgrade.json')['step'], 'done')
+            self.assertTrue(w.containers['drive']['State']['Running'])
+            before = len(w.commands)
+            w.execute()
+            self.assertFalse(any(c[0] in ['stop', 'start'] or 'up' in c for c in w.commands[before:]), 'a finished node is only verified')
+
+    def test_mining_node_pauses_and_recreates_the_miner_on_the_new_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp), 'wallet')
+            w.execute()
+            stop = next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('miner') in c)
+            replace = next(i for i, c in enumerate(w.commands) if c[0] == 'compose' and 'up' in c and c[-1] == 'core')
+            miner = next(i for i, c in enumerate(w.commands) if c[0] == 'compose' and 'up' in c and c[-1] == 'miner')
+            self.assertLess(stop, replace)
+            self.assertLess(replace, miner)
+            self.assertEqual(w.containers['miner']['Image'], 'image-' + w.q['upgrade']['to']['core'])
+
+    def test_core_upgrade_refuses_other_component_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            w.q['upgrade']['to'] = dict(w.q['upgrade']['to'], drive=w.q['upgrade']['to']['drive'].replace('d' * 64, 'e' * 64))
+            with self.assertRaisesRegex(worker.Failure, 'core-upgrade-scope'):
+                w.execute()

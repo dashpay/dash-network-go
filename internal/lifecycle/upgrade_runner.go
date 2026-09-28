@@ -27,8 +27,27 @@ func missingUpgradeObservation(message, target string, problems []string) error 
 	return fmt.Errorf("%s at %s", message, target)
 }
 
+// upgradeOrder is the withdrawal order: validators one at a time; for a Core
+// upgrade then fullnodes and other nodes, and the mining node last.
+func upgradeOrder(p Plan, scope string) []node.Target {
+	if scope != "core" {
+		return p.Validators()
+	}
+	miner := p.Miner().Name
+	out := p.Validators()
+	for _, role := range []string{"fullnode", "wallet", "miner"} {
+		for _, t := range p.Targets {
+			if t.Role == role && t.Name != miner {
+				out = append(out, t)
+			}
+		}
+	}
+	return append(out, p.Miner())
+}
+
 func upgradeEvidence(p Plan, record provision.Record, observed map[string]samples, pending string) (map[string]provision.Preservation, error) {
 	baseline := map[string]provision.Preservation{}
+	coreScope := record.Upgrade != nil && record.Upgrade.Scope == "core"
 	known := map[string]bool{}
 	for _, t := range p.Validators() {
 		known[record.Deployment.Nodes[t.Name].ProTxHash] = true
@@ -42,7 +61,15 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			return nil, fmt.Errorf("missing Core process start evidence at %s", t.Name)
 		}
 		b := provision.Preservation{CoreID: s.core.ContainerID, CoreStarted: s.core.StartedAt, CoreConfig: s.core.ConfigSHA256, CoreGenesis: s.core.Genesis}
-		if record.Upgrade != nil && !preservedCore(s.core, record.Upgrade.Baseline[t.Name]) {
+		// A node whose Core this upgrade replaced keeps its configuration and
+		// genesis; every other node keeps the exact Core process.
+		touched := coreScope && (record.Upgrade.Completed[t.Name] || t.Name == record.Upgrade.CurrentNode)
+		if touched {
+			old := record.Upgrade.Baseline[t.Name]
+			if s.core.ConfigSHA256 != old.CoreConfig || s.core.Genesis != old.CoreGenesis {
+				return nil, fmt.Errorf("Core configuration or genesis changed at %s", t.Name)
+			}
+		} else if record.Upgrade != nil && !preservedCore(s.core, record.Upgrade.Baseline[t.Name]) {
 			return nil, fmt.Errorf("preserved Core changed at %s", t.Name)
 		}
 		if t.Role == "validator" {
@@ -70,6 +97,14 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			if record.Upgrade != nil {
 				old := record.Upgrade.Baseline[t.Name]
 				for _, component := range []string{"drive", "tenderdash", "dapi", "gateway"} {
+					if coreScope {
+						// Platform containers survive a Core upgrade; the node being
+						// upgraded restarts them gracefully, which resets counters.
+						if x.Containers[component] != old.Containers[component] || (!touched && x.Restarts[component] != old.Restarts[component]) {
+							return nil, fmt.Errorf("Platform service changed during Core upgrade: %s/%s", t.Name, component)
+						}
+						continue
+					}
 					expectedRestarts := old.Restarts[component]
 					if component == "tenderdash" && record.Upgrade.From[t.Name]["drive"] != record.Runtime.Images[t.Name]["drive"] {
 						// A planned graceful stop/start around Drive preserves the
@@ -90,6 +125,9 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 func (e *execution) upgradeRequest(u UpgradePlan, t node.Target, action string) node.Request {
 	q := runtimeRequest(e.p, e.r, t, action)
 	q.Upgrade = &node.ImageChange{ID: u.ID, PreviousID: u.PreviousID, From: u.From[t.Name], To: u.To[t.Name], Preserve: e.r.Upgrade.Baseline[t.Name]}
+	if u.Scope == "core" {
+		q.Upgrade.Scope = "core"
+	}
 	return q
 }
 
@@ -99,7 +137,7 @@ func (e *execution) stageUpgrade(u UpgradePlan) error {
 	var mu sync.Mutex
 	var failures []string
 	limit := make(chan struct{}, 4)
-	for _, t := range e.p.Validators() {
+	for _, t := range upgradeOrder(e.p, u.Scope) {
 		wg.Add(1)
 		go func(t node.Target) {
 			defer wg.Done()
@@ -253,7 +291,10 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		}
 		e.r.Runtime = &provision.RuntimeState{DeploymentID: p.ID, UpgradeID: u.ID, Images: cloneImages(u.From)}
 		e.r.Upgrade = &provision.UpgradeProgress{PlanID: u.ID, PreviousID: u.PreviousID, Phase: "staging", From: cloneImages(u.From), To: cloneImages(u.To), Baseline: baseline, Completed: map[string]bool{}}
-		for _, t := range p.Validators() {
+		if u.Scope == "core" {
+			e.r.Upgrade.Scope = "core"
+		}
+		for _, t := range upgradeOrder(p, u.Scope) {
 			e.r.Upgrade.Completed[t.Name] = false
 		}
 		changed = true
@@ -272,7 +313,11 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		return
 	}
 	changed = true
-	e.report("stage exact upgrade images on all validators")
+	if u.Scope == "core" {
+		e.report("stage the exact Core image on every node")
+	} else {
+		e.report("stage exact upgrade images on all validators")
+	}
 	e.report("upgrade-staging")
 	if err = e.stageUpgrade(u); err != nil {
 		return
@@ -284,7 +329,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		}
 	}
 	// Recover the previously journaled withdrawal before scheduling any other.
-	targets := p.Validators()
+	targets := upgradeOrder(p, u.Scope)
 	if current := e.r.Upgrade.CurrentNode; current != "" {
 		sort.SliceStable(targets, func(i, j int) bool { return targets[i].Name == current && targets[j].Name != current })
 	}
@@ -301,14 +346,23 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if err = e.save(); err != nil {
 			return
 		}
-		e.report("upgrade " + t.Name + "; Core preserved")
+		if u.Scope == "core" {
+			e.report("upgrade Core on " + t.Name + "; configuration, keys and data preserved")
+		} else {
+			e.report("upgrade " + t.Name + "; Core preserved")
+		}
 		e.report("upgrade-applying")
 		var observed node.Observation
 		observed, err = r.Remote.Call(ctx, e.upgradeRequest(u, t, "upgrade-apply"))
 		if err != nil {
 			return
 		}
-		if !preservedCore(observed.Core, e.r.Upgrade.Baseline[t.Name]) {
+		if u.Scope == "core" {
+			old := e.r.Upgrade.Baseline[t.Name]
+			if observed.Core == nil || observed.Core.ConfigSHA256 != old.CoreConfig || observed.Core.Genesis != old.CoreGenesis {
+				return result, errors.New("Core upgrade response failed configuration/genesis preservation")
+			}
+		} else if !preservedCore(observed.Core, e.r.Upgrade.Baseline[t.Name]) {
 			return result, errors.New("upgrade response failed Core preservation")
 		}
 		e.r.Upgrade.Phase = "verifying"

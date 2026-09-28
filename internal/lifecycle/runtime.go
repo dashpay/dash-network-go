@@ -7,6 +7,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 func cloneImages(images provision.FleetImages) provision.FleetImages {
@@ -37,9 +38,14 @@ func effectiveImages(p Plan, record provision.Record) (provision.FleetImages, er
 	if err := record.Runtime.Images.Validate(p.Bootstrap.Compute); err != nil {
 		return nil, err
 	}
-	for name, components := range images {
-		if record.Runtime.Images[name]["core"] != components["core"] {
-			return nil, errors.New("runtime attempted to replace preserved Core")
+	// Core may differ from the deployment plan only through reviewed Core
+	// upgrades (the journal bounds runtime images by each upgrade's From/To,
+	// chained by previous ID); it always stays the same repository.
+	for n, components := range images {
+		was, errWas := name.NewDigest(components["core"], name.StrictValidation)
+		now, errNow := name.NewDigest(record.Runtime.Images[n]["core"], name.StrictValidation)
+		if errWas != nil || errNow != nil || was.Context().Name() != now.Context().Name() {
+			return nil, errors.New("runtime attempted to replace Core with another repository")
 		}
 	}
 	return cloneImages(record.Runtime.Images), nil

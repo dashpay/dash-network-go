@@ -47,7 +47,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
 		fs.StringVar(&lockPath, "lock", "", "resolved candidate release lock")
-		fs.StringVar(&scope, "scope", "platform", "platform or tenderdash; Core is preserved")
+		fs.StringVar(&scope, "scope", "platform", "platform or tenderdash (Core preserved), or core (Core only, every node)")
 	} else {
 		fs.StringVar(&path, "plan", "", "immutable deployment or upgrade plan")
 		fs.StringVar(&keyPath, "ssh-key", "", "private SSH identity file")
