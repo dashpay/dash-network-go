@@ -134,6 +134,15 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The connection deadline equals the context deadline, so an I/O timeout
+	// can be observed just before the context's own timer fires. Report that
+	// as the context error, not as a connectivity or execution failure.
+	expired := func() error {
+		if ctx.Err() == nil && !time.Now().Before(deadline) {
+			<-ctx.Done()
+		}
+		return ctx.Err()
+	}
 	address := net.JoinHostPort(e.Address, strconv.Itoa(e.Port))
 	conn, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -163,8 +172,8 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	}
 	remote, channels, requests, err := ssh.NewClientConn(conn, alias, &config)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := expired(); err != nil {
+			return nil, err
 		}
 		return nil, errors.New("SSH handshake failed (verify instance host key and login identity)")
 	}
@@ -173,8 +182,8 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := expired(); err != nil {
+			return nil, err
 		}
 		return nil, errors.New("SSH session creation failed")
 	}
@@ -184,8 +193,8 @@ func (s *SSH) Run(ctx context.Context, e Endpoint, command, stdin string) ([]byt
 	session.Stderr = io.Discard // Never put remote banners, package logs or secrets in the journal.
 	session.Stdin = bytes.NewBufferString(stdin)
 	err = session.Run(command)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if err := expired(); err != nil {
+		return nil, err
 	}
 	if stdout.overflow {
 		return nil, errors.New("SSH stdout exceeded 64 KiB; response refused")
