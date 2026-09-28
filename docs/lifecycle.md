@@ -127,6 +127,7 @@ Services use host networking with explicit port bindings:
 | Drive ABCI / gRPC | loopback, 26658 / 26670 |
 | DAPI gRPC / JSON | loopback, 3010 / 3009 |
 | Envoy TLS gateway | all interfaces, 1443 |
+| ACME HTTP-01 (trusted certificates only, during issuance) | all interfaces, 80 |
 
 Every preflight rejects containers dashnet did not create, including stopped
 ones, and never adopts a container by name. The one exception is an operator
@@ -149,9 +150,22 @@ Security groups must allow Core 20001 and Tenderdash 26656 from the fleet's
 public addresses (rules that reference a security group match only private
 traffic). `--advertise private` keeps private VPC addresses with Core's private
 address setting; networks without IPAM addresses always use private addresses. The tool does not
-open SGs, create DNS/load balancers, or provision public CA certificates. TLS uses
-persisted per-node self-signed certificates (one-year lifetime); probes pin that
-certificate, never `--insecure`. The gateway serves native gRPC, gRPC-Web (trailers
+open SGs or create DNS/load balancers. By default TLS uses persisted per-node
+self-signed certificates (one-year lifetime); probes pin that certificate, never
+`--insecure`.
+
+**Trusted gateway certificates.** With public service addresses, an `acme` image
+(for example `docker.io/goacme/lego:v5.5.2`) in the network images and
+`--acme-email`, `deployment-plan --gateway-tls auto` selects Let's Encrypt, as
+long-running devnets' dashmate gateways do. Each validator runs a pinned ACME
+client (`dashnet-…-acme`) that obtains a short-lived certificate for its public IP
+over HTTP-01 on port 80 (the security group must allow it), renews it when three
+days remain, and installs it into `platform/tls`. Envoy loads the pair through a
+file-watched SDS secret, so a renewal takes effect without restarting the gateway;
+until the first issuance it serves the self-signed pair. Probes then trust the
+pinned self-signed certificate or the system CAs for the node's public IP.
+`--gateway-tls letsencrypt-staging` uses the staging CA; `self-signed` opts out.
+The ACME client is not part of upgrade image sets. The gateway serves native gRPC, gRPC-Web (trailers
 framed in the body) and CORS like dashmate's, so browser SDKs and explorers work.
 Public browser endpoints/certificate rotation
 remain separate work. The helper image is cached for future adapters, **not run**.

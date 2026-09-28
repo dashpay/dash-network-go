@@ -42,6 +42,7 @@ func TestNetworkBoundaries(t *testing.T) {
 		"implicit tag":             func(n *spec.Network) { n.Images["core"] = "dashpay/dashd" },
 		"missing component":        func(n *spec.Network) { delete(n.Images, "drive") },
 		"unknown component":        func(n *spec.Network) { n.Images["typo"] = "dashpay/drive:latest" },
+		"untagged optional acme":   func(n *spec.Network) { n.Images["acme"] = "goacme/lego" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			n := testutil.Network(t)
@@ -50,6 +51,17 @@ func TestNetworkBoundaries(t *testing.T) {
 				t.Fatal("accepted invalid intent")
 			}
 		})
+	}
+}
+
+func TestOptionalACMEClientImage(t *testing.T) {
+	n := testutil.Network(t)
+	n.Images["acme"] = "docker.io/goacme/lego:v5.5.2"
+	if err := n.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.ImageComponents(); len(c) != len(spec.Components)+1 || c[len(c)-1] != "acme" {
+		t.Fatal("acme not resolved after the required components", c)
 	}
 }
 

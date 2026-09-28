@@ -30,7 +30,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
-	var candidatePath, lockPath, scope, advertise string
+	var candidatePath, lockPath, scope, advertise, gatewayTLS, acmeEmail string
 	var timeout, observationWindow time.Duration
 	var protocol uint
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
@@ -41,6 +41,8 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
 		fs.StringVar(&advertise, "advertise", "auto", "service addresses to register: public (IPAM Elastic IPs), private (VPC), or auto (public when every host has an IPAM address)")
+		fs.StringVar(&gatewayTLS, "gateway-tls", "auto", "gateway certificates: letsencrypt, letsencrypt-staging, self-signed, or auto (letsencrypt with public addresses, an acme image and --acme-email)")
+		fs.StringVar(&acmeEmail, "acme-email", "", "ACME account contact for trusted gateway certificates")
 	} else if args[0] == "upgrade-plan" {
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
@@ -77,6 +79,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		}
 		if advertise != "auto" && advertise != "public" && advertise != "private" {
 			return errors.New("--advertise must be auto, public or private")
+		}
+		if gatewayTLS != "auto" && gatewayTLS != "self-signed" && node.ACMEIssuers[gatewayTLS] == "" {
+			return errors.New("--gateway-tls must be auto, self-signed, letsencrypt or letsencrypt-staging")
 		}
 		if err := files.ReadJSON(bootstrapPath, &b); err != nil {
 			return err
@@ -190,7 +195,14 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		} else if public == nil {
 			return errors.New("--advertise public requires an IPAM Elastic IP on every host")
 		}
-		p, err = lifecycle.BuildAdvertising(b, live, public, uint32(protocol), time.Now())
+		opts := lifecycle.Options{Public: public}
+		if gatewayTLS == "auto" && public != nil && acmeEmail != "" && hasImage(b, "acme") {
+			gatewayTLS = "letsencrypt"
+		}
+		if gatewayTLS != "auto" && gatewayTLS != "self-signed" {
+			opts.ACMEIssuer, opts.ACMEEmail = gatewayTLS, acmeEmail
+		}
+		p, err = lifecycle.BuildWith(b, live, opts, uint32(protocol), time.Now())
 		if err != nil {
 			return err
 		}
@@ -198,7 +210,11 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if p.Advertise == "public" {
 			mode = "public IPAM service addresses (security groups must allow Core 20001 and Tenderdash 26656 from the fleet's public IPs)"
 		}
-		fmt.Fprintln(stderr, "Devnet plan: start Core, mine local collateral, register EvoNodes with "+mode+", start Platform and TLS gateway. Existing security groups unchanged. Review the exact plan and retain this binary.")
+		certs := "persisted self-signed gateway certificates"
+		if p.GatewayTLS != nil {
+			certs = p.GatewayTLS.Issuer + " certificates for each validator's public IP (ACME HTTP-01: port 80 must be reachable)"
+		}
+		fmt.Fprintln(stderr, "Devnet plan: start Core, mine local collateral, register EvoNodes with "+mode+", start Platform and TLS gateway with "+certs+". Existing security groups unchanged. Review the exact plan and retain this binary.")
 		return emit(out, output, p)
 	}
 	var random [16]byte
@@ -264,4 +280,13 @@ func ipamAddresses(b bootstrap.Plan, r provision.Record) map[string]string {
 		out[t.Name] = n.Address.PublicIP
 	}
 	return out
+}
+
+func hasImage(b bootstrap.Plan, component string) bool {
+	for _, image := range b.Release.Images {
+		if image.Component == component {
+			return true
+		}
+	}
+	return false
 }

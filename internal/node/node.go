@@ -27,6 +27,7 @@ import (
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/transport"
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 //go:embed worker.py
@@ -119,10 +120,46 @@ type Context struct {
 	PremineHeight          int    `json:"premineHeight,omitempty"`
 	// Advertise is "public" when nodes register and advertise their public
 	// Elastic IPs; empty means private VPC addresses (older plans).
-	Advertise string   `json:"advertise,omitempty"`
-	CorePeers []string `json:"corePeers"`
-	Ports     Ports    `json:"ports"`
+	Advertise string `json:"advertise,omitempty"`
+	// GatewayTLS is set when validators serve publicly trusted certificates.
+	GatewayTLS *GatewayTLS `json:"gatewayTls,omitempty"`
+	CorePeers  []string    `json:"corePeers"`
+	Ports      Ports       `json:"ports"`
 }
+
+// GatewayTLS makes each validator's gateway serve a publicly trusted ACME
+// certificate for its public IP. The ACME client image is pinned per
+// architecture; certificates renew in place and Envoy reloads them.
+type GatewayTLS struct {
+	Issuer string            `json:"issuer"`
+	Email  string            `json:"email"`
+	Images map[string]string `json:"images"`
+}
+
+var acmeEmail = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$`)
+
+// ACMEIssuers maps supported issuers to their ACME directories.
+var ACMEIssuers = map[string]string{
+	"letsencrypt":         "https://acme-v02.api.letsencrypt.org/directory",
+	"letsencrypt-staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
+}
+
+func (g GatewayTLS) Validate(architectures []string) error {
+	if _, ok := ACMEIssuers[g.Issuer]; !ok || !acmeEmail.MatchString(g.Email) {
+		return errors.New("gateway TLS needs a supported issuer and a contact email")
+	}
+	if len(g.Images) != len(architectures) {
+		return errors.New("gateway TLS needs one pinned ACME client image per validator architecture")
+	}
+	for _, arch := range architectures {
+		ref, err := name.NewDigest(g.Images[arch], name.StrictValidation)
+		if err != nil || !strings.HasPrefix(ref.DigestStr(), "sha256:") {
+			return errors.New("gateway TLS ACME client images must be pinned by sha256")
+		}
+	}
+	return nil
+}
+
 type Peer struct {
 	Name              string `json:"name"`
 	Address           string `json:"address"`

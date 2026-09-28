@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/node"
@@ -78,7 +79,9 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 			continue
 		}
 		for _, image := range lock.Images {
-			if image.Component == "core" || (scope == "tenderdash" && image.Component != "tenderdash") {
+			// Core is preserved; the optional ACME client is pinned by the
+			// deployment plan, not replaced by upgrades.
+			if image.Component == "core" || slices.Contains(spec.OptionalComponents, image.Component) || (scope == "tenderdash" && image.Component != "tenderdash") {
 				continue
 			}
 			repo, err := name.NewDigest(image.Pinned, name.StrictValidation)
