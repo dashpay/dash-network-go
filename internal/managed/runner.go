@@ -260,6 +260,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if err = save(); err != nil {
 			return
 		}
+		r.report("managed target " + t.Name + " applying")
 		r.report("managed-applying")
 		q := request(f, t, "apply")
 		v := p.Snapshot.Nodes[t.Name]
