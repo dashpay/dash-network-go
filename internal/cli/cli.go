@@ -13,8 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/files"
 	"github.com/dashpay/dash-network-go/internal/inventory"
+	"github.com/dashpay/dash-network-go/internal/managed"
+	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/plan"
 	"github.com/dashpay/dash-network-go/internal/release"
 	"github.com/dashpay/dash-network-go/internal/spec"
@@ -43,6 +46,7 @@ Usage:
                     --ssh-key PATH --known-hosts PATH [--profile name]
                     [--timeout 30m] [--out hosts-ready.json]
   dashnet host-trust --bootstrap-plan bootstrap-plan.json --out known_hosts [--profile name]
+  dashnet recipes   # JSON digests of the recipes plans bind (compatibility check)
   dashnet deployment-plan --bootstrap-plan bootstrap-plan.json --protocol VERSION --out deployment.json
   dashnet deploy --plan deployment.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet doctor --plan deployment.json --ssh-key PATH --known-hosts PATH [--timeout 3m]
@@ -87,6 +91,14 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 	if args[0] == "version" {
 		_, err := fmt.Fprintln(out, version)
 		return err
+	}
+	if args[0] == "recipes" {
+		// The digests plans bind: a newer binary with the same bootstrap and node
+		// recipes can operate a deployment created by an older one.
+		return json.NewEncoder(out).Encode(map[string]string{
+			"bootstrap": bootstrap.RecipeDigest(), "node": node.RecipeDigest(), "upgrade": node.UpgradeDigest(),
+			"join": node.JoinRecipeDigest(), "managed": managed.RecipeDigest(),
+		})
 	}
 	switch args[0] {
 	case "join-plan", "join":

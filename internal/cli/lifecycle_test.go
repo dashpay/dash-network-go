@@ -3,9 +3,14 @@ package cli_test
 import (
 	"bytes"
 	"context"
-	"github.com/dashpay/dash-network-go/internal/cli"
+	"encoding/json"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/dashpay/dash-network-go/internal/bootstrap"
+	"github.com/dashpay/dash-network-go/internal/cli"
+	"github.com/dashpay/dash-network-go/internal/node"
 )
 
 func TestLifecycleCLIRequiresCompleteExplicitIntent(t *testing.T) {
@@ -34,5 +39,19 @@ func TestObservationWindowRejectedBeforeAnyCloudOrHostAccess(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--observation-window") {
 			t.Fatal("invalid observation policy not rejected", args, err)
 		}
+	}
+}
+
+func TestRecipesPrintsTheDigestsPlansBind(t *testing.T) {
+	var out bytes.Buffer
+	if err := cli.Run(context.Background(), []string{"recipes"}, &out, io.Discard, "test"); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["node"] != node.RecipeDigest() || got["upgrade"] != node.UpgradeDigest() || got["bootstrap"] != bootstrap.RecipeDigest() || len(got["join"]) != 64 || len(got["managed"]) != 64 {
+		t.Fatal("unexpected recipe digests", got)
 	}
 }

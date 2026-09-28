@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 from test_worker import worker, request, observer_scope
 
 scope = observer_scope.copy()
@@ -329,11 +330,11 @@ class CoreUpgradeReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             w = CoreFixture(Path(tmp))
             w.heights = [13, 20, 23, 0, 5, 12, 14]
-            scope['time'].sleep = lambda s: None
-            w.execute()
+            with mock.patch.object(scope['time'], 'sleep', lambda s: None):
+                w.execute()
             stop = next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('core') in c)
             last_height = max(i for i, c in enumerate(w.commands[:stop]) if c[0] == 'height')
-            self.assertIn(w.commands[last_height][1] % 24, range(13, 17), 'Core stopped outside the quiet window')
+            self.assertIn(w.commands[last_height][1] % 24, range(13, 15), 'Core stopped outside the quiet window')
             self.assertLess(next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('tenderdash') in c), stop, 'Platform withdrawn first')
 
     def test_nodes_an_earlier_upgrade_did_not_touch_accept_an_older_or_missing_marker(self):

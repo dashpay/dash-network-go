@@ -17,6 +17,9 @@ import (
 //go:embed recipe.sh
 var recipe string
 
+// RecipeDigest is the host bootstrap recipe digest that bootstrap plans bind.
+func RecipeDigest() string { return digest([]byte(recipe)) }
+
 type Remote interface {
 	Run(context.Context, transport.Endpoint, string, string) ([]byte, error)
 }
