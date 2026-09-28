@@ -377,10 +377,11 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		observed, err = r.Remote.Call(ctx, e.upgradeRequest(u, t, "upgrade-apply"))
 		if paused {
 			if err == nil {
-				e.settle()
+				err = e.settle(t)
 			}
-			if startErr := e.resumeMining(); startErr != nil && err == nil {
-				err = startErr
+			// Always resume, even after a failure or cancellation.
+			if startErr := e.resumeMining(); startErr != nil {
+				err = errors.Join(err, startErr)
 			}
 		}
 		if err != nil {
@@ -420,16 +421,27 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	return
 }
 
+func quietDKG(height int64) bool { return height%24 >= 13 && height%24 <= 14 }
+
 // pauseMiningQuietly waits for the quiet part of the 24-block DKG cycle
 // (sessions end by block 12; the next starts at 24), then pauses the miner.
+// A block mined between the observation and the pause is caught by checking
+// the stopped height; mining then resumes until the next window.
 func (e *execution) pauseMiningQuietly() error {
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		o, err := e.call(e.p.Miner(), "core-status", nil)
-		if err == nil && o.Core != nil && o.Core.Height%24 >= 13 && o.Core.Height%24 <= 14 {
-			e.report(fmt.Sprintf("mining paused at height %d (quiet DKG window) for the Core replacement", o.Core.Height))
-			_, err = e.call(e.p.Miner(), "mine-pause", nil)
-			return err
+		if err == nil && o.Core != nil && quietDKG(o.Core.Height) {
+			if _, err = e.call(e.p.Miner(), "mine-pause", nil); err != nil {
+				return err
+			}
+			if o, err = e.call(e.p.Miner(), "core-status", nil); err == nil && o.Core != nil && quietDKG(o.Core.Height) {
+				e.report(fmt.Sprintf("mining paused at height %d (quiet DKG window) for the Core replacement", o.Core.Height))
+				return nil
+			}
+			if err = e.resumeMining(); err != nil {
+				return err
+			}
 		}
 		if time.Now().After(deadline) {
 			return errors.New("no quiet DKG window observed for the Core replacement")
@@ -440,16 +452,40 @@ func (e *execution) pauseMiningQuietly() error {
 	}
 }
 
-// settle gives the replaced validator time to re-establish its masternode and
-// quorum connections before blocks (and so DKG sessions) resume.
-func (e *execution) settle() { _ = e.pause(30 * time.Second) }
-
-func (e *execution) resumeMining() error {
-	_, err := e.call(e.p.Miner(), "mine-start", func(q *node.Request) { q.PayoutAddress = e.r.Deployment.PayoutAddress })
-	if err == nil {
-		e.report("mining resumed")
+// settle keeps blocks (and so DKG sessions) paused until the replaced
+// validator is observably back: masternode READY, synced and connected, after
+// at least 30 seconds for its quorum connections, within a bound.
+func (e *execution) settle(t node.Target) error {
+	if err := e.pause(30 * time.Second); err != nil {
+		return err
 	}
-	return err
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		o, err := e.call(t, "core-status", nil)
+		if err == nil && o.Core != nil && o.Core.Synced && o.Core.MasternodeState == "READY" && o.Core.Peers >= 8 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s not READY and connected after its Core replacement", t.Name)
+		}
+		if err = e.pause(3 * time.Second); err != nil {
+			return err
+		}
+	}
+}
+
+// resumeMining uses its own bounded context so it still runs after the
+// operation's context was cancelled or exhausted.
+func (e *execution) resumeMining() error {
+	cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	q := runtimeRequest(e.p, e.r, e.p.Miner(), "mine-start")
+	q.PayoutAddress = e.r.Deployment.PayoutAddress
+	if _, err := e.runner.Remote.Call(cleanup, q); err != nil {
+		return fmt.Errorf("resume mining on %s: %w", e.p.Miner().Name, err)
+	}
+	e.report("mining resumed")
+	return nil
 }
 
 func (e *execution) pause(d time.Duration) error {

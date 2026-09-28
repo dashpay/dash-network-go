@@ -28,9 +28,9 @@ The current profiles are:
   new configuration or a hard-fork activation is not handled by this profile.
 
 Image availability is not a compatibility guarantee. The executor requires the
-live protocol to remain the deployment's initial protocol, the supported 12-member
-Platform quorum to consist entirely of known owned validators, and **every target**
-to pass health checks. An image that requires another configuration/schema or
+live protocol to remain the deployment's initial protocol, the live Platform
+quorum (configured size 12) to have at least its minimum of 9 members, all known
+owned validators, and **every target** to pass health checks. An image that requires another configuration/schema or
 protocol needs a separately implemented adapter; this command never invents one.
 
 ## Human command sequence
