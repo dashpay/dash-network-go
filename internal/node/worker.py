@@ -770,10 +770,12 @@ class Worker:
         service = self.service("miner", self.images["core"])
         service.update(
             entrypoint=["/bin/sh", "-c"],
+            # The shell is PID 1 and would ignore SIGTERM: without the trap a
+            # pause waits out the stop timeout and mines two more blocks.
             command=[
-                "while true; do dash-cli -datadir=/tmp -conf=/etc/dash/dash.conf generatetoaddress 1 "
+                "trap 'exit 0' TERM INT; while true; do dash-cli -datadir=/tmp -conf=/etc/dash/dash.conf generatetoaddress 1 "
                 + address
-                + " 1000000 >/dev/null 2>&1; sleep 10; done"
+                + " 1000000 >/dev/null 2>&1; sleep 10 & wait $!; done"
             ],
             volumes=[str(self.root / "miner/rpc.conf") + ":/etc/dash/dash.conf:ro"],
         )

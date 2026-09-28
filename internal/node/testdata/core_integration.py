@@ -123,7 +123,10 @@ def main():
                 time.sleep(1)
             miner_before = w.inspect_container("miner")["Id"]
             core_before = w.inspect_container("core")["Id"]
+            pausing = time.monotonic()
             call("mine-pause")
+            # A Core upgrade pauses inside a two-block DKG window.
+            assert time.monotonic() - pausing < 8, "Miner ignored SIGTERM"
             assert not w.inspect_container("miner")["State"]["Running"]
             assert w.inspect_container("core")["Id"] == core_before
             assert w.inspect_container("core")["State"]["Running"]

@@ -14,14 +14,19 @@ The current profiles are:
   DAPI and Drive are stopped gracefully (Tenderdash first), Core's Compose image is
   replaced, Core must come back synced (and the masternode READY in the next
   health gate), then Drive, Tenderdash and DAPI restart in place; the gateway keeps
-  serving. Because DKG sessions advance only with blocks and the devnet's miner is
+  serving. Core ignores MNAUTH until its own sync completes, so peers that
+  reconnect during startup verify the validator while it never verifies them, and
+  masternode de-duplication keeps those one-sided links: the validator then misses
+  quorum connections, loses DKG contributions and is PoSe-punished (observed up to
+  a ban). Once synced it therefore disconnects its peers once and waits (up to 5
+  minutes) for an MNAUTH-verified link to every valid member of its quorums. Because DKG sessions advance only with blocks and the devnet's miner is
   dash-network-go's own, the runner waits for the quiet part of the 24-block DKG
   cycle (height mod 24 in 13..14), **pauses mining** while that validator's Core
-  is replaced, gives it 30 seconds to reconnect, then resumes mining: no DKG
+  is replaced, waits until it is READY and connected (at least 30 seconds), then resumes mining: no DKG
   session can start while it is away, so it is not PoSe-punished. (A restart
   timed only by height was observed to miss a session.) A Platform quorum that
   formed with fewer members (at least the minimum of 9) does not stop a rollout. Allow about 8 minutes per node:
-  a 13-validator devnet needs `--timeout 240m` or more (it resumes if exceeded). On the mining node the miner pauses and is recreated on the new image.
+  a 13-validator devnet needs `--timeout 240m` or more (it resumes if exceeded). On the mining node the miner pauses and is recreated on the new image. (The miner exits on SIGTERM, so a pause lands inside the two-block window.)
   `dash.conf`, genesis, keys, wallets and chain data are kept; every step is
   journaled in the host marker, so a lost response resumes at the same step and
   never replaces Core twice. Other images are unchanged. A Core release that needs
