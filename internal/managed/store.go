@@ -25,10 +25,18 @@ type Record struct {
 	Current     string          `json:"current,omitempty"`
 	Completed   map[string]bool `json:"completed,omitempty"`
 	LastError   string          `json:"lastError,omitempty"`
+	// Instances pins each enrolled target name to the instance that was
+	// enrolled. A replaced instance under the same name is not enrolled.
+	Instances map[string]string `json:"instances,omitempty"`
+}
+
+// IsEnrolled reports whether this exact target instance completed enrollment.
+func (r Record) IsEnrolled(t Target) bool {
+	return r.Enrolled[t.Name] && (r.Instances == nil || r.Instances[t.Name] == t.InstanceID)
 }
 
 func (r Record) Validate(f Fleet) error {
-	if r.FleetID != f.ID() || !digestRE.MatchString(r.SnapshotID) || r.Revision < 0 || len(r.Enrolled) != len(f.Targets) {
+	if r.FleetID != f.Authority() || !digestRE.MatchString(r.SnapshotID) || r.Revision < 0 {
 		return errors.New("managed record scope mismatch")
 	}
 	if r.OperationID != "" && !digestRE.MatchString(r.OperationID) {
@@ -38,18 +46,15 @@ func (r Record) Validate(f Fleet) error {
 		return errors.New("invalid managed phase")
 	}
 	found := r.Current == ""
+	// Targets may be added after enrollment (they start unenrolled) and a
+	// completed operation only covers the fleet its plan observed.
+	active := r.Phase == "staging" || r.Phase == "applying" || r.Phase == "verifying" || r.Phase == "interrupted"
 	for _, t := range f.Targets {
-		if _, ok := r.Enrolled[t.Name]; !ok {
-			return errors.New("managed record lost target")
-		}
-		if r.OperationID != "" && !r.Enrolled[t.Name] && (!r.Completed[t.Name] || r.Current == t.Name) {
+		if active && r.OperationID != "" && !r.IsEnrolled(t) && (!r.Completed[t.Name] || r.Current == t.Name) {
 			return errors.New("unenrolled target in operation")
 		}
 		if t.Name == r.Current {
 			found = true
-		}
-		if r.Phase == "complete" && !r.Completed[t.Name] {
-			return errors.New("incomplete target progress")
 		}
 	}
 	if !found || (r.Phase == "complete" && r.Current != "") {
@@ -111,7 +116,7 @@ func (d Dynamo) Verify(ctx context.Context, f Fleet) error {
 }
 func decode(f Fleet, item map[string]types.AttributeValue) (Record, error) {
 	var r Record
-	if value(item, "Network") != f.Key() || value(item, "Kind") != "ExistingNetwork" || value(item, "FleetID") != f.ID() {
+	if value(item, "Network") != f.Key() || value(item, "Kind") != "ExistingNetwork" || value(item, "FleetID") != f.Authority() {
 		return r, errors.New("network already managed by another manifest/engine; no automatic adoption")
 	}
 	raw := value(item, "Data")
@@ -148,7 +153,7 @@ func (d Dynamo) Acquire(ctx context.Context, f Fleet, s Snapshot, owner string) 
 	if owner == "" {
 		return Record{}, errors.New("empty owner")
 	}
-	r := Record{FleetID: f.ID(), SnapshotID: s.ID, Phase: "enrolling", Enrolled: map[string]bool{}}
+	r := Record{FleetID: f.Authority(), SnapshotID: s.ID, Phase: "enrolling", Enrolled: map[string]bool{}, Instances: map[string]string{}}
 	for _, t := range f.Targets {
 		r.Enrolled[t.Name] = false
 	}
@@ -158,7 +163,7 @@ func (d Dynamo) Acquire(ctx context.Context, f Fleet, s Snapshot, owner string) 
 	b, _ := json.Marshal(r)
 	item := key(f)
 	item["Kind"] = str("ExistingNetwork")
-	item["FleetID"] = str(f.ID())
+	item["FleetID"] = str(f.Authority())
 	item["Data"] = str(string(b))
 	item["Revision"] = num(0)
 	item["Owner"] = str(owner)
@@ -172,7 +177,7 @@ func (d Dynamo) Acquire(ctx context.Context, f Fleet, s Snapshot, owner string) 
 	if _, _, e = d.Read(ctx, f); e != nil {
 		return r, e
 	}
-	o, e := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("SET #owner = :owner"), ConditionExpression: aws.String("#fleet = :fleet AND #kind = :kind AND attribute_not_exists(#owner)"), ExpressionAttributeNames: map[string]string{"#owner": "Owner", "#fleet": "FleetID", "#kind": "Kind"}, ExpressionAttributeValues: map[string]types.AttributeValue{":owner": str(owner), ":fleet": str(f.ID()), ":kind": str("ExistingNetwork")}, ReturnValues: types.ReturnValueAllNew})
+	o, e := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("SET #owner = :owner"), ConditionExpression: aws.String("#fleet = :fleet AND #kind = :kind AND attribute_not_exists(#owner)"), ExpressionAttributeNames: map[string]string{"#owner": "Owner", "#fleet": "FleetID", "#kind": "Kind"}, ExpressionAttributeValues: map[string]types.AttributeValue{":owner": str(owner), ":fleet": str(f.Authority()), ":kind": str("ExistingNetwork")}, ReturnValues: types.ReturnValueAllNew})
 	if conditional(e) {
 		return r, errors.New("network already has a runner claim; stop and inspect before unlock")
 	}
@@ -198,7 +203,7 @@ func (d Dynamo) Save(ctx context.Context, f Fleet, r Record, owner string) error
 	if len(b) > 300000 {
 		return errors.New("journal exceeds budget")
 	}
-	_, e = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#fleet = :fleet AND #owner = :owner AND (#revision = :previous OR (#revision = :next AND #data = :data))"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#revision": "Revision", "#fleet": "FleetID", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":fleet": str(f.ID()), ":owner": str(owner), ":data": str(string(b)), ":next": num(r.Revision), ":previous": num(r.Revision - 1)}})
+	_, e = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#fleet = :fleet AND #owner = :owner AND (#revision = :previous OR (#revision = :next AND #data = :data))"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#revision": "Revision", "#fleet": "FleetID", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":fleet": str(f.Authority()), ":owner": str(owner), ":data": str(string(b)), ":next": num(r.Revision), ":previous": num(r.Revision - 1)}})
 	if conditional(e) {
 		return errors.New("stale revision or lost runner claim")
 	}
@@ -208,7 +213,7 @@ func (d Dynamo) Release(ctx context.Context, f Fleet, owner string) error {
 	if owner == "" {
 		return errors.New("empty owner")
 	}
-	_, e := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("REMOVE #owner"), ConditionExpression: aws.String("#fleet = :fleet AND #owner = :owner"), ExpressionAttributeNames: map[string]string{"#fleet": "FleetID", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":fleet": str(f.ID()), ":owner": str(owner)}})
+	_, e := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(f), UpdateExpression: aws.String("REMOVE #owner"), ConditionExpression: aws.String("#fleet = :fleet AND #owner = :owner"), ExpressionAttributeNames: map[string]string{"#fleet": "FleetID", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":fleet": str(f.Authority()), ":owner": str(owner)}})
 	if conditional(e) {
 		return fmt.Errorf("claim changed; no unlock performed")
 	}

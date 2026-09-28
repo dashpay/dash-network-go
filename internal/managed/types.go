@@ -56,7 +56,18 @@ func hash(v any) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
 }
-func (f Fleet) ID() string  { return hash(f) }
+func (f Fleet) ID() string { return hash(f) }
+
+// Authority identifies who owns a managed network independently of its current
+// target list and display metadata. Journal records and host ownership markers
+// bind to it, so a reviewed fleet can gain, lose or replace targets (a newly
+// discovered seed, a replaced instance) without orphaning the enrollment.
+// Snapshots and plans still bind the exact fleet through ID().
+func (f Fleet) Authority() string {
+	return hash(struct {
+		APIVersion, Kind, Name, ChainType, CoreNetwork, AccountID, Region, NetworkTagKey, StateTable string
+	}{f.APIVersion, f.Kind, f.Metadata.Name, f.ChainType, f.CoreNetwork, f.AccountID, f.Region, f.NetworkTagKey, f.StateTable})
+}
 func (f Fleet) Key() string { return f.AccountID + "/" + f.Region + "/" + f.Metadata.Name }
 func (f Fleet) Validate() error {
 	if f.APIVersion != spec.Version || f.Kind != "ExistingNetwork" || !slugRE.MatchString(f.Metadata.Name) || f.Metadata.DisplayName == "" || len(f.Metadata.Description) > 1000 || (f.Metadata.Visibility != "private" && f.Metadata.Visibility != "public") {
