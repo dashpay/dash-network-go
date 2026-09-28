@@ -52,9 +52,17 @@ The journal uses the same `account/region/network` key as native deployments and
 conditional, non-expiring owner/revision claims. Use **one shared table per
 managed authority domain**—separate tables would not exclude competing runners.
 A native-create record cannot be silently converted into an existing-network
-record, nor can a changed manifest overwrite enrollment. Keep the manifest stable;
-address/target/ownership changes need a reviewed rebind implementation, not manual
-marker deletion.
+record.
+
+Journal records and host `owner.json` markers bind to the network **authority**
+(API version, name, chain, account, region, tag key and journal table), not to
+the exact target list or display metadata. Snapshots and plans still bind the
+exact fleet. A manifest may therefore gain targets (for example a newly
+discovered second seed) or replace an instance: new or replaced targets start
+unenrolled, and `managed-enroll` on an already enrolled network enrolls only
+those targets, keeping the previous operation ID for the next plan. Each
+enrollment pins the instance ID, so a replacement under the same name must be
+enrolled before it can be operated.
 
 Host keys must be independently verified and stored under the existing CLI alias
 `<instance-id>.<region>.<account-id>.dashnet`. Reusing a verified key from an existing

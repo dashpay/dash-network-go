@@ -14,7 +14,7 @@ import (
 )
 
 func request(f Fleet, t Target, action string) Request {
-	return Request{Fleet: f, FleetID: f.ID(), Target: t, Action: action}
+	return Request{Fleet: f, FleetID: f.Authority(), Target: t, Action: action}
 }
 func Observe(ctx context.Context, f Fleet, remote Backend, reference int64) Snapshot {
 	result := Snapshot{APIVersion: spec.Version, Kind: "ExistingSnapshot", Fleet: f, ObservedAt: time.Now().UTC(), Nodes: map[string]Observation{}}

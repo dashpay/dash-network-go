@@ -39,7 +39,7 @@ func (m *memory) Acquire(_ context.Context, f Fleet, s Snapshot, o string) (Reco
 	}
 	m.owner = o
 	if m.r.FleetID == "" {
-		m.r = Record{FleetID: f.ID(), SnapshotID: s.ID, Phase: "enrolling", Enrolled: map[string]bool{}}
+		m.r = Record{FleetID: f.Authority(), SnapshotID: s.ID, Phase: "enrolling", Enrolled: map[string]bool{}}
 		for _, t := range f.Targets {
 			m.r.Enrolled[t.Name] = false
 		}

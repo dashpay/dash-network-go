@@ -88,8 +88,13 @@ func (r Runner) Enroll(ctx context.Context, s Snapshot) (record Record, err erro
 	if record.OperationID != "" && record.Phase != "complete" && record.Phase != "enrolled" {
 		return record, errors.New("already in managed operation; enrollment is not redeployment")
 	}
+	if record.Instances == nil {
+		record.Instances = map[string]string{}
+	}
+	// An already enrolled network can enroll targets added (or replaced) since.
+	record.SnapshotID = s.ID
 	for _, t := range f.Targets {
-		if record.Enrolled[t.Name] || len(r.Targets) > 0 && !slices.Contains(r.Targets, t.Name) {
+		if record.IsEnrolled(t) || len(r.Targets) > 0 && !slices.Contains(r.Targets, t.Name) {
 			continue
 		}
 		q := request(f, t, "enroll")
@@ -99,6 +104,7 @@ func (r Runner) Enroll(ctx context.Context, s Snapshot) (record Record, err erro
 			return
 		}
 		record.Enrolled[t.Name] = true
+		record.Instances[t.Name] = t.InstanceID
 		record.Revision++
 		if err = r.Store.Save(ctx, f, record, r.Owner); err != nil {
 			return
@@ -124,7 +130,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		return
 	}
 	for _, t := range f.Targets {
-		if p.Selects(t) && !prior.Enrolled[t.Name] {
+		if p.Selects(t) && !prior.IsEnrolled(t) {
 			return record, errors.New("finish explicit enrollment first")
 		}
 	}

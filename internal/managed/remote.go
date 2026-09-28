@@ -49,7 +49,7 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	if err := q.Fleet.Validate(); err != nil {
 		return Observation{}, err
 	}
-	if q.FleetID != q.Fleet.ID() {
+	if q.FleetID != q.Fleet.Authority() {
 		return Observation{}, errors.New("fleet ID mismatch")
 	}
 	found := false

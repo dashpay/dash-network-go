@@ -156,7 +156,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	if command == "managed-join-profile" {
 		for _, target := range f.Targets {
 			if target.Name == source {
-				observed, err := remote.Call(ctx, managed.Request{Fleet: f, FleetID: f.ID(), Target: target, Action: "join-profile"})
+				observed, err := remote.Call(ctx, managed.Request{Fleet: f, FleetID: f.Authority(), Target: target, Action: "join-profile"})
 				if err != nil {
 					return err
 				}
