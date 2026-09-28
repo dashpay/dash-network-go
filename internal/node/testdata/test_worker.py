@@ -312,6 +312,7 @@ class Tests(unittest.TestCase):
             self.assertNotIn("tls_certificates", context)
             source = context["tls_certificate_sds_secret_configs"][0]["sds_config"]["path_config_source"]
             self.assertEqual(source, {"path": "/tls/sds.json", "watched_directory": {"path": "/tls"}})
+            self.assertEqual(w.envoy()["node"]["id"], q["target"]["name"], "SDS needs a node identity")
             script = w.acme_script()
             self.assertIn("ip=198.51.100.10\n", script)
             self.assertIn("server=https://acme-v02.api.letsencrypt.org/directory\n", script)

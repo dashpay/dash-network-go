@@ -1073,7 +1073,7 @@ class Worker:
                     "resource_api_version": "V3",
                 },
             }]
-        return dict(
+        config = dict(
             static_resources=dict(
                 listeners=[
                     dict(
@@ -1102,6 +1102,10 @@ class Worker:
                 ],
             )
         )
+        if self.c.get("gatewayTls"):
+            # SDS secrets require a node identity in the bootstrap.
+            config["node"] = {"id": self.t["name"], "cluster": "dashnet-gateway"}
+        return config
 
     def platform_services(self):
         secret, p = self.read("secrets.json"), self.ports
