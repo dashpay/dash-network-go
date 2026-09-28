@@ -299,6 +299,29 @@ class Tests(unittest.TestCase):
             self.assertIn("addnode=198.51.100.11:20001\n", config)
             self.assertNotIn("addnode=198.51.100.10:20001", config)
 
+    def test_trusted_gateway_certificates_use_watched_sds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = request()
+            q["target"]["peerAddress"] = "198.51.100.10"
+            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
+            context = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["transport_socket"]["typed_config"]["common_tls_context"]
+            self.assertIn("tls_certificates", context)
+            q["context"]["gatewayTls"] = {"issuer": "letsencrypt", "email": "ops@example.org", "images": {}}
+            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
+            context = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["transport_socket"]["typed_config"]["common_tls_context"]
+            self.assertNotIn("tls_certificates", context)
+            source = context["tls_certificate_sds_secret_configs"][0]["sds_config"]["path_config_source"]
+            self.assertEqual(source, {"path": "/tls/sds.json", "watched_directory": {"path": "/tls"}})
+            script = w.acme_script()
+            self.assertIn("ip=198.51.100.10\n", script)
+            self.assertIn("server=https://acme-v02.api.letsencrypt.org/directory\n", script)
+            self.assertIn("--profile shortlived", script)
+            self.assertNotIn("staging", script)
+            # Injection-shaped parameters are refused.
+            q["context"]["gatewayTls"]["email"] = "x@y.org; rm -rf /"
+            with self.assertRaises(worker.Failure):
+                worker.Worker(q, Path(tmp), Path(tmp) / "lock").acme_script()
+
     def test_only_labelled_auxiliary_containers_share_the_host(self):
         class Listing(worker.Worker):
             names = ""

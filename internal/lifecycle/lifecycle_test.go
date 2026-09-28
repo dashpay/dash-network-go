@@ -75,7 +75,14 @@ func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 }
 func setupAddresses(t *testing.T, public bool) (Plan, Runner, *memoryStore, *fakeRemote) {
 	t.Helper()
+	return setupOptions(t, public, "")
+}
+func setupOptions(t *testing.T, public bool, acmeIssuer string) (Plan, Runner, *memoryStore, *fakeRemote) {
+	t.Helper()
 	n := testutil.ProvisionNetwork(t)
+	if acmeIssuer != "" {
+		n.Images["acme"] = "docker.io/goacme/lego:v5.5.2"
+	}
 	n.Nodes[0].Count = 13
 	n.Nodes = append(n.Nodes, spec.NodeGroup{Name: "wallet", Role: "wallet", Count: 1, Architecture: n.Nodes[0].Architecture, InstanceType: n.Nodes[0].InstanceType})
 	c := &testutil.Cloud{Network: n}
@@ -111,7 +118,7 @@ func setupAddresses(t *testing.T, public bool) (Plan, Runner, *memoryStore, *fak
 			addresses[name] = aws.ToString(v.PublicIpAddress)
 		}
 	}
-	plan, err := BuildAdvertising(b, live, addresses, 14, time.Now())
+	plan, err := BuildWith(b, live, Options{Public: addresses, ACMEIssuer: acmeIssuer, ACMEEmail: "ops@example.org"}, 14, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,4 +583,57 @@ func TestPublicAdvertisingDeploysEndToEnd(t *testing.T) {
 	if a.Deployment.Phase != "network-ready" {
 		t.Fatal("public-address deployment incomplete", a.Deployment.Phase)
 	}
+}
+
+func TestTrustedGatewayCertificatesPinTheLockedACMEClient(t *testing.T) {
+	p, _, _, _ := setupOptions(t, true, "letsencrypt")
+	if p.GatewayTLS == nil || p.GatewayTLS.Issuer != "letsencrypt" || len(p.GatewayTLS.Images) != 1 {
+		t.Fatal("gateway TLS not pinned", p.GatewayTLS)
+	}
+	for _, image := range p.GatewayTLS.Images {
+		if !strings.HasPrefix(image, "index.docker.io/goacme/lego@sha256:") {
+			t.Fatal("ACME client not pinned by digest", image)
+		}
+	}
+	for _, x := range p.Targets {
+		for _, image := range x.Images {
+			if image.Component == "acme" {
+				t.Fatal("optional ACME client leaked into the upgradable target image set")
+			}
+		}
+	}
+	if q := p.Request(p.Targets[0], "inspect"); q.Context.GatewayTLS == nil {
+		t.Fatal("worker context lacks gateway TLS")
+	}
+	for _, change := range []func(*Plan){
+		func(x *Plan) { x.Advertise = ""; x.Targets = privateTargets(x.Targets) },
+		func(x *Plan) { tls := *x.GatewayTLS; tls.Email = "nobody"; x.GatewayTLS = &tls },
+		func(x *Plan) {
+			tls := *x.GatewayTLS
+			tls.Images = map[string]string{"arm64": "index.docker.io/goacme/lego@sha256:" + strings.Repeat("0", 64)}
+			x.GatewayTLS = &tls
+		},
+	} {
+		q := p
+		q.Targets = append([]node.Target(nil), p.Targets...)
+		change(&q)
+		q.ID = ""
+		q.ID = hash(q)
+		if q.Validate() == nil {
+			t.Fatal("invalid gateway TLS plan accepted")
+		}
+	}
+	// No acme image in the network: trusted certificates cannot be planned.
+	plain, _, _, _ := setupAddresses(t, true)
+	if _, err := gatewayTLS(plain.Bootstrap, "letsencrypt", "ops@example.org"); err == nil || !strings.Contains(err.Error(), "acme image") {
+		t.Fatal("trusted certificates planned without an ACME client", err)
+	}
+}
+
+func privateTargets(in []node.Target) []node.Target {
+	out := append([]node.Target(nil), in...)
+	for i := range out {
+		out[i].PeerAddress, out[i].PrivateAddress = out[i].PrivateAddress, ""
+	}
+	return out
 }

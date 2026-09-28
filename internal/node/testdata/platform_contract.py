@@ -64,7 +64,7 @@ def main():
                 "-subj",
                 "/CN=localhost",
                 "-addext",
-                "subjectAltName=IP:127.0.0.1",
+                "subjectAltName=IP:127.0.0.1,IP:" + q["target"]["peerAddress"],
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -188,6 +188,7 @@ def main():
                 "Real TLS/HTTP2/gRPC getStatus succeeds; absent consensus is correctly unhealthy.",
                 flush=True,
             )
+            sds_rotation(w, root, q)
         finally:
             for name in ["drive", "tenderdash", "dapi", "gateway"]:
                 subprocess.run(
@@ -196,6 +197,62 @@ def main():
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
+
+
+def served_fingerprint(w):
+    pem = subprocess.run(
+        ["openssl", "s_client", "-connect", "127.0.0.1:" + str(w.ports["gateway"]), "-showcerts"],
+        input=b"", capture_output=True, timeout=20,
+    ).stdout
+    cert = subprocess.run(["openssl", "x509", "-noout", "-fingerprint", "-sha256"], input=pem, capture_output=True, timeout=20).stdout
+    return cert.strip()
+
+
+def file_fingerprint(path):
+    return subprocess.run(["openssl", "x509", "-noout", "-fingerprint", "-sha256", "-in", str(path)], capture_output=True, check=True).stdout.strip()
+
+
+def sds_rotation(w, root, q):
+    """Trusted-certificate mode: Envoy loads the pair through a watched SDS file
+    and hot-reloads a rotated certificate without a restart."""
+    w.c["gatewayTls"] = {"issuer": "letsencrypt-staging", "email": "ci@example.org", "images": {}}
+    w.platform_files()
+    config = json.loads((root / "platform/envoy.json").read_text())
+    assert "tls_certificate_sds_secret_configs" in json.dumps(config), "SDS certificate config"
+    w.run(["docker", "run", "--rm", "--user", "0:0", "--network", "none", "--entrypoint", "envoy",
+           "-v", str(root / "platform/envoy.json") + ":/etc/envoy/config.json:ro",
+           "-v", str(root / "platform/tls") + ":/tls:ro",
+           w.images["gateway"], "-c", "/etc/envoy/config.json", "--mode", "validate"])
+    w.docker("restart", w.container_name("gateway"))
+    deadline = time.monotonic() + 45
+    while True:
+        try:
+            w.dapi_status()
+            break
+        except Exception:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(1)
+    assert served_fingerprint(w) == file_fingerprint(root / "platform/tls/cert.pem"), "SDS serves the self-signed pair first"
+    # Rotate exactly as the ACME client does: new directory, then swap sds.json.
+    rotated = root / "platform/tls/acme-ci"
+    rotated.mkdir(mode=0o700)
+    subprocess.run(["openssl", "req", "-new", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+                    "-keyout", str(rotated / "key.pem"), "-out", str(rotated / "cert.pem"), "-days", "1",
+                    "-subj", "/CN=rotated", "-addext", "subjectAltName=IP:" + q["target"]["peerAddress"]],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tmp = root / "platform/tls/.sds.json"
+    tmp.write_text(json.dumps(w.sds("/tls/acme-ci/cert.pem", "/tls/acme-ci/key.pem")))
+    os.replace(tmp, root / "platform/tls/sds.json")
+    want = file_fingerprint(rotated / "cert.pem")
+    deadline = time.monotonic() + 30
+    while served_fingerprint(w) != want:
+        assert time.monotonic() < deadline, "Envoy did not hot-reload the rotated certificate"
+        time.sleep(1)
+    # A later platform start keeps the installed certificate.
+    w.platform_files()
+    assert "acme-ci" in (root / "platform/tls/sds.json").read_text(), "installed certificate kept"
+    print("Watched SDS certificate: served, hot-reloaded after rotation, and kept across restarts.", flush=True)
 
 
 if __name__ == "__main__":

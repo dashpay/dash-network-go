@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/spec"
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 const Profile = "devnet-core23-platform4-tenderdash1"
@@ -43,8 +45,22 @@ type Plan struct {
 	// the IPAM Elastic IP of each host, as long-running devnets do; clients
 	// outside the VPC can then use the masternode list. Empty: private VPC
 	// addresses (older plans, or networks without IPAM addresses).
-	Advertise string        `json:"advertise,omitempty"`
-	Targets   []node.Target `json:"targets"`
+	Advertise string `json:"advertise,omitempty"`
+	// GatewayTLS: validators obtain and renew publicly trusted certificates
+	// for their public IPs (ACME HTTP-01 on port 80), as long-running devnets'
+	// gateways do. Omitted: persisted self-signed certificates.
+	GatewayTLS *node.GatewayTLS `json:"gatewayTls,omitempty"`
+	Targets    []node.Target    `json:"targets"`
+}
+
+// Options select the address mode and gateway certificates of a new plan.
+type Options struct {
+	// Public maps every target to its journaled IPAM Elastic IP; nil keeps
+	// private VPC addresses.
+	Public map[string]string
+	// ACMEIssuer and ACMEEmail request trusted gateway certificates from the
+	// release lock's acme image; requires public addresses.
+	ACMEIssuer, ACMEEmail string
 }
 
 // DefaultPremineHeight matches the legacy devnet tooling.
@@ -64,6 +80,11 @@ func Build(b bootstrap.Plan, live map[string]types.Instance, protocol uint32, no
 // BuildAdvertising binds public service addresses when public maps every
 // target to its journaled IPAM Elastic IP; nil keeps private addresses.
 func BuildAdvertising(b bootstrap.Plan, live map[string]types.Instance, public map[string]string, protocol uint32, now time.Time) (Plan, error) {
+	return BuildWith(b, live, Options{Public: public}, protocol, now)
+}
+
+func BuildWith(b bootstrap.Plan, live map[string]types.Instance, o Options, protocol uint32, now time.Time) (Plan, error) {
+	public := o.Public
 	if err := b.Validate(); err != nil {
 		return Plan{}, err
 	}
@@ -72,6 +93,13 @@ func BuildAdvertising(b bootstrap.Plan, live map[string]types.Instance, public m
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
 	if public != nil {
 		p.Advertise = "public"
+	}
+	if o.ACMEIssuer != "" {
+		tls, err := gatewayTLS(b, o.ACMEIssuer, o.ACMEEmail)
+		if err != nil {
+			return Plan{}, err
+		}
+		p.GatewayTLS = tls
 	}
 	for i, t := range b.Compute.Targets {
 		instance, ok := live[t.Name]
@@ -122,6 +150,18 @@ func (p Plan) Validate() error {
 	if p.Advertise != "" && p.Advertise != "public" {
 		return errors.New("advertise must be public or omitted (private)")
 	}
+	if p.GatewayTLS != nil {
+		if p.Advertise != "public" {
+			return errors.New("trusted gateway certificates require public service addresses")
+		}
+		expected, err := gatewayTLS(p.Bootstrap, p.GatewayTLS.Issuer, p.GatewayTLS.Email)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(expected, p.GatewayTLS) {
+			return errors.New("gateway TLS ACME client images differ from the release lock")
+		}
+	}
 	counts := map[string]int{}
 	ids := map[string]bool{}
 	ips := map[string]bool{}
@@ -155,6 +195,35 @@ func (p Plan) Validate() error {
 		return errors.New("full devnet profile requires 13..25 validators, exactly one wallet, and at most one separate miner")
 	}
 	return nil
+}
+
+// gatewayTLS pins the release lock's acme image for every validator architecture.
+func gatewayTLS(b bootstrap.Plan, issuer, email string) (*node.GatewayTLS, error) {
+	tls := &node.GatewayTLS{Issuer: issuer, Email: email, Images: map[string]string{}}
+	var archs []string
+	for _, t := range b.Compute.Targets {
+		if t.Role == "validator" && !slices.Contains(archs, t.Architecture) {
+			archs = append(archs, t.Architecture)
+		}
+	}
+	for _, image := range b.Release.Images {
+		if image.Component != "acme" {
+			continue
+		}
+		repo, err := name.NewDigest(image.Pinned, name.StrictValidation)
+		if err != nil {
+			return nil, err
+		}
+		for _, platform := range image.Platforms {
+			if slices.Contains(archs, platform.Architecture) {
+				tls.Images[platform.Architecture] = repo.Context().Digest(platform.Digest).Name()
+			}
+		}
+	}
+	if len(tls.Images) == 0 {
+		return nil, errors.New("trusted gateway certificates need an acme image (for example goacme/lego) in the network images")
+	}
+	return tls, tls.Validate(archs)
 }
 
 // advertised checks that a target's addresses match the plan's address mode.

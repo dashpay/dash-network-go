@@ -49,7 +49,7 @@ func Resolve(ctx context.Context, n spec.Network, inspector Inspector, now time.
 	}
 	lock := Lock{APIVersion: spec.Version, Kind: "ReleaseLock", Network: n.Metadata.Name,
 		Generation: n.Chain.Generation, SpecHash: n.Fingerprint(), ResolvedAt: now.UTC(), Evidence: Evidence}
-	for _, component := range spec.Components {
+	for _, component := range n.ImageComponents() {
 		image, err := inspector.Inspect(ctx, n.Images[component], n.Architectures())
 		if err != nil {
 			return Lock{}, fmt.Errorf("resolve %s: %w", component, err)

@@ -83,6 +83,22 @@ var instanceType = regexp.MustCompile(`^[a-z][a-z0-9-]*\.[a-z0-9]+$`)
 
 var Components = []string{"core", "dapi", "drive", "gateway", "helper", "tenderdash"}
 
+// OptionalComponents may be added to images: acme is the ACME client (lego)
+// that obtains publicly trusted gateway certificates for validators' public IPs.
+var OptionalComponents = []string{"acme"}
+
+// ImageComponents lists the required components plus the optional ones this
+// network defines, in resolution order.
+func (n Network) ImageComponents() []string {
+	out := append([]string(nil), Components...)
+	for _, c := range OptionalComponents {
+		if _, ok := n.Images[c]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Load rejects unknown fields and additional YAML documents: misspelled intent
 // must not silently fall back to a different deployment.
 func Load(path string) (Network, error) {
@@ -180,10 +196,10 @@ func (n Network) Validate() error {
 			return err
 		}
 	}
-	if len(n.Images) != len(Components) {
-		return fmt.Errorf("images must define exactly these components: %s", strings.Join(Components, ", "))
+	if len(n.Images) != len(n.ImageComponents()) {
+		return fmt.Errorf("images must define exactly these components: %s (optionally %s)", strings.Join(Components, ", "), strings.Join(OptionalComponents, ", "))
 	}
-	for _, component := range Components {
+	for _, component := range n.ImageComponents() {
 		ref := n.Images[component]
 		last := ref[strings.LastIndex(ref, "/")+1:]
 		if !strings.Contains(last, ":") || strings.ContainsAny(ref, " \n\r\t") {

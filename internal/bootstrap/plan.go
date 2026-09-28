@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 
 	"github.com/dashpay/dash-network-go/internal/provision"
@@ -65,7 +66,9 @@ func Build(compute provision.Plan, lock release.Lock, access Access) (Plan, erro
 	for _, node := range compute.Targets {
 		t := Target{Name: node.Name, Architecture: node.Architecture}
 		for _, image := range lock.Images {
-			needed := image.Component == "core" || node.Role == "validator" || (node.Role == "seed" && image.Component == "tenderdash")
+			// Optional components (the ACME client) are pinned by the deployment
+			// plan instead; target image sets stay the six upgradable components.
+			needed := !slices.Contains(spec.OptionalComponents, image.Component) && (image.Component == "core" || node.Role == "validator" || (node.Role == "seed" && image.Component == "tenderdash"))
 			if !needed {
 				continue
 			}

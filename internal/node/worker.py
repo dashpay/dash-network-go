@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -18,6 +19,12 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+
+
+ACME_ISSUERS = {
+    "letsencrypt": "https://acme-v02.api.letsencrypt.org/directory",
+    "letsencrypt-staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
+}
 
 
 def protobuf(raw):
@@ -264,7 +271,7 @@ class Worker:
         ]:
             self.require(not (self.root / name).is_symlink(), "symlink-refused")
         self.check_containers()
-        for service in ["core", "miner", "drive", "tenderdash", "dapi", "gateway"]:
+        for service in ["core", "miner", "drive", "tenderdash", "dapi", "gateway", "acme"]:
             if self.inspect_container(service):
                 pass
 
@@ -279,7 +286,7 @@ class Worker:
         # never occupy dashnet's own container namespace.
         own = {
             self.container_name(x)
-            for x in ["core", "miner", "drive", "tenderdash", "dapi", "gateway"]
+            for x in ["core", "miner", "drive", "tenderdash", "dapi", "gateway", "acme"]
         }
         listing = self.docker(
             "container",
@@ -886,7 +893,75 @@ class Worker:
             )
         self.atomic("platform/tls/cert.pem", secret["tlsCertificate"])
         self.atomic("platform/tls/key.pem", secret["tlsPrivateKey"])
+        if self.c.get("gatewayTls"):
+            # Envoy loads the certificate through a watched SDS file. It starts on
+            # the persisted self-signed pair; the ACME client swaps in trusted
+            # certificates. A certificate it already installed is kept.
+            current = self.read("platform/tls/sds.json")
+            chain = (((current or {}).get("resources") or [{}])[0].get("tls_certificate") or {}).get("certificate_chain", {}).get("filename", "")
+            if not chain.startswith("/tls/") or not (self.root / "platform" / chain[1:]).is_file():
+                self.atomic("platform/tls/sds.json", self.sds("/tls/cert.pem", "/tls/key.pem"))
         self.atomic("platform/envoy.json", self.envoy())
+
+    @staticmethod
+    def sds(chain, key):
+        return {"resources": [{
+            "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret",
+            "name": "gateway",
+            "tls_certificate": {"certificate_chain": {"filename": chain}, "private_key": {"filename": key}},
+        }]}
+
+    def acme_script(self):
+        tls = self.c["gatewayTls"]
+        ip, server, email = self.t["peerAddress"], ACME_ISSUERS[tls["issuer"]], tls["email"]
+        self.require(re.fullmatch(r"[0-9.]{7,15}", ip) and re.fullmatch(r"[A-Za-z0-9._%+@-]{3,300}", email), "acme-parameters")
+        template = json.dumps(self.sds("/tls/DIR/cert.pem", "/tls/DIR/key.pem"), sort_keys=True)
+        head, middle, tail = template.split("DIR")
+        return "\n".join([
+            "#!/bin/sh",
+            "# Obtains and renews a publicly trusted certificate for this validator's",
+            "# public IP (ACME HTTP-01 on port 80) and hands it to Envoy through SDS.",
+            "set -u",
+            "ip=" + ip, "server=" + server, "email=" + email,
+            "path=/acme/lego; tls=/tls",
+            "install() {",
+            '  crt="$path/certificates/$ip.crt"; key="$path/certificates/$ip.key"',
+            '  [ -s "$crt" ] && [ -s "$key" ] || return 1',
+            '  dir="acme-$(cat "$crt" "$key" | sha256sum | cut -c1-16)"',
+            '  grep -q "/tls/$dir/" "$tls/sds.json" 2>/dev/null && return 0',
+            '  if [ ! -d "$tls/$dir" ]; then',
+            '    rm -rf "$tls/.$dir" && mkdir -m 700 "$tls/.$dir" && cp "$crt" "$tls/.$dir/cert.pem" && cp "$key" "$tls/.$dir/key.pem" \\',
+            '      && chmod 600 "$tls/.$dir/cert.pem" "$tls/.$dir/key.pem" && mv "$tls/.$dir" "$tls/$dir" || return 1',
+            '  fi',
+            "  printf '%s' '" + head + "'\"$dir\"'" + middle + "'\"$dir\"'" + tail + "' > \"$tls/.sds.json\" && mv \"$tls/.sds.json\" \"$tls/sds.json\" || return 1",
+            '  for old in "$tls"/acme-*; do [ "$old" = "$tls/$dir" ] || rm -rf "$old"; done',
+            '  echo "installed $dir"',
+            "}",
+            "while :; do",
+            '  if /lego run --server "$server" --accept-tos --email "$email" --path "$path" --domains "$ip" \\',
+            '      --http --http.address :80 --profile shortlived --key-type EC256 --renew-days 3 && install; then',
+            "    sleep 21600",
+            "  else",
+            "    sleep 900",
+            "  fi",
+            "done",
+            "",
+        ])
+
+    def acme_start(self):
+        tls = self.c["gatewayTls"]
+        image = tls["images"][self.t["architecture"]]
+        self.docker("pull", "--platform", "linux/" + self.t["architecture"], image, timeout=600)
+        self.atomic("acme/renew.sh", self.acme_script())
+        (self.root / "acme/lego").mkdir(parents=True, exist_ok=True, mode=0o700)
+        service = self.service("acme", image)
+        service.update(
+            entrypoint=["/bin/sh", "/acme/renew.sh"],
+            volumes=[str(self.root / "acme") + ":/acme", str(self.root / "platform/tls") + ":/tls"],
+            stop_grace_period="10s",
+        )
+        self.compose("acme", {"acme": service})
+        self.verify_image(self.inspect_container("acme"), image)
 
     def envoy(self):
         def address(port):
@@ -986,6 +1061,18 @@ class Worker:
                 },
             },
         }
+        if self.c.get("gatewayTls"):
+            # Trusted certificates rotate every few days: load them through a
+            # file-based SDS secret that Envoy re-reads when files move in /tls.
+            context = tls["typed_config"]["common_tls_context"]
+            del context["tls_certificates"]
+            context["tls_certificate_sds_secret_configs"] = [{
+                "name": "gateway",
+                "sds_config": {
+                    "path_config_source": {"path": "/tls/sds.json", "watched_directory": {"path": "/tls"}},
+                    "resource_api_version": "V3",
+                },
+            }]
         return dict(
             static_resources=dict(
                 listeners=[
@@ -1101,6 +1188,8 @@ class Worker:
     def platform_start(self):
         self.platform_files()
         self.compose("platform", self.platform_services())
+        if self.c.get("gatewayTls"):
+            self.acme_start()
         return {}
 
     def tenderdash(self, method):
@@ -1129,9 +1218,18 @@ class Worker:
 
     def dapi_status(self):
         # Exercise the real TLS -> HTTP/2 -> gRPC -> DAPI -> Drive/TD path.
-        # Trust only the persisted per-node certificate, not --insecure.
+        # Trust only the persisted per-node certificate, not --insecure. With
+        # trusted gateway certificates, also accept the system CAs for this
+        # node's public IP, which is what clients see.
+        port = str(self.ports["gateway"])
         with tempfile.TemporaryDirectory(dir=self.root) as tmp:
             headers = Path(tmp) / "headers"
+            trust, url, route = str(self.root / "platform/tls/cert.pem"), "https://127.0.0.1:" + port, []
+            if self.c.get("gatewayTls"):
+                bundle = Path(tmp) / "trust.pem"
+                bundle.write_text((self.root / "platform/tls/cert.pem").read_text() + "\n" + Path("/etc/ssl/certs/ca-certificates.crt").read_text())
+                peer = self.t["peerAddress"]
+                trust, url, route = str(bundle), "https://" + peer + ":" + port, ["--connect-to", peer + ":" + port + ":127.0.0.1:" + port]
             raw = self.run(
                 [
                     "/usr/bin/curl",
@@ -1144,7 +1242,8 @@ class Worker:
                     "--max-time",
                     "20",
                     "--cacert",
-                    str(self.root / "platform/tls/cert.pem"),
+                    trust,
+                    *route,
                     "--dump-header",
                     str(headers),
                     "-H",
@@ -1153,9 +1252,7 @@ class Worker:
                     "te: trailers",
                     "--data-binary",
                     "@-",
-                    "https://127.0.0.1:"
-                    + str(self.ports["gateway"])
-                    + "/org.dash.platform.dapi.v0.Platform/getStatus",
+                    url + "/org.dash.platform.dapi.v0.Platform/getStatus",
                 ],
                 stdin=b"\x00\x00\x00\x00\x02\x0a\x00",
                 timeout=25,
