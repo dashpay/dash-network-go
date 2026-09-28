@@ -24,7 +24,10 @@ actual=$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 5 -H "X-aws-ec2-
 unset token
 stage=cloud-init
 if command -v cloud-init >/dev/null; then
-    cloud-init status --format json | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "done"'
+    # Exit 2 means done with recoverable warnings (e.g. IMDS not yet reachable
+    # during first boot); only an unfinished boot or real errors block bootstrap.
+    cloud_init=$(cloud-init status --format json || true)
+    printf '%s' "$cloud_init" | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["status"] == "done" and not s.get("errors")'
 fi
 stage=host-lock
 lock=/run/dashnet-bootstrap.lock

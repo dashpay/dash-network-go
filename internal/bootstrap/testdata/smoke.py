@@ -24,7 +24,11 @@ def save(): p.write_text(json.dumps(s))
 def fail(): sys.exit(1)
 if tool=='curl':
     print('fixture-token' if args[-1].endswith('/api/token') else s['instance'])
-elif tool=='cloud-init': print(json.dumps(dict(status=s['cloud'])))
+elif tool=='cloud-init':
+    c=s['cloud']
+    if c=='done-recoverable': print(json.dumps(dict(status='done',errors=[],recoverable_errors=dict(WARNING=['imds not yet reachable'])))); sys.exit(2)
+    if c=='done-error': print(json.dumps(dict(status='done',errors=['module failed']))); sys.exit(1)
+    print(json.dumps(dict(status=c)))
 elif tool=='apt-get':
     if 'install' in args: s['installed']=True; s['installs']+=1; save()
 elif tool=='systemctl': s['daemon']=True; save()
@@ -79,6 +83,12 @@ assert not Path('/var/lib/dashnet').exists()
 update(instance='i-00000001', cloud='running')
 run('apply', 'cloud-init')
 assert not Path('/var/lib/dashnet').exists()
+update(cloud='done-error')
+run('apply', 'cloud-init')
+assert not Path('/var/lib/dashnet').exists()
+# Exit 2 with only recoverable warnings is a finished boot.
+update(cloud='done-recoverable')
+assert not run('probe')['ready']
 update(cloud='done')
 assert not run('probe')['ready']
 assert not Path('/var/lib/dashnet').exists()
