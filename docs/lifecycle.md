@@ -128,6 +128,13 @@ Services use host networking with explicit port bindings:
 | DAPI gRPC / JSON | loopback, 3010 / 3009 |
 | Envoy TLS gateway | all interfaces, 1443 |
 
+Every preflight rejects containers dashnet did not create, including stopped
+ones, and never adopts a container by name. The one exception is an operator
+service that deliberately shares a host (a devnet's quorum list server, explorer
+or faucet): a container labelled `dashnet.auxiliary=<network>/<node>` for that
+exact network and node is ignored, provided its name is outside dashnet's
+`dashnet-<compute>-<node>-` namespace. Such services must not bind the ports above.
+
 Existing SGs must permit fleet Core/Tenderdash P2P and operator SSH. Peer discovery
 uses private VPC IPs with Core's devnet private-address setting. The tool does not
 open SGs, create DNS/load balancers, or provision public CA certificates. TLS uses

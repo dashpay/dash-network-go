@@ -263,23 +263,41 @@ class Worker:
             "deployment.json",
         ]:
             self.require(not (self.root / name).is_symlink(), "symlink-refused")
-        # Reject unknown containers, including stopped ones. Never adopt by name.
-        for line in (
-            self.docker("container", "ls", "-a", "--format", "{{.Names}}")
-            .decode()
-            .splitlines()
-        ):
-            self.require(
-                line
-                in {
-                    self.container_name(x)
-                    for x in ["core", "miner", "drive", "tenderdash", "dapi", "gateway"]
-                },
-                "unexpected-container",
-            )
+        self.check_containers()
         for service in ["core", "miner", "drive", "tenderdash", "dapi", "gateway"]:
             if self.inspect_container(service):
                 pass
+
+    def auxiliary_label(self):
+        return self.c["network"] + "/" + self.t["name"]
+
+    def check_containers(self):
+        # Reject unknown containers, including stopped ones. Never adopt by name.
+        # Operator services that share the host (for example a devnet's quorum
+        # list server) are ignored only when explicitly labelled
+        # dashnet.auxiliary=<network>/<node> for this exact host, and they can
+        # never occupy dashnet's own container namespace.
+        own = {
+            self.container_name(x)
+            for x in ["core", "miner", "drive", "tenderdash", "dapi", "gateway"]
+        }
+        listing = self.docker(
+            "container",
+            "ls",
+            "-a",
+            "--format",
+            '{{.Names}}\t{{.Label "dashnet.auxiliary"}}',
+        ).decode()
+        for line in listing.splitlines():
+            name, _, auxiliary = line.partition("\t")
+            self.require(
+                name in own
+                or (
+                    auxiliary == self.auxiliary_label()
+                    and not name.startswith(self.project + "-")
+                ),
+                "unexpected-container",
+            )
 
     def secret(self):
         value = self.read("secrets.json")
