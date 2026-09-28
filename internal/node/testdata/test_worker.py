@@ -148,7 +148,7 @@ class Tests(unittest.TestCase):
 
     def test_read_only_adapter_refuses_every_mutating_action(self):
         for action in ["core-start", "core-finalize", "wallet", "identity",
-                       "fund", "register", "activate", "mine-start", "mine-pause",
+                       "fund", "register", "activate", "fast-forward", "mine-start", "mine-pause",
                        "platform-start", "stop", "upgrade-stage", "upgrade-apply"]:
             q = request()
             q["action"] = action
@@ -213,6 +213,46 @@ class Tests(unittest.TestCase):
         del w.active["SPORK_19_CHAINLOCKS_ENABLED"]
         with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
             w.activate()
+
+    def test_fast_forward_mines_rotation_cycles_only_before_dkg(self):
+        class Chain(worker.Worker):
+            height, dkg, batches = 4050, False, []
+            registered = [4040, 4046, 4044]
+
+            def address(self, label):
+                return "y" + "1" * 33
+
+            def core_status(self):
+                return dict(height=self.height)
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "protx":
+                    assert params == ["list", "registered", True]
+                    return [dict(state=dict(registeredHeight=h)) for h in self.registered]
+                if method == "spork":
+                    return {"SPORK_17_QUORUM_DKG_ENABLED": self.dkg}
+                if method == "getblockcount":
+                    return self.height
+                assert method == "generatetoaddress" and params[1] == self.address("")
+                self.batches.append(params[0])
+                self.height += params[0]
+                return []
+
+        q = request()
+        q["target"].update(role="wallet", name="wallet-1")
+        q["context"]["premineHeight"] = 4032
+        w = Chain(q)
+        # Last registration 4046: its quarters are picked at 4080, 4128 and 4176
+        # (each 8 blocks after it), so the full quorum forms at 4224.
+        self.assertEqual(w.fast_forward()["height"], 4218)
+        self.assertTrue(all(0 < b <= 250 for b in w.batches))
+        self.assertEqual(w.fast_forward()["height"], 4218, "a resume mines nothing more")
+        w.height, w.batches, w.dkg = 4100, [], True
+        self.assertEqual(w.fast_forward()["height"], 4100)
+        self.assertEqual(w.batches, [], "never fast-forward once DKG runs")
+        w.dkg, w.registered = False, [6000]
+        with self.assertRaisesRegex(worker.Failure, "fast-forward-height"):
+            w.fast_forward()
 
     def test_fund_premines_in_batches_before_registration(self):
         class Chain(worker.Worker):

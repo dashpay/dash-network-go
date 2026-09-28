@@ -736,6 +736,32 @@ class Worker:
         self.require(all(observed.get(key) is True for key in required), "spork-not-active")
         return {}
 
+    def fast_forward(self):
+        """Mine the cycles a rotated quorum waits for at minimum difficulty.
+
+        A DIP-0024 quorum is assembled from quarters picked at the three previous
+        cycle bases, each from the masternode list 8 blocks earlier, so the first
+        full llmq_devnet_dip0024 (48-block cycle) forms three cycles after the
+        EvoNodes registered. Block processing records those picks whether or not
+        DKG runs. Before activation SPORK_17 is off: no DKG session exists and no
+        member can be PoSe-punished, so those cycles need not take ten seconds
+        per block. Stop 6 blocks short of the forming cycle, which DKG then runs
+        at the normal pace (with every quorum type). Idempotent: the target
+        follows from registration heights, and nothing is mined once DKG is on."""
+        self.require(self.t["role"] == "wallet", "wallet-only")
+        cycle, depth, quarters, lead = 48, 8, 3, 6
+        registered = max(m["state"]["registeredHeight"] for m in self.rpc("protx", ["list", "registered", True]))
+        forming = -(-(registered + depth + quarters * cycle) // cycle) * cycle
+        target = forming - lead
+        premine = int(self.c.get("premineHeight", 0))
+        self.require(0 < target <= premine + 1000, "fast-forward-height")
+        if self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is False:
+            address = self.address("dashnet:payout")
+            while (height := self.rpc("getblockcount")) < target:
+                self.stage = "fast-forward"
+                self.rpc("generatetoaddress", [min(250, target - height), address, 100000000])
+        return self.core_status()
+
     def mine_pause(self):
         self.require(self.t["role"] in ["miner", "wallet"], "miner-only")
         value = self.inspect_container("miner")
@@ -1330,6 +1356,7 @@ class Worker:
                 "fund",
                 "register",
                 "activate",
+                "fast-forward",
                 "mine-start",
                 "mine-pause",
                 "platform-start",
@@ -1370,6 +1397,8 @@ class Worker:
                 result.update(self.register())
             elif action == "activate":
                 result.update(self.activate())
+            elif action == "fast-forward":
+                result["core"] = self.fast_forward()
             elif action == "mine-start":
                 result.update(self.mine_start())
             elif action == "mine-pause":

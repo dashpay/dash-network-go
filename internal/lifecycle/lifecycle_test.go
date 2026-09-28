@@ -49,7 +49,7 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 	}
 	height := int64(500 + f.counts[q.Target.Name])
 	switch q.Action {
-	case "core-start", "core-finalize", "core-status":
+	case "core-start", "core-finalize", "core-status", "fast-forward":
 		o.Core = &node.Core{Mining: &node.Mining{Running: true, ContainerID: digest("miner")}, Genesis: digest("genesis"), Synced: true, Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
 	case "wallet":
 		o.PayoutAddress = "y" + strings.Repeat("1", 33)
@@ -142,6 +142,19 @@ func TestCompleteLifecycleResumeDoctorAndStop(t *testing.T) {
 	}
 	if a.Deployment.Phase != "network-ready" || len(a.Deployment.Nodes) != 14 || s.owner != "" {
 		t.Fatal("incomplete readiness")
+	}
+	// Rotation cycles are mined only after every registration and before DKG is enabled.
+	last := func(action string) int {
+		at := -1
+		for i, q := range f.calls {
+			if q.Action == action {
+				at = i
+			}
+		}
+		return at
+	}
+	if ff := last("fast-forward"); ff < 0 || ff < last("register") || ff > last("activate") || f.calls[ff].Target.Role != "wallet" {
+		t.Fatal("fast-forward out of order")
 	}
 	height := a.Deployment.GenesisCoreHeight
 	b, err := execute(t, p, r)
