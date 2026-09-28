@@ -87,3 +87,18 @@ Failure/replay and cleanup are tested using fake EC2 plus real journal CI. Pool
 and existing status-host address discovery were verified read-only against AWS.
 No live EIP was allocated, moved or released to test this change; that proof must
 use an explicitly authorized disposable footprint.
+
+## Rejected and stale allocation intents
+
+`AllocateAddress` has no client token, so an intent is journaled before the call
+and an ambiguous failure (timeout, transport error, lost reply) is never retried
+immediately. Two cases are resolved without manual journal repair:
+
+- **Rejected before execution.** AWS error codes such as `UnauthorizedOperation`,
+  `AuthFailure`, `InvalidParameter*`, `MissingParameter`, `AddressLimitExceeded`
+  or an invalid pool mean nothing was allocated. The intent is cleared, and the
+  same plan resumes once the cause (for example missing IAM) is fixed.
+- **Stale intent.** Addresses are tagged atomically at creation. If no address
+  tagged for the node is visible `StaleAllocationAfter` (15 minutes) after the
+  attempt, it was not allocated and the next run allocates once. A visible tagged
+  address is always reconciled instead, so a lost reply never duplicates.

@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	"github.com/dashpay/dash-network-go/internal/spec"
 )
 
@@ -28,6 +30,25 @@ type AddressProgress struct {
 	AllocationID  string    `json:"allocationId,omitempty"`
 	PublicIP      string    `json:"publicIp,omitempty"`
 	AssociationID string    `json:"associationId,omitempty"`
+}
+
+// StaleAllocationAfter bounds how long an allocation intent without a visible
+// tagged address is treated as possibly in flight.
+var StaleAllocationAfter = 15 * time.Minute
+
+// rejected reports API errors that AWS returns before performing the request,
+// so a non-idempotent call is known not to have taken effect.
+func rejected(err error) bool {
+	var api smithy.APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	code := api.ErrorCode()
+	switch code {
+	case "UnauthorizedOperation", "AuthFailure", "MissingParameter", "AddressLimitExceeded", "InvalidParameterValue", "InvalidParameterCombination", "InvalidParameter", "DryRunOperation":
+		return true
+	}
+	return strings.HasPrefix(code, "InvalidIpamPool") || strings.HasPrefix(code, "InvalidPublicIpv4Pool")
 }
 
 func validIPv4(ip string) bool {
@@ -188,8 +209,14 @@ func ensureAddresses(ctx context.Context, p Plan, c IPAM, r *Record, live map[st
 		if !found {
 			// AllocateAddress has no client token. Neither the runner nor the AWS SDK
 			// may blindly repeat it after a timeout, throttling or lost response.
+			// Addresses are tagged atomically at creation, so an intent whose tagged
+			// address is still invisible long after the attempt never allocated.
 			if n.Address != nil {
-				return fmt.Errorf("IPAM allocation outcome unknown for %s; reconcile later, no automatic reallocation", t.Name)
+				if n.Address.Phase != "allocating" || time.Since(n.Address.AttemptedAt) < StaleAllocationAfter {
+					return fmt.Errorf("IPAM allocation outcome unknown for %s; reconcile later, no automatic reallocation", t.Name)
+				}
+				report(fmt.Sprintf("no tagged address for %s %s after the allocation attempt; it was not allocated", t.Name, time.Since(n.Address.AttemptedAt).Round(time.Second)))
+				n.Address = nil
 			}
 			n.Address = &AddressProgress{Phase: "allocating", AttemptedAt: time.Now().UTC()}
 			r.Nodes[t.Name] = n
@@ -204,6 +231,15 @@ func ensureAddresses(ctx context.Context, p Plan, c IPAM, r *Record, live map[st
 			report("allocating IPAM address for " + t.Name)
 			out, err := c.AllocateAddress(ctx, &ec2.AllocateAddressInput{Domain: types.DomainTypeVpc, IpamPoolId: aws.String(p.Network.AWS.Provision.IPAMPoolID), NetworkBorderGroup: aws.String(p.Network.AWS.Region), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeElasticIp, Tags: tags}}}, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
 			if err != nil {
+				if rejected(err) {
+					// AWS refused the request before acting on it: nothing was allocated.
+					n.Address = nil
+					r.Nodes[t.Name] = n
+					if e := save(); e != nil {
+						return errors.Join(err, e)
+					}
+					return fmt.Errorf("allocate IPAM address for %s rejected, nothing allocated; fix and resume: %w", t.Name, err)
+				}
 				return fmt.Errorf("allocate IPAM address for %s (outcome may be uncertain): %w", t.Name, err)
 			}
 			if out == nil || aws.ToString(out.AllocationId) == "" || !validIPv4(aws.ToString(out.PublicIp)) {

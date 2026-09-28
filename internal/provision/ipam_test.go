@@ -418,3 +418,39 @@ func TestIPAMReleaseCannotInferAbsenceFromTagsOrReadFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestIPAMRejectedAllocationClearsIntentAndResumes(t *testing.T) {
+	p, c, s := ipamSetup(t)
+	c.allocateBefore = func() error { return &smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "not authorized"} }
+	if _, err := ipamRun(p, c, s); err == nil || !strings.Contains(err.Error(), "nothing allocated") {
+		t.Fatal("rejection not reported", err)
+	}
+	c.allocateBefore = nil
+	if _, err := ipamRun(p, c, s); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.addresses) != len(p.Targets) {
+		t.Fatal("rejected allocation was not retried exactly once", len(c.addresses))
+	}
+}
+
+func TestIPAMStaleUnknownAllocationIsRetriedOnlyWhenNoTaggedAddressExists(t *testing.T) {
+	old := StaleAllocationAfter
+	defer func() { StaleAllocationAfter = old }()
+	p, c, s := ipamSetup(t)
+	c.allocateBefore = func() error { return errors.New("transport failure") }
+	if _, err := ipamRun(p, c, s); err == nil {
+		t.Fatal("missing error")
+	}
+	c.allocateBefore = nil
+	if _, err := ipamRun(p, c, s); err == nil || !strings.Contains(err.Error(), "no automatic reallocation") {
+		t.Fatal("fresh uncertain allocation repeated", err)
+	}
+	StaleAllocationAfter = 0
+	if _, err := ipamRun(p, c, s); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.addresses) != len(p.Targets) {
+		t.Fatal("stale intent not reconciled to exactly one address per target", len(c.addresses))
+	}
+}
