@@ -68,7 +68,7 @@ class UpgradeWorker(Worker):
 
     def running(self, name, pin):
         value = self.inspect_container(name)
-        if not value:
+        if not value or not value["State"]["Running"]:
             return False
         try:
             self.verify_image(value, pin)
@@ -83,11 +83,27 @@ class UpgradeWorker(Worker):
                 status = self.core_observe(pin)
                 if not synced or (status["synced"] and not status["ibd"] and status["height"] >= status["headers"]):
                     return status
-            except (RPCFailure, urllib.error.URLError, ConnectionError, Failure):
+            except Failure as error:
+                if str(error) in ["wrong-chain", "upgrade-image-proof"]:
+                    raise
+            except (RPCFailure, urllib.error.URLError, ConnectionError, OSError):
                 pass
             if time.monotonic() >= deadline:
                 raise Failure("core-upgrade-not-ready")
             time.sleep(3)
+
+    def wait_dkg_quiet(self, pin):
+        """Restart a validator's Core only in the quiet part of the 24-block DKG
+        cycle (after the mining window, before the next session), so the node
+        is back before its quorums' next contribution phase (PoSe)."""
+        deadline = time.monotonic() + 600
+        while True:
+            height = self.core_observe(pin)["height"]
+            if 13 <= height % 24 <= 16:
+                return height
+            if time.monotonic() >= deadline:
+                raise Failure("core-upgrade-no-quiet-dkg-window")
+            time.sleep(2)
 
     def wait_drive(self):
         # Tenderdash exits on a missing ABCI listener: start it after Drive's.
@@ -126,9 +142,10 @@ class UpgradeWorker(Worker):
                 self.require(marker["from"] == before and marker["to"] == after and marker.get("scope") == "core"
                              and marker.get("phase") in ["applying", "applied"], "upgrade-marker-drift")
             else:
-                self.require((marker is None and not change.get("previousId"))
-                             or (marker and marker.get("id") == change.get("previousId") and marker.get("phase") == "applied"),
-                             "upgrade-previous-operation")
+                # Platform upgrades leave no marker on non-validators, so a node's
+                # last marker may be older than previousId; only an unfinished
+                # different operation blocks.
+                self.require(marker is None or marker.get("phase") == "applied", "upgrade-previous-operation")
             self.stage_image(after["core"])
             fresh = not same or marker.get("step") == "start"
             if fresh:
@@ -136,8 +153,9 @@ class UpgradeWorker(Worker):
                 self.require(core["containerId"] == expected["coreId"] and core["configSha256"] == expected["coreConfig"]
                              and core["genesis"] == expected["coreGenesis"], "upgrade-core-changed")
             if self.q["action"] == "upgrade-stage":
-                core = self.core_observe(after["core"] if self.running("core", after["core"]) else before["core"])
-                return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"], core=core)
+                # A node already in progress is reconciled by its apply.
+                return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"],
+                            **({"core": core} if fresh else {}))
             validator = self.t["role"] == "validator"
             miner = self.read("miner/compose.json")
             if not same:
@@ -156,6 +174,12 @@ class UpgradeWorker(Worker):
                 step("withdrawn")
             if marker["step"] == "withdrawn":
                 if not self.running("core", after["core"]):
+                    # Core itself stops only in the quiet part of the DKG cycle.
+                    if validator and self.running("core", before["core"]):
+                        self.wait_dkg_quiet(before["core"])
+                    # Stop Core (it may take up to its grace period) before the
+                    # recreate, so Compose never times out mid-replacement.
+                    self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
                     services = self.read("core/compose.json")["services"]
                     services["core"]["image"] = after["core"]
                     self.compose("core", services)

@@ -216,7 +216,7 @@ class CoreFixture(Upgrade):
             preserve.update(containers={k: self.containers[k]['Id'] for k in names}, restarts={k: 3 for k in names})
         q.update(action='upgrade-apply', upgrade=dict(id='f' * 64, previousId='', scope='core', **{'from': before}, to=after, preserve=preserve))
         super().__init__(q, root, root / 'lock')
-        self.commands, self.lose_after_replace = [], False
+        self.commands, self.lose_after_replace, self.heights = [], False, [13]
         self.atomic('deployment.json', dict(planId=self.c['planId']))
         self.atomic('core/compose.json', dict(name=self.project, services={'core': self.service('core', before['core'])}))
         if role == 'wallet':
@@ -241,8 +241,10 @@ class CoreFixture(Upgrade):
     def core_status(self):
         value = self.containers['core']
         self.verify_image(value, self.images['core'])
+        height = self.heights.pop(0) if len(self.heights) > 1 else self.heights[0]
+        self.commands.append(('height', height))
         return dict(containerId=value['Id'], startedAt='t', configSha256='b' * 64, genesis='c' * 64,
-                    synced=True, ibd=False, height=10, headers=10)
+                    synced=True, ibd=False, height=height, headers=height)
 
     def docker(self, *args, timeout=120):
         self.commands.append(args)
@@ -258,6 +260,7 @@ class CoreFixture(Upgrade):
             image = self.read(service + '/compose.json')['services'][service]['image']
             if self.containers[service]['Image'] != 'image-' + image:
                 self.containers[service] = dict(Id=hashlib.sha256(image.encode()).hexdigest(), Image='image-' + image, State=dict(Running=True), RestartCount=0)
+            self.containers[service]['State']['Running'] = True  # up -d also starts a stopped container
             if service == 'core' and self.lose_after_replace:
                 self.lose_after_replace = False
                 raise worker.Failure('lost-apply-response')
@@ -319,3 +322,48 @@ class CoreUpgradeTests(unittest.TestCase):
             w.q['upgrade']['to'] = dict(w.q['upgrade']['to'], drive=w.q['upgrade']['to']['drive'].replace('d' * 64, 'e' * 64))
             with self.assertRaisesRegex(worker.Failure, 'core-upgrade-scope'):
                 w.execute()
+
+
+class CoreUpgradeReviewTests(unittest.TestCase):
+    def test_validator_core_stops_only_in_the_quiet_dkg_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            w.heights = [13, 20, 23, 0, 5, 12, 14]
+            scope['time'].sleep = lambda s: None
+            w.execute()
+            stop = next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('core') in c)
+            last_height = max(i for i, c in enumerate(w.commands[:stop]) if c[0] == 'height')
+            self.assertIn(w.commands[last_height][1] % 24, range(13, 17), 'Core stopped outside the quiet window')
+            self.assertLess(next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('tenderdash') in c), stop, 'Platform withdrawn first')
+
+    def test_nodes_an_earlier_upgrade_did_not_touch_accept_an_older_or_missing_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp), 'wallet')
+            w.q['upgrade']['previousId'] = '9' * 64  # a Platform upgrade that skipped the wallet
+            w.execute()
+            self.assertEqual(w.read('upgrade.json')['phase'], 'applied')
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp), 'wallet')
+            w.q['upgrade']['previousId'] = '9' * 64
+            w.atomic('upgrade.json', dict(id='8' * 64, phase='applied'))
+            w.execute()
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp), 'wallet')
+            w.atomic('upgrade.json', dict(id='8' * 64, phase='applying'))
+            with self.assertRaisesRegex(worker.Failure, 'upgrade-previous-operation'):
+                w.execute()
+
+    def test_stage_on_an_in_progress_node_needs_no_running_core(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = CoreFixture(Path(tmp))
+            w.lose_after_replace = True
+            with self.assertRaises(worker.Failure):
+                w.execute()
+            w.containers['core']['State']['Running'] = False
+            w.q['action'] = 'upgrade-stage'
+            result = w.execute()
+            self.assertNotIn('core', result)
+            w.q['action'] = 'upgrade-apply'
+            w.execute()
+            self.assertTrue(w.containers['core']['State']['Running'], 'a stopped new-image Core is started on resume')
+            self.assertEqual(w.read('upgrade.json')['step'], 'done')

@@ -460,3 +460,42 @@ func TestCoreUpgradeRefusesChangedConfiguration(t *testing.T) {
 		t.Fatal("Core upgrade accepted a changed configuration", err)
 	}
 }
+
+func TestCoreUpgradeKeepsCoreRepository(t *testing.T) {
+	f := upgradeSetup(t)
+	candidate := f.plan.Bootstrap.Compute.Network
+	candidate.Images = maps.Clone(candidate.Images)
+	candidate.Images["core"] = "docker.io/dashpay/dashd-develop:upgrade-b"
+	lock := testutil.Lock(t, candidate)
+	if _, err := BuildUpgrade(f.plan, f.store.record, candidate, lock, "core", time.Now()); err == nil || !strings.Contains(err.Error(), "repository") {
+		t.Fatal("Core repository change accepted", err)
+	}
+}
+
+func TestCoreUpgradeResumesWhileTheCurrentNodeIsMidReplacement(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "core", "b")
+	first := ""
+	f.remote.before = func(q node.Request) error {
+		if q.Action == "upgrade-apply" && first == "" {
+			first = q.Target.Name
+			return errors.New("host-busy")
+		}
+		// Until its apply resumes, the interrupted node's Core answers on
+		// neither image (stopped mid-replacement).
+		if q.Action == "core-status" && q.Target.Name == first && callsFor(f.remote, "upgrade-apply") < 2 {
+			return errors.New("running-image-drift")
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err == nil {
+		t.Fatal("expected the first apply to fail")
+	}
+	result, err := f.run(t, u)
+	if err != nil {
+		t.Fatal("resume blocked by the mid-replacement node:", err)
+	}
+	if result.Upgrade.Phase != "complete" {
+		t.Fatal("resumed Core upgrade incomplete", result.Upgrade.Phase)
+	}
+}

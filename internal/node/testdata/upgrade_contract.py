@@ -35,7 +35,7 @@ class Disposable(Upgrade):
         self.verify_image(value,self.images['core'])
         return dict(containerId=value['Id'],startedAt=value['State']['StartedAt'],
                     configSha256=hashlib.sha256((self.root/'core/dash.conf').read_bytes()).hexdigest(),
-                    genesis='c'*64,synced=True,ibd=False,height=1,headers=1)
+                    genesis='c'*64,synced=True,ibd=False,height=13,headers=13)
 
     def docker(self,*args,timeout=120):
         if self.remove_before_apply and args[0]=='compose' and 'up' in args:

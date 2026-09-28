@@ -90,6 +90,10 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 				if err != nil {
 					return nil, err
 				}
+				current, err := name.NewDigest(from[t.Name]["core"], name.StrictValidation)
+				if err != nil || current.Context().Name() != repo.Context().Name() {
+					return nil, errors.New("a Core upgrade keeps Core's image repository")
+				}
 				for _, platform := range image.Platforms {
 					if platform.Architecture == t.Architecture {
 						pin := repo.Context().Digest(platform.Digest).Name()

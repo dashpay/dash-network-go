@@ -54,6 +54,12 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 	}
 	for _, t := range p.Targets {
 		s := observed[t.Name]
+		if coreScope && t.Name == pending && s.core == nil {
+			// The node whose Core is being replaced may be on either image, or
+			// briefly down; its resumed apply reconciles it from the host marker.
+			baseline[t.Name] = record.Upgrade.Baseline[t.Name]
+			continue
+		}
 		if s.core == nil || s.core.Genesis != record.Deployment.CoreGenesis {
 			return nil, missingUpgradeObservation("missing/mismatched Core", t.Name, s.problems)
 		}
