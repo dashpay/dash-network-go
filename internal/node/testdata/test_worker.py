@@ -282,6 +282,29 @@ class Tests(unittest.TestCase):
             w.register()
             self.assertEqual((w.prepared, w.sent), (1, 2))
 
+    def test_only_labelled_auxiliary_containers_share_the_host(self):
+        class Listing(worker.Worker):
+            names = ""
+
+            def docker(self, *args, timeout=120):
+                assert args[:3] == ("container", "ls", "-a")
+                return self.names.encode()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            w = Listing(request(), Path(tmp), Path(tmp) / "lock")
+            core = w.container_name("core")
+            w.names = core + "\t\ndevnet-services-quorums-1\tdevnet-ci/wallet-1\n"
+            w.check_containers()
+            for names in [
+                core + "\t\nstray\t\n",
+                "other\tdevnet-other/wallet-1\n",
+                "other\tdevnet-ci/validator-1\n",
+                w.container_name("drive") + "x\tdevnet-ci/wallet-1\n",
+            ]:
+                w.names = names
+                with self.assertRaises(worker.Failure):
+                    w.check_containers()
+
     def test_platform_genesis_never_replaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             q = request()
