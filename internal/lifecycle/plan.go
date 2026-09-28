@@ -35,8 +35,15 @@ type Plan struct {
 	GenesisTime            time.Time      `json:"genesisTime"`
 	InitialProtocolVersion uint32         `json:"initialProtocolVersion"`
 	MiningIntervalSeconds  int            `json:"miningIntervalSeconds"`
-	Targets                []node.Target  `json:"targets"`
+	// PremineHeight is mined at minimum difficulty before any EvoNode is
+	// registered, as long-running devnets do (minimumdifficultyblocks=4032):
+	// quorums and Platform then start on a mature chain. Omitted in older plans.
+	PremineHeight int           `json:"premineHeight,omitempty"`
+	Targets       []node.Target `json:"targets"`
 }
+
+// DefaultPremineHeight matches the legacy devnet tooling.
+const DefaultPremineHeight = 4032
 
 func hash(v any) string {
 	b, _ := json.Marshal(v)
@@ -47,7 +54,7 @@ func Build(b bootstrap.Plan, live map[string]types.Instance, protocol uint32, no
 	if err := b.Validate(); err != nil {
 		return Plan{}, err
 	}
-	p := Plan{APIVersion: spec.Version, Kind: "DevnetDeploymentPlan", Bootstrap: b, Profile: Profile, RecipeSHA256: node.RecipeDigest(), InitialProtocolVersion: protocol, MiningIntervalSeconds: 10, GenesisTime: now.UTC()}
+	p := Plan{APIVersion: spec.Version, Kind: "DevnetDeploymentPlan", Bootstrap: b, Profile: Profile, RecipeSHA256: node.RecipeDigest(), InitialProtocolVersion: protocol, MiningIntervalSeconds: 10, PremineHeight: DefaultPremineHeight, GenesisTime: now.UTC()}
 	p.CoreNetwork = fmt.Sprintf("%s-g%d", strings.TrimPrefix(b.Compute.Network.Metadata.Name, "devnet-"), b.Compute.Network.Chain.Generation)
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
 	for i, t := range b.Compute.Targets {
@@ -78,7 +85,7 @@ func (p Plan) Validate() error {
 	if p.ID != hash(copy) || p.APIVersion != spec.Version || p.Kind != "DevnetDeploymentPlan" || p.Profile != Profile || p.RecipeSHA256 != node.RecipeDigest() {
 		return errors.New("deployment plan altered or node recipe changed; retain exact plan/binary")
 	}
-	if p.InitialProtocolVersion < 1 || p.InitialProtocolVersion > 100 || p.GenesisTime.IsZero() || p.MiningIntervalSeconds != 10 {
+	if p.InitialProtocolVersion < 1 || p.InitialProtocolVersion > 100 || p.GenesisTime.IsZero() || p.MiningIntervalSeconds != 10 || p.PremineHeight < 0 || p.PremineHeight > 20000 {
 		return errors.New("explicit protocol version (1..100), genesis time and supported mining policy required")
 	}
 	coreNetwork := fmt.Sprintf("%s-g%d", strings.TrimPrefix(p.Bootstrap.Compute.Network.Metadata.Name, "devnet-"), p.Bootstrap.Compute.Network.Chain.Generation)

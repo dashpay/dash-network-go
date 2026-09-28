@@ -109,6 +109,7 @@ type Context struct {
 	InitialProtocolVersion uint32   `json:"initialProtocolVersion"`
 	MiningIntervalSeconds  int      `json:"miningIntervalSeconds"`
 	MiningNodeName         string   `json:"miningNodeName"`
+	PremineHeight          int      `json:"premineHeight,omitempty"`
 	CorePeers              []string `json:"corePeers"`
 	Ports                  Ports    `json:"ports"`
 }

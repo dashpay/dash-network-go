@@ -53,7 +53,10 @@ def main():
             # Exercise the live update RPC as well as readback/idempotent resume.
             call("activate")
             q["requiredBalance"] = 4001
+            # Premine at minimum difficulty in batches, as a real devnet does.
+            q["context"]["premineHeight"] = 600
             call("fund")
+            assert w.rpc("getblockcount") >= 600
             pair = w.rpc("bls", ["generate"])
             q["registration"] = dict(
                 name="validator-1",
