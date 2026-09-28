@@ -159,6 +159,22 @@ def main():
                     if time.monotonic() > deadline:
                         raise
                     time.sleep(1)
+            # Browser path: grpc-web framing with trailers in the body, and CORS.
+            url = "https://127.0.0.1:" + str(w.ports["gateway"]) + "/org.dash.platform.dapi.v0.Platform/getStatus"
+            curl = ["/usr/bin/curl", "--silent", "--show-error", "--noproxy", "*", "--max-time", "20",
+                    "--cacert", str(root / "platform/tls/cert.pem"), "--dump-header", "-"]
+            web = w.run(curl + ["--http1.1", "-H", "content-type: application/grpc-web+proto", "-H", "x-grpc-web: 1",
+                                "-H", "origin: https://explorer.example", "--data-binary", "@-", "--output", "-", url],
+                        stdin=b"\x00\x00\x00\x00\x02\x0a\x00", timeout=25)
+            head, _, body = web.partition(b"\r\n\r\n")
+            assert b"content-type: application/grpc-web" in head.lower(), "grpc-web content type"
+            assert b"access-control-allow-origin" in head.lower(), "CORS on grpc-web reply"
+            assert body[:1] == b"\x00" and b"\x80" in body and b"grpc-status:0" in body, "grpc-web trailer frame"
+            preflight = w.run(curl + ["--http1.1", "-X", "OPTIONS", "-o", "/dev/null", "-H", "origin: https://explorer.example",
+                                      "-H", "access-control-request-method: POST", "-H", "access-control-request-headers: content-type,x-grpc-web", url],
+                              timeout=25).lower()
+            assert b"access-control-allow-origin" in preflight and b"x-grpc-web" in preflight, "CORS preflight"
+            print("grpc-web getStatus with body trailers and CORS preflight succeed.", flush=True)
             software = worker.protobuf(worker.protobuf(result[1])[1])
             assert software.get(1), "DAPI software version missing"
             assert not software.get(2), "Fixture unexpectedly has Drive"

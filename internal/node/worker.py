@@ -916,6 +916,18 @@ class Worker:
                     dict(
                         name="dapi",
                         domains=["*"],
+                        # Browser clients (grpc-web SDKs, explorers) need CORS, as
+                        # served by dashmate's gateway.
+                        typed_per_filter_config={
+                            "envoy.filters.http.cors": {
+                                "@type": "type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy",
+                                "allow_origin_string_match": [{"prefix": "*"}],
+                                "allow_methods": "GET, PUT, DELETE, POST, OPTIONS",
+                                "allow_headers": "keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout",
+                                "max_age": "1728000",
+                                "expose_headers": "custom-header-1,grpc-status,grpc-message,code,drive-error-data-bin,dash-serialized-consensus-error-bin,stack-bin",
+                            }
+                        },
                         routes=[
                             dict(
                                 match=dict(prefix="/org.dash.platform.dapi."),
@@ -929,7 +941,21 @@ class Worker:
                     )
                 ],
             ),
+            # grpc_web translates application/grpc-web requests and frames the
+            # trailers into the body; native gRPC and JSON-RPC pass through.
             "http_filters": [
+                {
+                    "name": "envoy.filters.http.cors",
+                    "typed_config": {
+                        "@type": "type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors"
+                    },
+                },
+                {
+                    "name": "envoy.filters.http.grpc_web",
+                    "typed_config": {
+                        "@type": "type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb"
+                    },
+                },
                 {
                     "name": "envoy.filters.http.router",
                     "typed_config": {

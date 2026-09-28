@@ -139,7 +139,9 @@ Existing SGs must permit fleet Core/Tenderdash P2P and operator SSH. Peer discov
 uses private VPC IPs with Core's devnet private-address setting. The tool does not
 open SGs, create DNS/load balancers, or provision public CA certificates. TLS uses
 persisted per-node self-signed certificates (one-year lifetime); probes pin that
-certificate, never `--insecure`. Public browser endpoints/certificate rotation
+certificate, never `--insecure`. The gateway serves native gRPC, gRPC-Web (trailers
+framed in the body) and CORS like dashmate's, so browser SDKs and explorers work.
+Public browser endpoints/certificate rotation
 remain separate work. The helper image is cached for future adapters, **not run**.
 
 ## Interruption, stop and resume
