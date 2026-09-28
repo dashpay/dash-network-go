@@ -1287,13 +1287,15 @@ class Worker:
             restarts[name] = value["RestartCount"]
         status = self.tenderdash("status")
         dapi = self.dapi_status()
-        software = protobuf(protobuf(dapi[1])[1])
+        software = protobuf(protobuf(dapi.get(1, b"")).get(1, b""))
         chain, network, identity = (
-            protobuf(dapi[3]),
-            protobuf(dapi[4]),
-            protobuf(dapi[2]),
+            protobuf(dapi.get(3, b"")),
+            protobuf(dapi.get(4, b"")),
+            protobuf(dapi.get(2, b"")),
         )
         self.require(software.get(2) and software.get(3), "dapi-upstream-unavailable")
+        # While Drive starts, getStatus can omit chain or node identity fields.
+        self.require(network.get(1) and identity.get(1) and identity.get(2), "dapi-status-incomplete")
         reference = ""
         if self.q.get("referenceHeight", 0) > 0:
             reference = self.tenderdash(

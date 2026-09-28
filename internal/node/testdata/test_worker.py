@@ -341,6 +341,31 @@ class Tests(unittest.TestCase):
         w.stop()
         self.assertEqual([n.rsplit("-", 1)[-1] for n in w.stopped], ["acme", "gateway", "core"])
 
+    def test_incomplete_dapi_status_is_a_named_failure(self):
+        def field(n, value):
+            data = value if isinstance(value, bytes) else value.encode()
+            return bytes([n << 3 | 2, len(data)]) + data
+        software = field(1, "4.2.0") + field(2, "4.2.0") + field(3, "1.8.1")
+        v0 = field(1, field(1, software)) + field(3, b"") + field(4, field(2, b"x"))
+
+        class Starting(worker.Worker):
+            def inspect_container(self, name):
+                return {"Id": "i" * 64, "RestartCount": 0, "State": {"Running": True}}
+
+            def verify_image(self, value, pinned):
+                pass
+
+            def tenderdash(self, method):
+                return {"sync_info": {"latest_block_height": "3", "catching_up": False}}
+
+            def dapi_status(self):
+                return worker.protobuf(v0)
+
+        q = request()
+        q["target"]["role"] = "validator"
+        with self.assertRaisesRegex(worker.Failure, "dapi-status-incomplete"):
+            Starting(q).platform_status()
+
     def test_only_labelled_auxiliary_containers_share_the_host(self):
         class Listing(worker.Worker):
             names = ""
