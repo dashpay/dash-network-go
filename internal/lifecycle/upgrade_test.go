@@ -25,7 +25,11 @@ type upgradeFixture struct {
 
 func upgradeSetup(t *testing.T) *upgradeFixture {
 	t.Helper()
-	p, r, s, f := setup(t)
+	return upgradeSetupFrom(t, setup)
+}
+func upgradeSetupFrom(t *testing.T, build func(*testing.T) (Plan, Runner, *memoryStore, *fakeRemote)) *upgradeFixture {
+	t.Helper()
+	p, r, s, f := build(t)
 	installed, err := effectiveImages(p, s.record)
 	if err != nil {
 		t.Fatal(err)
@@ -375,5 +379,20 @@ func TestUpgradeIntentSavedBeforeUnobservedApplyAndStagingFailure(t *testing.T) 
 				t.Fatal("cannot reconcile unobserved request", err)
 			}
 		})
+	}
+}
+
+func TestUpgradeKeepsTheACMEClientOutOfImageSets(t *testing.T) {
+	f := upgradeSetupFrom(t, func(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
+		return setupOptions(t, true, "letsencrypt")
+	})
+	u := f.change(t, "platform", "b")
+	for name, set := range u.To {
+		if _, ok := set["acme"]; ok || len(set) != len(u.From[name]) {
+			t.Fatal("upgrade image set gained the optional ACME client", name, set)
+		}
+	}
+	if _, err := f.run(t, u); err != nil {
+		t.Fatal(err)
 	}
 }
