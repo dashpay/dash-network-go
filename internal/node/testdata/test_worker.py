@@ -323,6 +323,24 @@ class Tests(unittest.TestCase):
             with self.assertRaises(worker.Failure):
                 worker.Worker(q, Path(tmp), Path(tmp) / "lock").acme_script()
 
+    def test_stop_includes_the_acme_client(self):
+        class Stopping(worker.Worker):
+            stopped = []
+            running = {"acme", "gateway", "core"}
+
+            def inspect_container(self, name):
+                return {"State": {"Running": name in self.running}} if name in {"acme", "gateway", "core"} else None
+
+            def docker(self, *args, timeout=120):
+                assert args[0] == "stop"
+                self.stopped.append(args[-1])
+                self.running.discard(args[-1].rsplit("-", 1)[-1])
+                return b""
+
+        w = Stopping(request())
+        w.stop()
+        self.assertEqual([n.rsplit("-", 1)[-1] for n in w.stopped], ["acme", "gateway", "core"])
+
     def test_only_labelled_auxiliary_containers_share_the_host(self):
         class Listing(worker.Worker):
             names = ""

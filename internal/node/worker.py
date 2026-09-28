@@ -1380,10 +1380,10 @@ class Worker:
 
     def stop(self):
         # Only stop owned containers, preserving all volumes and identities.
-        for name in ["miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
+        for name in ["acme", "miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
             if self.inspect_container(name):
                 self.docker("stop", "-t", "120", self.container_name(name), timeout=150)
-        for name in ["miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
+        for name in ["acme", "miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
             value = self.inspect_container(name)
             self.require(
                 value is None or not value["State"]["Running"], "stop-not-observed"
