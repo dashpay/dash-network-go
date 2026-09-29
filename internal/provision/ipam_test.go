@@ -351,6 +351,56 @@ func TestIPAMReleaseRequiresEntireOwnedFleetTerminated(t *testing.T) {
 		})
 	}
 }
+
+// EC2 purges a terminated instance about an hour after termination; a delete
+// that stopped before releasing its addresses must still be able to finish.
+func TestIPAMReleaseAfterTombstonesExpire(t *testing.T) {
+	for _, answer := range []string{"empty", "not-found", "denied", "other-instance"} {
+		t.Run(answer, func(t *testing.T) {
+			p, c, s := ipamSetup(t)
+			if _, err := ipamRun(p, c, s); err != nil {
+				t.Fatal(err)
+			}
+			terminateFixture(c)
+			purged := aws.ToString(c.Instances[1].InstanceId)
+			c.Instances = c.Instances[:1]
+			c.Describe = func(in *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+				if len(in.InstanceIds) == 1 && in.InstanceIds[0] == purged {
+					switch answer {
+					case "not-found":
+						return nil, &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound", Message: "does not exist"}
+					case "denied":
+						return nil, &smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "denied"}
+					case "other-instance":
+						return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{OwnerId: aws.String(p.Network.AWS.AccountID), Instances: c.Instances}}}, nil
+					}
+				}
+				// AWS answers by ID: the purged instance is simply not there.
+				out := []types.Instance{}
+				for _, i := range c.Instances {
+					for _, id := range in.InstanceIds {
+						if aws.ToString(i.InstanceId) == id {
+							out = append(out, i)
+						}
+					}
+				}
+				return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{OwnerId: aws.String(p.Network.AWS.AccountID), Instances: out}}}, nil
+			}
+			r, err := ipamRelease(p, c, s)
+			switch answer {
+			case "empty", "not-found":
+				if err != nil || r.Phase != "addresses-released" || c.releases != 2 {
+					t.Fatal("purged tombstone blocked cleanup", err)
+				}
+			default:
+				if err == nil || c.releases != 0 {
+					t.Fatal("released without proof the instance is gone", err)
+				}
+			}
+		})
+	}
+}
+
 func TestIPAMReleaseAndLostResponseReplay(t *testing.T) {
 	for _, lost := range []bool{false, true} {
 		t.Run(fmt.Sprint(lost), func(t *testing.T) {

@@ -33,9 +33,34 @@ func verifyAddressReleased(ctx context.Context, c IPAM, id string) error {
 	return errors.New("released allocation not proven absent by ID; inspect before resuming")
 }
 
+// An instance this plan journaled is gone when AWS reports its exact ID absent:
+// EC2 purges terminated instances about an hour after termination (the exact
+// read then returns nothing) and never reuses an instance ID (an unknown one is
+// InvalidInstanceID.NotFound). Any other answer stays unresolved.
+func verifyInstancePurged(ctx context.Context, cloud EC2, id string) error {
+	out, err := cloud.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidInstanceID.NotFound" {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify purged instance %s: %w", id, err)
+	}
+	if out == nil || aws.ToString(out.NextToken) != "" {
+		return fmt.Errorf("incomplete readback for purged instance %s", id)
+	}
+	for _, reservation := range out.Reservations {
+		if len(reservation.Instances) > 0 {
+			return fmt.Errorf("unexpected readback for instance %s; inspect before cleanup", id)
+		}
+	}
+	return nil
+}
+
 // ReleaseAddresses never terminates or disassociates. Every original instance
-// must still be visible as terminated, owned by this plan; every EIP must already
-// be detached. An old AWS tombstone disappearing requires operator investigation.
+// must be visible as terminated and owned by this plan, or (once EC2 has purged
+// its record) reported absent by its exact journaled ID; every EIP must already
+// be detached. A delete can therefore resume after the tombstones expire.
 func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, store Store, owner string) (result Record, err error) {
 	if err = p.Validate(); err != nil {
 		return
@@ -107,10 +132,20 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 			live[id] = i
 		}
 	}
-	if len(live) != len(ids) {
-		return result, errors.New("all original instance tombstones must remain visible for cleanup")
+	purged := map[string]bool{}
+	for _, id := range ids {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		if err = verifyInstancePurged(ctx, cloud, id); err != nil {
+			return result, err
+		}
+		purged[id] = true
 	}
 	for _, t := range p.Targets {
+		if purged[r.Nodes[t.Name].InstanceID] {
+			continue
+		}
 		i, ok := live[r.Nodes[t.Name].InstanceID]
 		if !ok || i.State == nil || i.State.Name != types.InstanceStateNameTerminated || aws.ToString(i.ClientToken) != p.Token(t) {
 			return result, fmt.Errorf("%s is not the terminated original instance", t.Name)

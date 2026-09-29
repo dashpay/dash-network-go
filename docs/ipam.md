@@ -63,9 +63,15 @@ The command acquires the same network claim, verifies **all** original instance
 IDs, ownership tags/client tokens and terminated state before releasing any EIP.
 All addresses must be detached and match the journal/pool/tags. It does not stop
 or terminate instances, detach addresses, delete disks, or delete the journal.
-If AWS has already removed the terminated-instance records, the tool fails closed;
-retain evidence and review the resource scope manually. Stopped instances do not
+EC2 purges a terminated instance's record about an hour after termination. An
+instance whose record is gone qualifies only when AWS reports its exact journaled
+ID absent (an empty exact read, or `InvalidInstanceID.NotFound`; instance IDs are
+never reused); a failed read or any other answer fails closed. A cleanup that
+stopped before releasing therefore stays resumable. Stopped instances do not
 qualify. It will never release an address from a still-running server.
+
+EC2 also detaches an instance's Elastic IP a little after the instance reports
+`terminated`; run the command once the addresses show no association.
 
 Release intent is checkpointed before AWS. A lost reply is reconciled by AWS's
 `InvalidAllocationID.NotFound` for that exact allocation ID, not absence from a
