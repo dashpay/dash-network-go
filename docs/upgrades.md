@@ -11,8 +11,10 @@ The current profiles are:
   validator again**, migrating its config as `dashmate update` does, and Compose
   recreates exactly the Platform services whose image or rendered configuration
   changed. A newer dashmate's configuration therefore arrives with its release.
-  Core's rendered files are not installed by this profile: when a release changes
-  them too, the rollout reports it and they take effect at the next Core rollout.
+  Every other node moves to the new helper too (staging renders it with the
+  release first; nothing restarts), so later deploys render the whole fleet
+  alike. The rollout never touches Core: a release whose dashmate would change
+  Core's configuration on any node is refused at staging, before any change.
 - `tenderdash`: replace Tenderdash only; Drive, DAPI, gateway and Core stay intact.
 - `core`: replace the Core image on **every node**, one at a time: validators,
   then fullnodes and other nodes, then the mining node. On a validator, Tenderdash,
@@ -86,8 +88,9 @@ resolved again during a resumed operation.
 2. Require fresh whole-fleet health and capture public preservation fingerprints.
 3. Stage/verify all needed image digests, at most sixteen hosts concurrently. Cached
    exact artifacts are reused. A staging failure withdraws no services. For a
-   Platform rollout every validator also renders the target release (nothing is
-   installed): every validator must render with the same dashmate release; sidecar
+   Platform rollout every validator, and every other node whose helper moves,
+   also renders the target release (nothing is installed): all must render with
+   the same dashmate release and leave Core's configuration unchanged; sidecar
    images it requests beyond the pinned ones are pinned, and staging repeats. The
    services each validator will recreate are journaled, and its apply must change
    exactly those.

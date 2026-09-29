@@ -182,23 +182,59 @@ class PlatformUpgradeTests(unittest.TestCase):
             self.assertLess(ready, start)
             self.assertEqual(u.read('upgrade.json')['dependency'], 'started')
 
-    def test_a_newer_dashmate_reconfigures_platform_and_defers_core(self):
+    def test_a_newer_dashmate_reconfigures_platform(self):
         with tempfile.TemporaryDirectory() as tmp:
             u = deployed(tmp)
             change(u, helper=pin('helper-2'))
             u.gateway_template = 'overload_manager: newer\n'
-            u.core_template = 'newoption=1\n'
-            conf = (u.home / u.config_name / 'core/dash.conf').read_text()
             ids = u.ids()
             result = u.execute()
             self.assertEqual(result['render']['changes'], ['gateway'])
-            self.assertEqual(result['render']['deferred'], ['core', 'core_tor'])
+            self.assertEqual(result['render']['deferred'], [])
             self.assertNotEqual(u.service_container('gateway')['Id'], ids[u.container_name('gateway')])
             self.assertEqual(u.service_container('gateway')['Image'], 'image-' + u.images['gateway'], 'same image, new configuration')
             self.assertIn('overload_manager: newer', (u.home / u.config_name / 'platform/gateway/envoy.yaml').read_text())
-            self.assertEqual((u.home / u.config_name / 'core/dash.conf').read_text(), conf, "Core's rendered files wait")
             for name in ['core', 'core_tor', 'drive_abci', 'rs_dapi']:
                 self.assertEqual(u.service_container(name)['Id'], ids[u.container_name(name)], name)
+
+    def test_a_release_that_changes_core_configuration_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            u = deployed(tmp)
+            change(u, helper=pin('helper-2'))
+            u.core_template = 'newoption=1\n'
+            conf = (u.home / u.config_name / 'core/dash.conf').read_text()
+            ids = u.ids()
+            u.q['action'] = 'upgrade-stage'
+            self.assertEqual(u.execute()['render']['deferred'], ['core', 'core_tor'], 'staging reports it')
+            u.q['action'] = 'upgrade-apply'
+            with self.assertRaisesRegex(worker.Failure, 'upgrade-core-configuration-changed'):
+                u.execute()
+            self.assertEqual(u.ids(), ids)
+            self.assertEqual((u.home / u.config_name / 'core/dash.conf').read_text(), conf)
+            self.assertIsNone(u.read('upgrade.json'))
+
+    def test_other_nodes_stage_the_helper_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            u = deployed(tmp, 'wallet')
+            change(u, helper=pin('helper-2'))
+            u.q['action'] = 'upgrade-stage'
+            ids = u.ids()
+            result = u.execute()
+            self.assertEqual(result['render'], dict(version=u.version, sidecars={'core_tor': json.loads(fakehost.FIXTURE.read_text())['configs']['node']['core']['tor']['docker']['image']}, deferred=[]))
+            self.assertEqual(u.ids(), ids, 'staging starts nothing')
+            u.q['action'] = 'upgrade-apply'
+            with self.assertRaisesRegex(worker.Failure, 'upgrade-validator-only'):
+                u.execute()
+            u.q['action'] = 'upgrade-stage'
+            u.q['upgrade']['to']['core'] = pin('core-2')
+            with self.assertRaisesRegex(worker.Failure, 'upgrade-helper-only'):
+                u.execute()
+        with tempfile.TemporaryDirectory() as tmp:
+            u = deployed(tmp, 'wallet')
+            change(u, helper=pin('helper-2'))
+            u.core_template = 'newoption=1\n'  # the release changes Core's configuration
+            u.q['action'] = 'upgrade-stage'
+            self.assertEqual(u.execute()['render']['deferred'], ['core', 'core_tor'])
 
     def test_replay_reuses_the_render_and_refuses_changed_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:

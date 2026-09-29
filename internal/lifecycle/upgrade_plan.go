@@ -118,13 +118,12 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 		return to, to.Validate(p.Bootstrap.Compute)
 	}
 	for _, t := range p.Targets {
-		if t.Role != "validator" {
-			continue
-		}
 		for _, image := range lock.Images {
 			// Core is preserved; the optional ACME client is pinned by the
-			// deployment plan, not replaced by upgrades.
-			if image.Component == "core" || slices.Contains(spec.OptionalComponents, image.Component) || (scope == "tenderdash" && image.Component != "tenderdash") {
+			// deployment plan, not replaced by upgrades. Every node renders with
+			// the helper, so it moves fleet-wide; other nodes run no Platform.
+			if image.Component == "core" || slices.Contains(spec.OptionalComponents, image.Component) || (scope == "tenderdash" && image.Component != "tenderdash") ||
+				(t.Role != "validator" && image.Component != "helper") || !slices.Contains(spec.RoleComponents(t.Role), image.Component) {
 				continue
 			}
 			repo, err := name.NewDigest(image.Pinned, name.StrictValidation)

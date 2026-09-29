@@ -85,7 +85,7 @@ every three minutes (dashmate's `createEmptyBlocksInterval`), so Platform is liv
 when it advanced or its latest block, by Tenderdash's block time on the node, is
 at most four minutes old; nodes must still agree on the block hash.
 
-`deployment-plan --epoch-time N` sets the Platform epoch length (60 seconds to
+`deployment-plan --epoch-time N` sets the Platform epoch length (180 seconds, dashmate's minimum, to
 30 days, default 3600): Drive's `EPOCH_TIME_LENGTH_S` on every validator, kept
 through Platform upgrades. Plans made before the option existed run one hour.
 

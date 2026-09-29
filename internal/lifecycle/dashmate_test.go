@@ -113,7 +113,8 @@ func TestPlatformUpgradePinsNewSidecarsAndEnforcesStagedChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if callsFor(f.remote, "upgrade-stage") != 26 {
+	// Validators and the wallet (whose helper moves too), twice.
+	if callsFor(f.remote, "upgrade-stage") != 28 {
 		t.Fatal("new sidecar pins were not staged again", callsFor(f.remote, "upgrade-stage"))
 	}
 	tor := result.Runtime.Sidecars[0]
@@ -253,5 +254,69 @@ func TestIdlePlatformIsLiveWhileItsLastBlockIsRecent(t *testing.T) {
 		if health.ObservationWindow != "15s" {
 			t.Fatal("observation window stretched", health.ObservationWindow)
 		}
+	}
+}
+
+func TestHelperRolloutMovesEveryNodeSoLaterDeploysRenderAlike(t *testing.T) {
+	f := upgradeSetup(t)
+	// Each node reports the dashmate release of the helper it renders with.
+	release := func(q node.Request) string {
+		pin := ""
+		for _, image := range q.Target.Images {
+			if image.Component == "helper" {
+				pin = image.Pinned
+			}
+		}
+		if q.Upgrade != nil {
+			pin = q.Upgrade.To["helper"]
+		}
+		return "4.2.0-" + pin[len(pin)-6:]
+	}
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if o.Render != nil {
+			o.Render.Version = release(q)
+		}
+		return nil
+	}
+	u := f.change(t, "platform", "b")
+	wallet := f.plan.Wallet().Name
+	if u.To[wallet]["helper"] == u.From[wallet]["helper"] || u.To[wallet]["core"] != u.From[wallet]["core"] {
+		t.Fatal("the wallet's helper does not move with the rollout", u.To[wallet])
+	}
+	f.remote.calls = nil
+	result, err := f.run(t, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range f.remote.calls {
+		if q.Target.Role != "validator" && q.Action == "upgrade-apply" {
+			t.Fatal("a Platform rollout applied to a Core-only node")
+		}
+	}
+	if result.Runtime.Images[wallet]["helper"] != u.To[wallet]["helper"] {
+		t.Fatal("wallet not moved to the rollout's helper", result.Runtime.Images[wallet])
+	}
+	// Every node now renders with the same release: a deploy passes its render stage.
+	f.store.record.Deployment.Phase, f.store.record.Deployment.Stage = "interrupted", "core-start"
+	if _, err := execute(t, f.plan, f.runner); err != nil {
+		t.Fatal("deploy after a helper rollout", err)
+	}
+}
+
+func TestPlatformRolloutRefusesAReleaseThatChangesCoreConfiguration(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	f.remote.calls = nil
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if o.Render != nil && q.Target.Role == "wallet" {
+			o.Render.Deferred = []string{"core", "core_tor"}
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err == nil || !strings.Contains(err.Error(), "changes Core's configuration on "+f.plan.Wallet().Name) {
+		t.Fatal("Core configuration change not refused", err)
+	}
+	if callsFor(f.remote, "upgrade-apply") != 0 {
+		t.Fatal("applied a release that changes Core's configuration")
 	}
 }

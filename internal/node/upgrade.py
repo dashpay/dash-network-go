@@ -2,9 +2,11 @@
 
 The target release's dashmate renders the node again (migrating its config, as
 `dashmate update` does); Compose then recreates exactly the services whose image
-or rendered configuration changed. A Platform rollout never touches Core and
-never installs Core's rendered files. A Core rollout ("core" scope) changes
-Core's image only; dash.conf, genesis, keys, wallets and chain data are kept.
+or rendered configuration changed. A Platform rollout never touches Core: a
+release whose dashmate would change Core's configuration is refused. It moves
+every other node to the release's helper after rendering it the same way. A
+Core rollout ("core" scope) changes Core's image only; dash.conf, genesis, keys,
+wallets and chain data are kept.
 An on-host write-ahead marker reconciles lost SSH responses with the same plan.
 There is deliberately no downgrade/rollback/reset action.
 """
@@ -259,7 +261,8 @@ class UpgradeWorker(Worker):
                      "upgrade-action-refused")
         if self.q["upgrade"].get("scope") == "core":
             return self.execute_core()
-        self.require(self.t["role"] == "validator", "upgrade-validator-only")
+        if self.t["role"] != "validator":
+            return self.stage_helper()
         change = self.q["upgrade"]
         before, after = change["from"], change["to"]
         components = {"core", "drive", "dapi", "gateway", "tenderdash", "helper"}
@@ -295,15 +298,39 @@ class UpgradeWorker(Worker):
             finally:
                 self.discard(r)
 
+    def deferred(self, r):
+        """Core services whose configuration the render would change."""
+        return [s for s in r.selection if s in CORE_SERVICES
+                and self.label(self.inspect_container(s) or {"Config": {}}) != r.fingerprints[s]]
+
+    def stage_helper(self):
+        """Stages another node's move to the rollout's dashmate helper: render
+        with it and report any change to Core's configuration. Nothing else."""
+        self.require(self.q["action"] == "upgrade-stage", "upgrade-validator-only")
+        before, after = self.q["upgrade"]["from"], self.q["upgrade"]["to"]
+        self.require(set(before) == set(after) == {"core", "helper"} and before["core"] == after["core"], "upgrade-helper-only")
+        with self.locked():
+            self.owned()
+            self.require(self.read("deployment.json") == {"planId": self.c["planId"]}, "upgrade-missing-deployment")
+            self.stage = self.q["action"]
+            self.verify_pin(after["helper"])
+            self.images = dict(self.images, **after)
+            r = self.render()
+            try:
+                return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"],
+                            render=dict(version=r.version, sidecars=r.sidecars(), deferred=self.deferred(r)))
+            finally:
+                self.discard(r)
+
     def apply_platform(self, change, marker, r, core):
         before, after, preserve = change["from"], change["to"], change["preserve"]
         platform = [s for s in r.selection if s in PLATFORM_SERVICES]
         desired = {s: r.fingerprints[s] for s in platform}
         current = {s: self.inspect_container(s) for s in platform}
         changes = [s for s in platform if current[s] is None or self.label(current[s]) != desired[s]]
-        # Rendered Core changes wait for a Core rollout: this one keeps Core.
-        deferred = [s for s in r.selection if s in CORE_SERVICES
-                    and self.label(self.inspect_container(s) or {"Config": {}}) != r.fingerprints[s]]
+        # This rollout keeps Core: a release that changes Core's configuration
+        # is reported at staging and refused.
+        deferred = self.deferred(r)
         pins = self.c.get("sidecarImages") or {}
         for name in platform:
             if name not in COMPONENTS and name in pins:
@@ -313,6 +340,7 @@ class UpgradeWorker(Worker):
             # it has not, then stages again. Changes follow the given pins.
             return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"], core=core,
                         render=dict(version=r.version, sidecars=r.sidecars(), changes=changes, deferred=deferred))
+        self.require(not deferred, "upgrade-core-configuration-changed")
         drain = "drive_abci" in (marker["changes"] if marker else changes)
         if marker is None:
             marker = dict(id=change["id"], previousId=change.get("previousId", ""),
