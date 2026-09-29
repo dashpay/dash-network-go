@@ -686,6 +686,36 @@ func TestCoreOnlyDeployStopsBeforePlatformAndResumes(t *testing.T) {
 	}
 }
 
+func TestPlatformEpochIsAPlanParameter(t *testing.T) {
+	p, _, _, _ := setup(t)
+	if p.PlatformEpochSeconds != DefaultEpochSeconds || p.Request(p.Targets[0], "platform").Context.PlatformEpochSeconds != 3600 {
+		t.Fatal("default Platform epoch is not one hour", p.PlatformEpochSeconds)
+	}
+	rehash := func(q Plan) Plan { q.ID = ""; q.ID = hash(q); return q }
+	for _, seconds := range []int{MinEpochSeconds - 1, MaxEpochSeconds + 1} {
+		q := p
+		q.PlatformEpochSeconds = seconds
+		if rehash(q).Validate() == nil {
+			t.Fatal("unsupported Platform epoch accepted", seconds)
+		}
+	}
+	short := p
+	short.PlatformEpochSeconds = 600
+	short = rehash(short)
+	if err := short.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if q := short.Request(short.Targets[0], "platform"); q.Context.PlatformEpochSeconds != 600 {
+		t.Fatal("Platform epoch not sent to nodes")
+	}
+	// Plans made before the option existed omit it; nodes then run 3600.
+	older := p
+	older.PlatformEpochSeconds = 0
+	if err := rehash(older).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBlockTimeIsAPlanParameter(t *testing.T) {
 	p, r, s, _ := setup(t)
 	if p.MiningIntervalSeconds != DefaultBlockSeconds {

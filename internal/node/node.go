@@ -118,6 +118,8 @@ type Context struct {
 	MiningIntervalSeconds  int    `json:"miningIntervalSeconds"`
 	MiningNodeName         string `json:"miningNodeName"`
 	PremineHeight          int    `json:"premineHeight,omitempty"`
+	// PlatformEpochSeconds is Drive's epoch length; 0 (older plans) runs 3600.
+	PlatformEpochSeconds int `json:"platformEpochSeconds,omitempty"`
 	// Advertise is "public" when nodes register and advertise their public
 	// Elastic IPs; empty means private VPC addresses (older plans).
 	Advertise string `json:"advertise,omitempty"`

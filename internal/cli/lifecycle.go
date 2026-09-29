@@ -32,7 +32,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
 	var candidatePath, lockPath, scope, advertise, gatewayTLS, acmeEmail string
 	var timeout, observationWindow time.Duration
-	var protocol, blockSeconds uint
+	var protocol, blockSeconds, epochSeconds uint
 	var coreOnly bool
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
@@ -45,6 +45,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&gatewayTLS, "gateway-tls", "auto", "gateway certificates: letsencrypt, letsencrypt-staging, self-signed, or auto (letsencrypt with public addresses, an acme image and --acme-email)")
 		fs.StringVar(&acmeEmail, "acme-email", "", "ACME account contact for trusted gateway certificates")
 		fs.UintVar(&blockSeconds, "block-time", lifecycle.DefaultBlockSeconds, fmt.Sprintf("Core block interval in seconds (%d..%d): powtargetspacing and the miner's cadence", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds))
+		fs.UintVar(&epochSeconds, "epoch-time", lifecycle.DefaultEpochSeconds, fmt.Sprintf("Platform epoch length in seconds (%d..%d): Drive's EPOCH_TIME_LENGTH_S", lifecycle.MinEpochSeconds, lifecycle.MaxEpochSeconds))
 	} else if args[0] == "upgrade-plan" {
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
@@ -90,6 +91,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		}
 		if blockSeconds < lifecycle.MinBlockSeconds || blockSeconds > lifecycle.MaxBlockSeconds {
 			return fmt.Errorf("--block-time must be %d..%d seconds", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds)
+		}
+		if epochSeconds < lifecycle.MinEpochSeconds || epochSeconds > lifecycle.MaxEpochSeconds {
+			return fmt.Errorf("--epoch-time must be %d..%d seconds", lifecycle.MinEpochSeconds, lifecycle.MaxEpochSeconds)
 		}
 		if err := files.ReadJSON(bootstrapPath, &b); err != nil {
 			return err
@@ -207,7 +211,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		} else if public == nil {
 			return errors.New("--advertise public requires an IPAM Elastic IP on every host")
 		}
-		opts := lifecycle.Options{Public: public, BlockSeconds: int(blockSeconds)}
+		opts := lifecycle.Options{Public: public, BlockSeconds: int(blockSeconds), EpochSeconds: int(epochSeconds)}
 		if gatewayTLS == "auto" && public != nil && acmeEmail != "" && hasImage(b, "acme") {
 			gatewayTLS = "letsencrypt"
 		}

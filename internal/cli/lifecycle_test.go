@@ -51,6 +51,15 @@ func TestBlockTimeRangeRejectedBeforeReadingPlans(t *testing.T) {
 	}
 }
 
+func TestEpochTimeRangeRejectedBeforeReadingPlans(t *testing.T) {
+	for _, seconds := range []string{"59", "2592001"} {
+		err := cli.Run(context.Background(), []string{"deployment-plan", "--bootstrap-plan", "missing.json", "--protocol", "14", "--epoch-time", seconds}, &bytes.Buffer{}, &bytes.Buffer{}, "test")
+		if err == nil || !strings.Contains(err.Error(), "--epoch-time") {
+			t.Fatal("unsupported epoch length accepted", seconds, err)
+		}
+	}
+}
+
 func TestRecipesPrintsTheDigestsPlansBind(t *testing.T) {
 	var out bytes.Buffer
 	if err := cli.Run(context.Background(), []string{"recipes"}, &out, io.Discard, "test"); err != nil {

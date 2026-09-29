@@ -1153,7 +1153,7 @@ class Worker:
             CHAIN_ID=self.c["platformChainId"],
             NETWORK="devnet",
             DB_PATH="/db",
-            EPOCH_TIME_LENGTH_S="3600",
+            EPOCH_TIME_LENGTH_S=str(int(self.c.get("platformEpochSeconds") or 3600)),
             ABCI_CONSENSUS_BIND_ADDRESS="tcp://127.0.0.1:" + str(p["driveABCI"]),
             GRPC_BIND_ADDRESS="127.0.0.1:" + str(p["driveGRPC"]),
             TOKIO_CONSOLE_ENABLED="false",
