@@ -322,6 +322,15 @@ class Tests(unittest.TestCase):
             w.calls = []
             w.fund()
             self.assertEqual(w.calls, [])
+            # Short of funds once DKG runs: refuse rather than burst-mine.
+            w.q["requiredBalance"] = 4001
+            nearly_empty = [dict(txid="t", vout=0, amount=500, spendable=True, safe=True)]
+            w.rpc = lambda method, params=None, wallet=False: (
+                {"SPORK_17_QUORUM_DKG_ENABLED": True} if method == "spork" else
+                nearly_empty if method == "listunspent" else Chain.rpc(w, method, params, wallet))
+            with self.assertRaisesRegex(worker.Failure, "funding-needs-mining-after-dkg"):
+                w.fund()
+            self.assertEqual(w.calls, [])
 
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:

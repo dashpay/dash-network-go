@@ -630,6 +630,9 @@ class Worker:
             if balance >= target:
                 return dict(balance=balance)
             self.require(self.rpc("getblockcount") < limit, "bootstrap-mining-limit")
+            # Never burst-mine once DKG runs (a resumed deploy): members would
+            # be PoSe-punished for sessions they had no time to complete.
+            self.require(self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is False, "funding-needs-mining-after-dkg")
             self.rpc("generatetoaddress", [1, address, 1000000])
         raise Failure("funding-not-reached")
 
@@ -738,7 +741,7 @@ class Worker:
 
     def block_seconds(self):
         interval = self.c["miningIntervalSeconds"]
-        self.require(isinstance(interval, int) and 5 <= interval <= 600, "mining-interval")
+        self.require(isinstance(interval, int) and 8 <= interval <= 600, "mining-interval")
         return interval
 
     def fast_forward(self):

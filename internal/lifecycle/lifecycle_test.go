@@ -674,9 +674,15 @@ func TestCoreOnlyDeployStopsBeforePlatformAndResumes(t *testing.T) {
 		t.Fatal("core-only deploy left Core without a miner")
 	}
 	r.CoreOnly = false
+	start := len(f.calls)
 	b, err := execute(t, p, r)
 	if err != nil || b.Deployment.Phase != "network-ready" {
 		t.Fatal("deploy did not resume to Platform", err)
+	}
+	for _, q := range f.calls[start:] {
+		if q.Action == "fund" {
+			t.Fatal("registered validators were funded again")
+		}
 	}
 }
 

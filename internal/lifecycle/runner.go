@@ -398,11 +398,14 @@ func (e *execution) deploy() error {
 	}
 	for _, t := range p.Validators() {
 		// Funding/registration is deliberately serial on one wallet. Each signed
-		// transaction is durable on that wallet before sendrawtransaction.
-		if _, err = e.call(p.Wallet(), "fund", func(q *node.Request) { q.RequiredBalance = 4001 }); err != nil {
-			return err
-		}
+		// transaction is durable on that wallet before sendrawtransaction. A
+		// registered validator needs no funds: its registration is read back.
 		n := d.Nodes[t.Name]
+		if n.ProTxHash == "" {
+			if _, err = e.call(p.Wallet(), "fund", func(q *node.Request) { q.RequiredBalance = 4001 }); err != nil {
+				return err
+			}
+		}
 		peer := node.Peer{Name: t.Name, Address: t.PeerAddress, NodeID: n.PlatformNodeID, OperatorPublicKey: n.OperatorPublicKey}
 		var o node.Observation
 		o, err = e.call(p.Wallet(), "register", func(q *node.Request) { q.Registration = &peer; q.RequiredConfirmations = 1 })

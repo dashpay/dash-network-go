@@ -73,7 +73,7 @@ dashnet doctor --plan out/deployment.json \
 dashnet operation --plan out/ec2-plan.json --profile YOUR_AWS_PROFILE
 ```
 
-`deployment-plan --block-time N` sets the Core block interval (5..600 seconds,
+`deployment-plan --block-time N` sets the Core block interval (8..600 seconds,
 default 10): Core's `powtargetspacing` and the miner's cadence. DKG, ChainLock
 and upgrade timing follow it; doctor stretches its observation window to at
 least two and a half blocks on chains slower than the default.

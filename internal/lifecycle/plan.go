@@ -67,10 +67,13 @@ type Options struct {
 }
 
 // DefaultBlockSeconds and the supported range of Core block intervals. DKG,
-// ChainLock and upgrade timing follow powtargetspacing.
+// ChainLock and upgrade timing follow powtargetspacing. With more than three
+// peers Core finishes a node's blockchain sync only after more than six whole
+// seconds without a new block; faster blocks would leave any restarted node
+// unsynced, ignoring MNAUTH (one-sided quorum links, PoSe).
 const (
 	DefaultBlockSeconds = 10
-	MinBlockSeconds     = 5
+	MinBlockSeconds     = 8
 	MaxBlockSeconds     = 600
 )
 

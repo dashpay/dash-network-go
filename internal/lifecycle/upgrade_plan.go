@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"time"
@@ -56,7 +57,15 @@ func recoveryFor(scope string) string {
 
 const upgradeRecovery = "forward-only; Drive replacement gracefully stops Tenderdash then restarts it after ABCI readiness; Core remains running; stop on failure; no automatic downgrade, database reset or protocol migration"
 
+// coreScopeValidatorLimit: from 40 masternodes devnets also form llmq_50_60,
+// llmq_60_75 and larger types, whose sessions the 24-block quiet window
+// does not cover.
+const coreScopeValidatorLimit = 40
+
 func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from provision.FleetImages, scope string) (provision.FleetImages, error) {
+	if scope == "core" && len(p.Validators()) >= coreScopeValidatorLimit {
+		return nil, fmt.Errorf("core-scope upgrades support devnets under %d validators: larger fleets form quorum types whose DKG sessions the quiet window does not cover", coreScopeValidatorLimit)
+	}
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}

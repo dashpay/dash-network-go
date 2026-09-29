@@ -139,6 +139,10 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err := p.Validate(); err != nil {
 			return err
 		}
+		// Doctor stretches the window to 2.5 blocks on slower chains.
+		if effective := max(observationWindow, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2); p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds && effective >= timeout && args[0] != "stop" {
+			return fmt.Errorf("--timeout must exceed the %s observation window this %ds-block chain needs", effective, p.MiningIntervalSeconds)
+		}
 		b = p.Bootstrap
 		expectedID := p.ID
 		if args[0] == "upgrade" {
