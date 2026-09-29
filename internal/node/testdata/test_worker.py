@@ -386,6 +386,13 @@ class Tests(unittest.TestCase):
             self.assertIn("addnode=198.51.100.11:20001\n", config)
             self.assertNotIn("addnode=198.51.100.10:20001", config)
 
+    def test_gateway_merges_slashes_like_dashmate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = worker.Worker(request(), Path(tmp), Path(tmp) / "lock")
+            manager = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["filters"][0]["typed_config"]
+            self.assertIs(manager["merge_slashes"], True)
+            self.assertIs(manager["normalize_path"], True)
+
     def test_trusted_gateway_certificates_use_watched_sds(self):
         with tempfile.TemporaryDirectory() as tmp:
             q = request()

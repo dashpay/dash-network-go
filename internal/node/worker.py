@@ -1032,6 +1032,10 @@ class Worker:
             "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
             "stat_prefix": "dashnet",
             "codec_type": "AUTO",
+            # As dashmate's gateway: browser SDKs join base URL and method path
+            # into "//org.dash...", which must still reach the gRPC route.
+            "merge_slashes": True,
+            "normalize_path": True,
             "route_config": dict(
                 name="dapi",
                 virtual_hosts=[
