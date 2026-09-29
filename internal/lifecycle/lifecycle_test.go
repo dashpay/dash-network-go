@@ -15,8 +15,10 @@ import (
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
+	"github.com/dashpay/dash-network-go/internal/release"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/dashpay/dash-network-go/internal/testutil"
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 func digest(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }
@@ -49,6 +51,8 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 	}
 	height := int64(500 + f.counts[q.Target.Name])
 	switch q.Action {
+	case "render":
+		o.Render = &node.Render{Version: "4.2.0-beta.3", Sidecars: sidecarRequests(q.Target.Role)}
 	case "core-start", "core-finalize", "core-status", "fast-forward":
 		o.Core = &node.Core{Mining: &node.Mining{Running: true, ContainerID: digest("miner")}, Genesis: digest("genesis"), Synced: true, Height: height, Headers: height, Peers: 13, ContainerID: digest("core" + q.Target.Name), ConfigSHA256: digest("config"), MasternodeState: "READY", ProTxHash: digest("protx" + q.Target.Name), ChainLockHeight: height - 1, Quorums: map[string]int{"llmq_devnet": 4, "llmq_devnet_dip0024": 2, "llmq_devnet_platform": 4}}
 	case "wallet":
@@ -71,9 +75,43 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 	}
 	return o, nil
 }
+
+// The sidecar images dashmate 4.2 requests: Tor on every node, the gateway
+// rate limiter and its Redis on validators.
+func sidecarRequests(role string) map[string]string {
+	out := map[string]string{"core_tor": "osminogin/tor-simple:0.4.9.11@sha256:" + digest("tor")}
+	if role == "validator" {
+		out["gateway_rate_limiter"] = "envoyproxy/ratelimit:3fcc3609"
+		out["gateway_rate_limiter_redis"] = "redis:alpine"
+	}
+	return out
+}
+
+// fakeRegistry pins any reference; a requested digest is kept.
+type fakeRegistry struct{ calls *int }
+
+func (f fakeRegistry) Inspect(ctx context.Context, ref string, arches []string) (release.Image, error) {
+	if f.calls != nil {
+		*f.calls++
+	}
+	parsed, err := name.ParseReference(ref, name.StrictValidation)
+	if err != nil {
+		return release.Image{}, err // the real registry parses strictly too
+	}
+	pin := "sha256:" + digest(ref)
+	if d, ok := parsed.(name.Digest); ok {
+		pin = d.DigestStr()
+	}
+	image := release.Image{Requested: ref, Pinned: parsed.Context().Digest(pin).Name()}
+	for _, arch := range arches {
+		image.Platforms = append(image.Platforms, release.Platform{OS: "linux", Architecture: arch, Digest: "sha256:" + digest(ref+arch)})
+	}
+	return image, nil
+}
+
 func setup(t *testing.T) (Plan, Runner, *memoryStore, *fakeRemote) {
 	t.Helper()
-	return setupAddresses(t, false)
+	return setupAddresses(t, true)
 }
 func setupAddresses(t *testing.T, public bool) (Plan, Runner, *memoryStore, *fakeRemote) {
 	t.Helper()
@@ -125,7 +163,7 @@ func setupOptions(t *testing.T, public bool, acmeIssuer string) (Plan, Runner, *
 		t.Fatal(err)
 	}
 	f := &fakeRemote{counts: map[string]int{}, registrations: map[string]string{}}
-	r := Runner{Identity: testutil.Identity{Account: n.AWS.AccountID}, Cloud: c, Store: s, Remote: f, Owner: "deploy", Version: "test", Wait: func(ctx context.Context) error { return ctx.Err() }}
+	r := Runner{Identity: testutil.Identity{Account: n.AWS.AccountID}, Cloud: c, Store: s, Remote: f, Owner: "deploy", Version: "test", Wait: func(ctx context.Context) error { return ctx.Err() }, Registry: fakeRegistry{}}
 	return plan, r, s, f
 }
 func execute(t *testing.T, p Plan, r Runner) (provision.Record, error) {
@@ -467,7 +505,8 @@ func TestLostCheckpointCancelsWorkAndRetainsRecoveryState(t *testing.T) {
 		t.Fatal("lost journal accepted")
 	}
 	for _, q := range f.calls {
-		if q.Action != "inspect" {
+		// A render stages dashmate's files; it starts nothing.
+		if q.Action != "inspect" && q.Action != "render" {
 			t.Fatal("mutation after missing stage checkpoint")
 		}
 	}
@@ -573,10 +612,21 @@ func TestPublicAdvertisingBindsJournaledElasticIPs(t *testing.T) {
 			t.Fatal("invalid public plan accepted", q.Targets[0], q.Advertise)
 		}
 	}
-	// Private plans never carry a separate private address.
-	private, _, _, _ := setup(t)
-	if private.Advertise != "" || private.Targets[0].PrivateAddress != "" || !strings.HasPrefix(private.Targets[0].PeerAddress, "10.0.0.") {
-		t.Fatal("private plan changed", private.Targets[0])
+	// dashmate's Core never connects to private addresses: no private plan.
+	_, r, s, _ := setupAddresses(t, true)
+	live, err := provision.RunningTargets(context.Background(), p.Bootstrap.Compute, s.record, r.Cloud)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildWith(p.Bootstrap, live, Options{}, 14, time.Now()); err == nil || !strings.Contains(err.Error(), "public addresses") {
+		t.Fatal("private-address plan accepted", err)
+	}
+	q := p
+	q.Advertise, q.Targets = "", privateTargets(p.Targets)
+	q.ID = ""
+	q.ID = hash(q)
+	if q.Validate() == nil {
+		t.Fatal("private-address plan validated")
 	}
 }
 

@@ -2,6 +2,9 @@
 
 A ground-up Dash network manager for **humans, GitHub Actions, and agents**.
 No Terraform, Ansible, Dashmate installation, or OpenClaw is required by this CLI.
+Node services are nonetheless **dashmate's own**: each node's release renders them
+with its pinned dashmate helper image, and they run from that release's dashmate
+compose files; dashmate never runs a node's lifecycle ([details](docs/lifecycle.md#dashmate-services)).
 
 New public-facing allocations require an explicit [AWS BYOIP/IPAM pool](docs/ipam.md).
 Their Elastic IPs are ownership-tagged and journaled through allocation, resume
@@ -71,8 +74,10 @@ directory is ignored).
   quorum parameters, AMI compatibility, live membership, or migration safety.
 
 The initial six components are Core, Drive, rs-dapi, Tenderdash, gateway, and the
-helper image. Images come directly from registries; the resolver does not install
-Dashmate or read Docker credential helpers. Automatic channel selection and
+dashmate helper image, which renders every node's services. Images come directly
+from registries; the resolver does not install Dashmate or read Docker credential
+helpers. The images a release's dashmate selects for Tor and the gateway rate
+limiter are pinned by digest at deployment. Automatic channel selection and
 dependency hints from matching upstream source are the next resolver increment.
 
 ## Read-only AWS discovery

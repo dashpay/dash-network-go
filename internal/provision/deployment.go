@@ -18,6 +18,9 @@ type DeploymentProgress struct {
 	GenesisCoreHeight int64                     `json:"genesisCoreHeight,omitempty"`
 	ObservedAt        time.Time                 `json:"observedAt,omitempty"`
 	Nodes             map[string]DeploymentNode `json:"nodes"`
+	// Sidecars pins the images the release's dashmate selects for services no
+	// release component names. Resolved once, on the first render.
+	Sidecars Sidecars `json:"sidecars,omitempty"`
 }
 
 type DeploymentNode struct {
@@ -50,12 +53,15 @@ func (r Record) validateDeployment(p Plan) error {
 		return errors.New("invalid deployment phase")
 	}
 	switch d.Stage {
-	case "preflight", "core-start", "identities", "core-finalize", "registrations", "core-sync", "quorums", "platform-start", "health", "ready", "stopping", "stopped":
+	case "preflight", "render", "core-start", "identities", "core-finalize", "registrations", "core-sync", "quorums", "platform-start", "health", "ready", "stopping", "stopped":
 	default:
 		return errors.New("invalid deployment stage")
 	}
 	if d.Phase == "network-ready" && (d.Stage != "ready" || d.ObservedAt.IsZero() || d.CoreGenesis == "" || d.GenesisCoreHeight < 1 || d.PayoutAddress == "" || d.SporkAddress == "") {
 		return errors.New("network-ready lacks complete chain evidence")
+	}
+	if err := d.Sidecars.Validate(p); err != nil {
+		return err
 	}
 	if d.CoreGenesis != "" && !hex64.MatchString(d.CoreGenesis) {
 		return errors.New("invalid Core genesis evidence")

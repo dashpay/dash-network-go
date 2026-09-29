@@ -2,17 +2,27 @@
 
 Inputs arrive on stdin over authenticated SSH. Only typed public facts leave
 stdout. Private identities and pre-broadcast transactions stay on the node.
+
+Dash services are dashmate's own, rendered by the release being deployed. Each
+render runs that release's pinned dashmate-helper image, without network,
+Docker socket or its entrypoint, to create (or migrate, as `dashmate update`
+does) this node's dashmate config, apply this devnet's settings, and render the
+service configs and Compose environment. Compose then runs that release's
+dashmate compose files. dashmate never starts, stops or reconfigures a service.
 """
 
 import base64
+import copy
 from decimal import Decimal
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +35,60 @@ ACME_ISSUERS = {
     "letsencrypt": "https://acme-v02.api.letsencrypt.org/directory",
     "letsencrypt-staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
 }
+
+# dashmate runs as the host's operator; uid 1000 is Ubuntu's default user. The
+# helper renders as this user, so every rendered file, and dashmate's LOCAL_UID
+# (the gateway's Envoy user), belong to it rather than to root.
+SERVICE_UID = 1000
+# dashmate's own default network, 0.0.0.0/0, is only a placeholder.
+DOCKER_SUBNET = "172.24.24.0/24"
+# The dashmate services this tool runs, in start order. dashmate_helper, which
+# has no profile, is never started: this tool drives the lifecycle.
+CORE_SERVICES = ["core", "core_tor"]
+PLATFORM_SERVICES = [
+    "drive_abci",
+    "drive_tenderdash",
+    "rs_dapi",
+    "gateway_rate_limiter_redis",
+    "gateway_rate_limiter",
+    "gateway",
+]
+NOT_STARTED = ["dashmate_helper"]
+# Release components that are dashmate services. Every other selected service
+# is a sidecar whose image dashmate chooses and the controller pins.
+COMPONENTS = {
+    "core": "core",
+    "drive_abci": "drive",
+    "drive_tenderdash": "tenderdash",
+    "rs_dapi": "dapi",
+    "gateway": "gateway",
+}
+# This tool's own services, in their own Compose project.
+AUXILIARY = ["miner", "acme"]
+# The wallet host's explorer, Insight and faucet read these indexes.
+WALLET_INDEXES = ["address", "spent", "timestamp", "tx"]
+# Each service carries a digest of its Compose definition and rendered files, so
+# Compose recreates exactly the services whose configuration changed.
+FINGERPRINT = "dashnet.config"
+
+# Runs dashmate's CLI inside the helper image. Nothing but config commands.
+RENDER = r"""set -eu
+cfg=$1
+dm() { yarn dashmate "$@" >/dev/null; }
+case "$2" in
+create) dm config create "$cfg" base ;;
+migrate) dm config get network --config "$cfg" ;;
+render)
+  dm config render --config "$cfg"
+  dm config envs --config "$cfg" --output-file "$DASHMATE_HOME_DIR/.envs"
+  rm -rf "$DASHMATE_HOME_DIR/.compose"
+  mkdir "$DASHMATE_HOME_DIR/.compose"
+  cp /platform/packages/dashmate/docker-compose*.yml "$DASHMATE_HOME_DIR/.compose/"
+  node -p "require('/platform/packages/dashmate/package.json').version" >"$DASHMATE_HOME_DIR/.version"
+  ;;
+*) exit 64 ;;
+esac
+"""
 
 
 def protobuf(raw):
@@ -63,6 +127,18 @@ def protobuf(raw):
     return fields
 
 
+def tor_hash_matches(spec, password):
+    """Verifies a Tor HashedControlPassword (RFC 2440 iterated, salted S2K)."""
+    if not re.fullmatch(r"16:[0-9A-Fa-f]{58}", spec):
+        return False
+    raw = bytes.fromhex(spec[3:])
+    salt, indicator, digest = raw[:8], raw[8], raw[9:]
+    count = (16 + (indicator & 15)) << ((indicator >> 4) + 6)
+    data = salt + password.encode()
+    whole, rest = divmod(count, len(data))
+    return hmac.compare_digest(hashlib.sha1(data * whole + data[:rest]).digest(), digest)
+
+
 class Failure(Exception):
     pass
 
@@ -71,6 +147,20 @@ class RPCFailure(Failure):
     def __init__(self, method, code):
         self.code = int(code)
         super().__init__("rpc-" + method.replace(" ", "-") + ":" + str(self.code))
+
+
+class Render:
+    """A dashmate render staged beside the live home, not yet installed."""
+
+    def __init__(self, stage, config, envs, services, selection, fingerprints, version, requested):
+        self.stage, self.config, self.envs = stage, config, envs
+        self.services, self.selection = services, selection
+        self.fingerprints, self.version = fingerprints, version
+        # dashmate's own image for each sidecar, before any pin.
+        self.requested = requested
+
+    def sidecars(self):
+        return dict(self.requested)
 
 
 class Worker:
@@ -86,6 +176,9 @@ class Worker:
         self.ports = self.c["ports"]
         self.images = {v["component"]: v["pinned"] for v in self.t["images"]}
         self.project = "dashnet-" + self.c["computePlanId"][:10] + "-" + self.t["name"]
+        # dashmate's home: its config.json and rendered service configs.
+        self.home = self.root / "dashmate"
+        self.config_name = self.t["name"]
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def require(self, condition, code):
@@ -140,7 +233,19 @@ class Worker:
         self.require(actual == self.t["instanceId"], "instance-mismatch")
         self.require(os.geteuid() == 0, "root-required")
 
-    def run(self, args, stdin=None, timeout=120):
+    def log(self, data):
+        """Keeps bounded command diagnostics on the host; never in output."""
+        try:
+            path = self.root / "worker.log"
+            if path.exists() and path.stat().st_size > 4 * 1024 * 1024:
+                path.unlink()
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "ab") as stream:
+                stream.write(data[-65536:] + b"\n")
+        except OSError:
+            pass
+
+    def run(self, args, stdin=None, timeout=120, env=None):
         try:
             result = subprocess.run(
                 args,
@@ -149,14 +254,19 @@ class Worker:
                 stderr=subprocess.PIPE,
                 timeout=timeout,
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             raise Failure("command-timeout") from None
+        if result.returncode != 0:
+            self.log(result.stderr)
         self.require(result.returncode == 0, "command-exit-" + str(result.returncode))
         self.require(len(result.stdout) <= 4 * 1024 * 1024, "command-output-too-large")
         return result.stdout
 
-    def docker(self, *args, timeout=120):
+    def docker(self, *args, timeout=120, env=None):
+        if env is not None:
+            env = dict(env, PATH="/usr/sbin:/usr/bin:/sbin:/bin", HOME="/root")
         return self.run(
             [
                 "docker",
@@ -167,6 +277,7 @@ class Worker:
                 *args,
             ],
             timeout=timeout,
+            env=env,
         )
 
     def container_name(self, service):
@@ -208,6 +319,7 @@ class Worker:
         }
 
     def service(self, name, image):
+        """This tool's own services: the miner, the ACME client, join nodes."""
         return dict(
             image=image,
             container_name=self.container_name(name),
@@ -219,16 +331,18 @@ class Worker:
         )
 
     def compose(self, component, services):
+        # The miner and ACME client are a separate project from dashmate's.
+        project = self.project + "-aux" if component in AUXILIARY else self.project
         path = self.root / component / "compose.json"
-        value = dict(name=self.project, services=services)
+        value = dict(name=project, services=services)
         existing = self.read(component + "/compose.json")
         if existing != value:
             self.atomic(component + "/compose.json", value)
-        self.docker("compose", "-p", self.project, "-f", str(path), "config", "--quiet")
+        self.docker("compose", "-p", project, "-f", str(path), "config", "--quiet")
         self.docker(
             "compose",
             "-p",
-            self.project,
+            project,
             "-f",
             str(path),
             "up",
@@ -268,12 +382,16 @@ class Worker:
             "data",
             "transactions",
             "deployment.json",
+            "dashmate",
+            "dashmate-stage",
         ]:
             self.require(not (self.root / name).is_symlink(), "symlink-refused")
         self.check_containers()
-        for service in ["core", "miner", "drive", "tenderdash", "dapi", "gateway", "acme"]:
-            if self.inspect_container(service):
-                pass
+        for service in self.known_services():
+            self.inspect_container(service)
+
+    def known_services(self):
+        return CORE_SERVICES + PLATFORM_SERVICES + AUXILIARY + ["render"]
 
     def auxiliary_label(self):
         return self.c["network"] + "/" + self.t["name"]
@@ -284,10 +402,7 @@ class Worker:
         # list server) are ignored only when explicitly labelled
         # dashnet.auxiliary=<network>/<node> for this exact host, and they can
         # never occupy dashnet's own container namespace.
-        own = {
-            self.container_name(x)
-            for x in ["core", "miner", "drive", "tenderdash", "dapi", "gateway", "acme"]
-        }
+        own = {self.container_name(x) for x in self.known_services()}
         listing = self.docker(
             "container",
             "ls",
@@ -345,127 +460,526 @@ class Worker:
             raise RPCFailure(method, data["error"]["code"])
         return data["result"]
 
-    def core_config(self, final=False):
-        secret = self.secret()
-        p = self.ports
-        # Configured only for this private managed devnet. RPC and ZMQ are always
-        # loopback; no credentials are ever placed in process arguments.
-        lines = [
-            "devnet=" + self.c["coreNetwork"],
-            "daemon=0",
-            "server=1",
-            "txindex=1",
-            "addressindex=1",
-            "spentindex=1",
-            "timestampindex=1",
-            "dnsseed=0",
-            "discover=0",
-            # Public advertising uses the Elastic IPs only, as long-running devnets do.
-            "allowprivatenet=" + ("0" if self.c.get("advertise") == "public" else "1"),
-            "listen=1",
-            "maxconnections=256",
-            "fallbackfee=0.00001",
-            "rpcuser=dashnet",
-            "rpcpassword=" + secret["rpcPassword"],
-            "rpcallowip=127.0.0.1",
-            "rpcworkqueue=128",
-            "rpcthreads=32",
-            "deprecatedrpc=hpmn",
-            "llmqchainlocks=llmq_devnet",
-            "llmqinstantsenddip0024=llmq_devnet_dip0024",
-            "llmqplatform=llmq_devnet_platform",
-            "llmqmnhf=llmq_devnet",
-        ]
-        if final:
-            self.require(self.q.get("sporkAddress"), "missing-spork-address")
-            lines.append("sporkaddr=" + self.q["sporkAddress"])
-            if self.t["role"] == "wallet":
-                lines.append("sporkkey=" + secret["sporkKey"])
-            if self.t["role"] == "validator":
-                lines.append("masternodeblsprivkey=" + secret["operatorPrivateKey"])
-        lines += [
-            "[devnet]",
-            "port=" + str(p["coreP2P"]),
-            "rpcport=" + str(p["coreRPC"]),
-            "rpcbind=127.0.0.1",
-            "bind=0.0.0.0",
-            "externalip=" + self.t["peerAddress"] + ":" + str(p["coreP2P"]),
-            "minimumdifficultyblocks=1000000",
-            "highsubsidyblocks=500",
-            "highsubsidyfactor=100",
-            "powtargetspacing=" + str(self.block_seconds()),
-        ]
-        for name in [
-            "rawtx",
-            "rawtxlock",
-            "rawblock",
-            "hashblock",
-            "rawchainlocksig",
-            "rawtxlocksig",
+    # dashmate configuration and rendering ------------------------------------
+
+    def own(self, path):
+        if os.geteuid() == 0:
+            os.chown(path, SERVICE_UID, SERVICE_UID)
+
+    def inputs(self):
+        """What Core has been finalized with and what Platform started with.
+
+        Every later render reproduces them; neither is ever replaced."""
+        state = self.read("core/state.json", {})
+        return state.get("sporkAddress") if state.get("final") else None, self.read(
+            "platform/inputs.json"
+        )
+
+    def configure(self, config, spork):
+        """Applies this devnet's settings to the node's dashmate config.
+
+        Only options: every other value is the release's own default, or the
+        value its migrations produced."""
+        s, p, t, c = self.secret(), self.ports, self.t, self.c
+        d = config["configs"][self.config_name]
+        validator, final = t["role"] == "validator", spork is not None
+
+        def put(path, value, create=False):
+            node, keys = d, path.split(".")
+            for key in keys[:-1]:
+                self.require(isinstance(node.get(key), dict), "dashmate-option-missing")
+                node = node[key]
+            self.require(create or keys[-1] in node, "dashmate-option-missing")
+            node[keys[-1]] = value
+
+        # RPC: dashmate's per-service users, each with its own password, plus
+        # the user this tool (and the wallet host's services) authenticate as.
+        users = d["core"]["rpc"]["users"]
+        passwords = s.setdefault("rpcUsers", {})
+        for user in users:
+            if user not in passwords:
+                passwords[user] = secrets.token_hex(32)
+        if s != self.read("secrets.json"):
+            self.atomic("secrets.json", s)
+        for user in users:
+            users[user]["password"] = passwords[user]
+        users["dashnet"] = dict(password=s["rpcPassword"], whitelist=None, lowPriority=False)
+
+        own = t["peerAddress"] + ":" + str(p["coreP2P"])
+        seeds = []
+        for peer in c["corePeers"]:
+            if peer != own:
+                host, port = peer.rsplit(":", 1)
+                seeds.append(dict(host=host, port=int(port)))
+        put("network", "devnet")
+        put("description", "dashnet " + c["network"] + "/" + t["name"])
+        put("externalIp", t["peerAddress"])
+        put("docker.network.subnet", DOCKER_SUBNET)
+        put("core.docker.image", self.images["core"])
+        put("core.p2p.port", p["coreP2P"])
+        put("core.p2p.seeds", seeds)
+        put("core.rpc.port", p["coreRPC"])
+        put("core.zmq.port", p["coreZMQ"])
+        put("core.devnet.name", c["coreNetwork"])
+        put("core.devnet.powTargetSpacing", self.block_seconds())
+        # Blocks are paced by the miner, not by difficulty.
+        put("core.devnet.minimumDifficultyBlocks", 1000000)
+        put("core.indexes", WALLET_INDEXES if t["role"] == "wallet" else [])
+        put("core.miner.enable", False)
+        put("core.spork.address", spork)
+        put("core.spork.privateKey", s["sporkKey"] if final and t["role"] == "wallet" else None)
+        put("core.masternode.enable", validator and final)
+        put(
+            "core.masternode.operator.privateKey",
+            s["operatorPrivateKey"] if validator and final else None,
+        )
+        put("platform.enable", validator)
+        if not validator:
+            return
+        put("platform.drive.abci.docker.image", self.images["drive"])
+        put("platform.drive.abci.epochTime", int(c.get("platformEpochSeconds") or 3600))
+        # dashmate has no devnet preset: these are Core's llmq_devnet* settings.
+        for name, kind, window, signers, rotation in [
+            ("validatorSet", 107, 24, 4, False),
+            ("chainLock", 101, 24, 4, False),
+            ("instantLock", 105, 48, 2, True),
         ]:
-            lines.append("zmqpub" + name + "=tcp://127.0.0.1:" + str(p["coreZMQ"]))
-        lines += [
-            "addnode=" + peer
-            for peer in self.c["corePeers"]
-            if peer != self.t["peerAddress"] + ":" + str(p["coreP2P"])
+            put(
+                "platform.drive.abci." + name + ".quorum",
+                dict(llmqType=kind, dkgInterval=window, activeSigners=signers, rotation=rotation),
+            )
+        put("platform.dapi.rsDapi.docker.image", self.images["dapi"])
+        put("platform.gateway.docker.image", self.images["gateway"])
+        put("platform.gateway.listeners.dapiAndDrive.port", p["gateway"])
+        put("platform.gateway.ssl.enabled", True)
+        tls = c.get("gatewayTls")
+        put("platform.gateway.ssl.provider", "letsencrypt" if tls else "self-signed")
+        if tls:
+            put("platform.gateway.ssl.providerConfigs.letsencrypt.email", tls["email"])
+            put(
+                "platform.gateway.ssl.providerConfigs.letsencrypt.acmeDirectoryUrl",
+                ACME_ISSUERS[tls["issuer"]],
+            )
+        # The fleet (including the wallet host's reverse proxy) is not limited.
+        put(
+            "platform.gateway.rateLimiter.whitelist",
+            sorted({x.rsplit(":", 1)[0] for x in c["corePeers"]}),
+        )
+        td = "platform.drive.tenderdash."
+        put(td + "docker.image", self.images["tenderdash"])
+        put(td + "mode", "validator")
+        put(td + "moniker", t["name"])
+        put(td + "p2p.port", p["platformP2P"])
+        put(td + "rpc.port", p["platformRPC"])
+        if "platformNodeID" in s:
+            put(td + "node.id", s["platformNodeID"])
+            put(td + "node.key", s["nodePrivateKey"])
+        genesis = d["platform"]["drive"]["tenderdash"]["genesis"]
+        genesis.update(
+            chain_id=c["platformChainId"],
+            genesis_time=c["genesisTime"],
+            validator_quorum_type=107,
+        )
+        genesis["consensus_params"]["version"] = dict(
+            app_version=str(c["initialProtocolVersion"])
+        )
+        _, platform = self.inputs()
+        if platform:
+            genesis["initial_core_chain_locked_height"] = platform["genesisCoreHeight"]
+            put(
+                td + "p2p.persistentPeers",
+                [
+                    dict(id=v["nodeId"], host=v["address"], port=p["platformP2P"])
+                    for v in platform["peers"]
+                    if v["name"] != t["name"]
+                ],
+            )
+
+    def helper(self, stage, mode):
+        """dashmate's own CLI from the release's helper image: no network, no
+        Docker socket, not its entrypoint (which expects the socket), and not
+        root. The stage is mounted at the live home's path, so every path
+        dashmate renders is the one the services will mount."""
+        if self.inspect_container("render"):  # left by an interrupted render
+            self.docker("rm", "--force", self.container_name("render"))
+        labels = []
+        for key, value in self.labels().items():
+            labels += ["--label", key + "=" + value]
+        self.docker(
+            "run",
+            "--rm",
+            "--name",
+            self.container_name("render"),
+            *labels,
+            "--network",
+            "none",
+            "--pull",
+            "never",
+            "--user",
+            "%d:%d" % (SERVICE_UID, SERVICE_UID),
+            "--entrypoint",
+            "/bin/sh",
+            "--workdir",
+            "/platform",
+            "--env",
+            "DASHMATE_HOME_DIR=" + str(self.home),
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "YARN_ENABLE_TELEMETRY=0",
+            "--volume",
+            str(stage) + ":" + str(self.home),
+            self.images["helper"],
+            "-c",
+            RENDER,
+            "dashnet",
+            self.config_name,
+            mode,
+            timeout=600,
+        )
+
+    def envs(self, base):
+        values = {}
+        for line in (base / ".envs").read_text().splitlines():
+            if line:
+                key, sep, value = line.partition("=")
+                self.require(sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", key), "dashmate-envs")
+                values[key] = value
+        return values
+
+    def project_files(self, base):
+        """dashmate's compose files and profiles from its Compose environment,
+        read from base (the stage or the live home)."""
+        envs = self.envs(base)
+        files = []
+        for name in envs["COMPOSE_FILE"].split(envs.get("COMPOSE_PATH_SEPARATOR") or ":"):
+            if name.startswith("/"):
+                path = Path(name)
+                self.require(path.is_relative_to(self.home), "dashmate-compose-file")
+                files.append(base / path.relative_to(self.home))
+            else:
+                self.require(re.fullmatch(r"docker-compose[a-z0-9_.-]*\.yml", name), "dashmate-compose-file")
+                files.append(base / ".compose" / name)
+        for path in files:
+            self.require(path.is_file() and not path.is_symlink(), "dashmate-compose-file")
+        profiles = [x for x in envs.get("COMPOSE_PROFILES", "").split(",") if x]
+        # Compose reads the environment as dashmate passes it: process variables.
+        environment = {k: v for k, v in envs.items() if not k.startswith("COMPOSE_")}
+        return files, profiles, environment
+
+    def dm_compose(self, base, *args, override=True, timeout=300):
+        files, profiles, environment = self.project_files(base)
+        # dashmate's compose files reach its home only through
+        # DASHMATE_HOME_DIR, so a stage is evaluated where it lies.
+        environment["DASHMATE_HOME_DIR"] = str(base)
+        command = ["compose", "--project-name", self.project, "--project-directory", str(base / ".compose")]
+        if override:
+            files.append(base / ".dashnet-compose.json")
+        for path in files:
+            command += ["--file", str(path)]
+        for profile in profiles:
+            command += ["--profile", profile]
+        return self.docker(*command, *args, timeout=timeout, env=environment)
+
+    def compose_services(self, base, override=True):
+        """The Compose model as the live home will run it."""
+        text = self.dm_compose(base, "config", "--format", "json", override=override).decode()
+        if base != self.home:
+            text = text.replace(json.dumps(str(base))[1:-1], json.dumps(str(self.home))[1:-1])
+        return json.loads(text)["services"]
+
+    def select(self, services):
+        names = set(services) - set(NOT_STARTED)
+        self.require(names <= set(CORE_SERVICES + PLATFORM_SERVICES), "unsupported-dashmate-service")
+        for service, component in COMPONENTS.items():
+            if service in names:
+                self.require(services[service]["image"] == self.images[component], "dashmate-image-not-pinned")
+        return [s for s in CORE_SERVICES + PLATFORM_SERVICES if s in names]
+
+    def override(self, selection, fingerprints=None):
+        """This tool's Compose additions: ownership labels, its container names,
+        pinned sidecar images, and a client-only dash.conf in Core for dash-cli
+        (dashd reads its own). No service configuration."""
+        pins = self.c.get("sidecarImages") or {}
+        services = {}
+        for name in selection:
+            labels = self.labels()
+            if fingerprints:
+                labels[FINGERPRINT] = fingerprints[name]
+            value = dict(container_name=self.container_name(name), labels=labels)
+            if name not in COMPONENTS and name in pins:
+                value["image"] = pins[name]
+            services[name] = value
+        if "core" in services:
+            services["core"]["volumes"] = [
+                dict(type="bind", source="${DASHMATE_HOME_DIR}/.client/dash.conf", target="/etc/dash/dash.conf", read_only=True)
+            ]
+        return dict(services=services)
+
+    def write(self, path, data, mode=0o644):
+        """Rewrites a file in place, as dashmate does: a running container's
+        bind mount of it keeps seeing it."""
+        self.require(not path.is_symlink(), "symlink-refused")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, mode)
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(path, mode)
+        self.own(path)
+
+    def normalized(self, path, data, config):
+        """File content without the salts dashmate draws on every render.
+
+        Each salted line is first verified against the configured secret, so a
+        changed credential still changes the digest."""
+        d = config["configs"][self.config_name]
+        if path.name == "dash.conf" and path.parent.name == "core":
+            users = d["core"]["rpc"]["users"]
+            lines = []
+            for line in data.decode().splitlines(keepends=True):
+                if line.startswith("rpcauth="):
+                    user, _, auth = line[len("rpcauth="):].strip().partition(":")
+                    salt, _, digest = auth.partition("$")
+                    password = users.get(user, {}).get("password", "")
+                    expected = hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()
+                    self.require(password and hmac.compare_digest(expected, digest), "rpcauth-mismatch")
+                    line = "rpcauth=" + user + ":verified\n"
+                lines.append(line)
+            return "".join(lines).encode()
+        if path.name == "torrc":
+            password = d["core"]["tor"]["control"]["password"]
+            lines = []
+            for line in data.decode().splitlines(keepends=True):
+                if line.startswith("HashedControlPassword "):
+                    self.require(tor_hash_matches(line.split()[1], password), "tor-password-mismatch")
+                    line = "HashedControlPassword verified\n"
+                lines.append(line)
+            return "".join(lines).encode()
+        return data
+
+    def content(self, path, config):
+        self.require(not path.is_symlink(), "symlink-refused")
+        if path.is_dir():
+            return {
+                str(p.relative_to(path)): self.content(p, config)
+                for p in sorted(path.rglob("*"))
+                if not p.is_dir()
+            }
+        if not path.exists():
+            return None
+        return hashlib.sha256(self.normalized(path, path.read_bytes(), config)).hexdigest()
+
+    def mounts(self, service):
+        """The rendered configuration a service bind-mounts from the home.
+        Gateway certificates are not configuration: renewals reload them."""
+        ssl = self.home / self.config_name / "platform/gateway/ssl"
+        out = []
+        for volume in service.get("volumes") or []:
+            source = Path(volume.get("source") or "/")
+            if (
+                volume.get("type") == "bind"
+                and source.is_relative_to(self.home)
+                and not source.is_relative_to(ssl)
+            ):
+                out.append(source.relative_to(self.home))
+        return out
+
+    def fingerprints(self, base, services, selection, config):
+        out = {}
+        for name in selection:
+            value = copy.deepcopy(services[name])
+            (value.get("labels") or {}).pop(FINGERPRINT, None)
+            files = {str(m): self.content(base / m, config) for m in self.mounts(value)}
+            entry = [value, files]
+            if name == "core_tor":
+                # It shares Core's network namespace: a new Core means a new Tor.
+                entry.append(out.get("core"))
+            out[name] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
+        return out
+
+    def render(self):
+        """Renders this node with its release's dashmate into a fresh stage."""
+        self.stage = "dashmate-render"
+        spork, platform = self.inputs()
+        stage = self.root / "dashmate-stage"
+        self.require(not stage.is_symlink(), "symlink-refused")
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir(mode=0o700)
+        self.own(stage)
+        live = self.home / "config.json"
+        if live.exists():
+            shutil.copyfile(live, stage / "config.json")
+            self.own(stage / "config.json")
+            self.helper(stage, "migrate")
+        else:
+            self.helper(stage, "create")
+        config = json.loads((stage / "config.json").read_text())
+        self.configure(config, spork)
+        self.write(stage / "config.json", json.dumps(config, indent=2).encode(), 0o600)
+        self.helper(stage, "render")
+        version = (stage / ".version").read_text().strip()
+        self.require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?", version), "dashmate-version")
+        client = [
+            "devnet=" + self.c["coreNetwork"],
+            "rpcuser=dashnet",
+            "rpcpassword=" + self.secret()["rpcPassword"],
+            "[devnet]",
+            "rpcconnect=127.0.0.1",
+            "rpcport=" + str(self.ports["coreRPC"]),
         ]
-        return "\n".join(lines) + "\n"
+        self.write(stage / ".client/dash.conf", ("\n".join(client) + "\n").encode(), 0o600)
+        # Selection, then this tool's additions, then their fingerprints.
+        raw = self.compose_services(stage, override=False)
+        selection = self.select(raw)
+        requested = {s: raw[s]["image"] for s in selection if s not in COMPONENTS}
+        self.write(stage / ".dashnet-compose.json", json.dumps(self.override(selection)).encode())
+        services = self.compose_services(stage)
+        fingerprints = self.fingerprints(stage, services, selection, config)
+        self.write(stage / ".dashnet-compose.json", json.dumps(self.override(selection, fingerprints)).encode())
+        self.require(self.select(self.compose_services(stage)) == selection, "dashmate-selection-changed")
+        r = Render(stage, config, self.envs(stage), services, selection, fingerprints, version, requested)
+        if platform:
+            self.guard_identity(r)
+        return r
+
+    def guard_identity(self, r):
+        """Platform genesis and node identity, once started, are never replaced."""
+        tenderdash = r.stage / self.config_name / "platform/drive/tenderdash"
+        identity = {
+            name: self.content(tenderdash / name, r.config)
+            for name in ["genesis.json", "node_key.json"]
+        }
+        self.require(all(identity.values()), "missing-platform-identity")
+        self.immutable("platform/identity.json", identity)
+
+    def install(self, r, services):
+        """Installs the staged render for the given services: dashmate's own
+        state and Compose environment, and the rendered trees those services
+        use (mounted files and env files alike). Rendered files of services
+        outside the scope keep their live content; they are only created when
+        missing, since Compose reads every enabled service's files."""
+        trees = []
+        if any(s in CORE_SERVICES for s in services):
+            trees += [Path(self.config_name) / "core", Path(".client")]
+        if any(s in PLATFORM_SERVICES for s in services):
+            trees.append(Path(self.config_name) / "platform")
+        if not self.home.exists():
+            self.home.mkdir(mode=0o700)
+            self.own(self.home)
+        paths = [p.relative_to(r.stage) for p in sorted(r.stage.rglob("*")) if not p.is_dir()]
+        for name in ["config.json", ".envs", ".version", ".dashnet-compose.json"]:
+            self.require(Path(name) in paths, "dashmate-render-incomplete")
+        for path in paths:
+            source = r.stage / path
+            self.require(source.is_file() and not source.is_symlink(), "dashmate-render-incomplete")
+            scoped = len(path.parts) < 2 or path.parts[0] == ".compose" or path == Path(self.config_name) / "dynamic-compose.yml" \
+                or any(path.is_relative_to(tree) for tree in trees)
+            if scoped or not (self.home / path).exists():
+                private = path.name in ["config.json", ".envs"] or path.parts[0] == ".client"
+                self.write(self.home / path, source.read_bytes(), 0o600 if private else 0o644)
+        # Parent directories created above belong to the service user too.
+        for directory in sorted({(self.home / p).parent for p in paths}):
+            if directory.exists():
+                self.own(directory)
+
+    def discard(self, r):
+        shutil.rmtree(r.stage, ignore_errors=True)
+
+    def selection(self):
+        """The services the live render runs."""
+        path = self.home / ".dashnet-compose.json"
+        if not path.exists():
+            return []
+        return [s for s in CORE_SERVICES + PLATFORM_SERVICES if s in json.loads(path.read_text())["services"]]
+
+    def label(self, container):
+        return (container["Config"].get("Labels") or {}).get(FINGERPRINT, "")
+
+    def verify_pin(self, pin):
+        """A pinned image is present, for this architecture and digest."""
+        try:
+            image = json.loads(self.docker("image", "inspect", pin))[0]
+        except Failure:
+            self.docker("pull", "--platform", "linux/" + self.t["architecture"], pin, timeout=600)
+            image = json.loads(self.docker("image", "inspect", pin))[0]
+        self.require(
+            image["Architecture"] == self.t["architecture"]
+            and image["Os"] == "linux"
+            and any(v.split("@")[-1] == pin.split("@")[-1] for v in image.get("RepoDigests", [])),
+            "image-proof",
+        )
+
+    def up(self, r, services):
+        """Converges the given services with the installed render. Compose
+        recreates exactly those whose configuration fingerprint changed."""
+        for name in services:
+            if name not in COMPONENTS:
+                pin = (self.c.get("sidecarImages") or {}).get(name)
+                self.require(pin and r.services[name]["image"] == pin, "sidecar-image-not-pinned")
+                self.verify_pin(pin)
+        self.dm_compose(
+            self.home, "up", "--detach", "--no-deps", "--no-build", "--pull", "never", *services, timeout=600
+        )
+        # Converged means running this render. Readiness is the health gates'
+        # job: Tenderdash, for one, restarts until Drive opens ABCI.
+        for name in services:
+            value = self.inspect_container(name)
+            self.require(
+                value
+                and (value["State"]["Running"] or value["State"].get("Restarting"))
+                and self.label(value) == r.fingerprints[name],
+                "dashmate-service-not-converged",
+            )
+
+    def core_config(self):
+        """Digest of Core's live dash.conf, without dashmate's per-render salts."""
+        config = json.loads((self.home / "config.json").read_text())
+        path = self.home / self.config_name / "core/dash.conf"
+        return hashlib.sha256(self.normalized(path, path.read_bytes(), config)).hexdigest()
+
+    # Core ---------------------------------------------------------------------
 
     def ensure_core(self, final=False):
         self.stage = "core-config"
         # A resume must never revert the final BLS/spork configuration.
         state = self.read("core/state.json", {})
-        if state.get("final") and not final:
-            self.q["sporkAddress"] = state["sporkAddress"]
-            final = True
-        config = self.core_config(final)
-        config_path = self.root / "core/dash.conf"
-        changed = not config_path.exists() or config_path.read_text() != config
-        existing = self.inspect_container("core")
-        if changed and existing:
-            self.stage = "core-stop-for-config"
-            self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
-        if changed:
-            self.atomic("core/dash.conf", config)
-        (self.root / "data/core").mkdir(parents=True, exist_ok=True, mode=0o700)
-        service = self.service("core", self.images["core"])
-        service.update(
-            entrypoint=["dashd"],
-            command=[
-                "-conf=/etc/dash/dash.conf",
-                "-datadir=/data",
-                "-printtoconsole=1",
-            ],
-            volumes=[
-                str(config_path) + ":/etc/dash/dash.conf:ro",
-                str(self.root / "data/core") + ":/data",
-            ],
-            stop_grace_period="120s",
-        )
-        self.stage = "core-start"
-        self.compose("core", {"core": service})
+        if final:
+            self.require(self.q.get("sporkAddress"), "missing-spork-address")
+            if state.get("final"):
+                self.require(state["sporkAddress"] == self.q["sporkAddress"], "spork-address-changed")
+            else:
+                self.atomic("core/state.json", {"final": True, "sporkAddress": self.q["sporkAddress"]})
+        r = self.render()
+        try:
+            services = [s for s in r.selection if s in CORE_SERVICES]
+            self.install(r, services)
+            self.stage = "core-start"
+            self.up(r, services)
+        finally:
+            self.discard(r)
         # Each caller has a deadline; a bounded readiness wait avoids racing RPC
         # initialization without launching a persistent control-plane daemon.
         deadline = time.monotonic() + 90
         while True:
             try:
-                result = self.core_status()
-                break
+                return self.core_status()
             except (RPCFailure, urllib.error.URLError, ConnectionError):
                 if time.monotonic() >= deadline:
                     raise Failure("core-rpc-not-ready") from None
                 time.sleep(1)
-        if final:
-            self.atomic(
-                "core/state.json",
-                {"final": True, "sporkAddress": self.q["sporkAddress"]},
-            )
-        return result
 
     def core_status(self):
         value = self.inspect_container("core")
         self.require(value and value["State"]["Running"], "core-not-running")
         self.verify_image(value, self.images["core"])
+        if "core_tor" in self.selection():
+            tor = self.inspect_container("core_tor")
+            self.require(tor and tor["State"]["Running"], "core-tor-not-running")
         info = self.rpc("getblockchaininfo")
         self.require(info["chain"] == "devnet-" + self.c["coreNetwork"], "wrong-chain")
         sync = self.rpc("mnsync", ["status"])
@@ -505,9 +1019,7 @@ class Worker:
             peers=self.rpc("getconnectioncount"),
             containerId=value["Id"],
             restarts=value["RestartCount"],
-            configSha256=hashlib.sha256(
-                (self.root / "core/dash.conf").read_bytes()
-            ).hexdigest(),
+            configSha256=self.core_config(),
             masternodeState=state,
             proTxHash=protx,
             chainLockHeight=chainlock,
@@ -521,6 +1033,15 @@ class Worker:
             image["Architecture"] == self.t["architecture"] and image["Os"] == "linux",
             "image-platform-drift",
         )
+
+    def render_info(self):
+        """The release's dashmate version and the sidecar images it selects,
+        for the controller to pin. Nothing is installed or started."""
+        r = self.render()
+        try:
+            return dict(render=dict(version=r.version, sidecars=r.sidecars()))
+        finally:
+            self.discard(r)
 
     def identity(self):
         self.require(self.t["role"] == "validator", "validator-only")
@@ -828,9 +1349,11 @@ class Worker:
         if previous is None:
             self.atomic(path, value)
 
-    def platform_files(self):
+    # Platform -----------------------------------------------------------------
+
+    def platform_start(self):
         self.require(self.t["role"] == "validator", "validator-only")
-        secret, p = self.read("secrets.json"), self.ports
+        secret = self.read("secrets.json")
         own = [v for v in self.q["peers"] if v["name"] == self.t["name"]]
         self.require(
             len(own) == 1
@@ -839,147 +1362,67 @@ class Worker:
             "platform-identity-mismatch",
         )
         self.require(self.q["genesisCoreHeight"] > 0, "missing-genesis-chainlock")
-        genesis = dict(
-            genesis_time=self.c["genesisTime"],
-            chain_id=self.c["platformChainId"],
-            initial_height="1",
-            initial_core_chain_locked_height=self.q["genesisCoreHeight"],
-            validator_quorum_type=107,
-            consensus_params=dict(
-                block=dict(
-                    max_bytes="2097152", max_gas="57631392000", time_iota_ms="5000"
-                ),
-                evidence=dict(
-                    max_age_num_blocks="100000",
-                    max_age_duration="172800000000000",
-                    max_bytes="1048576",
-                ),
-                validator=dict(pub_key_types=["bls12381"]),
-                version=dict(app_version=str(self.c["initialProtocolVersion"])),
-                timeout=dict(
-                    propose="50000000000",
-                    propose_delta="5000000000",
-                    vote="10000000000",
-                    vote_delta="1000000000",
-                ),
-                synchrony=dict(message_delay="70000000000", precision="1000000000"),
-                abci=dict(recheck_tx=True),
-            ),
-        )
-        self.immutable("platform/tenderdash/config/genesis.json", genesis)
-        self.immutable(
-            "platform/tenderdash/config/node_key.json",
-            dict(
-                id=secret["platformNodeID"],
-                priv_key=dict(
-                    type="tendermint/PrivKeyEd25519", value=secret["nodePrivateKey"]
-                ),
-            ),
-        )
-        peers = ",".join(
-            v["nodeId"] + "@" + v["address"] + ":" + str(p["platformP2P"])
-            for v in self.q["peers"]
-            if v["name"] != self.t["name"]
-        )
-        # TOML string values use JSON escaping (the common TOML basic-string subset).
-        lines = [
-            'mode = "validator"',
-            "moniker = " + json.dumps(self.t["name"]),
-            'genesis-file = "config/genesis.json"',
-            'node-key-file = "config/node_key.json"',
-            'db-dir = "data"',
-            'log-format = "json"',
-            "[abci]",
-            'transport = "routed"',
-            "address = "
-            + json.dumps(
-                "CheckTx:grpc:127.0.0.1:"
-                + str(p["driveGRPC"])
-                + ",*:socket:tcp://127.0.0.1:"
-                + str(p["driveABCI"])
-            ),
-            "[priv-validator]",
-            'key-file = "data/priv_validator_key.json"',
-            'state-file = "data/priv_validator_state.json"',
-            'core-rpc-host = "127.0.0.1:' + str(p["coreRPC"]) + '"',
-            'core-rpc-username = "dashnet"',
-            "core-rpc-password = " + json.dumps(secret["rpcPassword"]),
-            "[rpc]",
-            'laddr = "tcp://127.0.0.1:' + str(p["platformRPC"]) + '"',
-            "unsafe = false",
-            "[p2p]",
-            'laddr = "tcp://0.0.0.0:' + str(p["platformP2P"]) + '"',
-            "external-address = "
-            + json.dumps(self.t["peerAddress"] + ":" + str(p["platformP2P"])),
-            "persistent-peers = " + json.dumps(peers),
-            "max-connections = 64",
-            "max-outgoing-connections = 32",
-            "[consensus]",
-            "create-empty-blocks = true",
-            'create-empty-blocks-interval = "5s"',
-            "[tx-index]",
-            'indexer = ["kv"]',
+        self.require(self.inputs()[0], "core-not-finalized")
+        peers = [
+            dict(name=v["name"], address=v["address"], nodeId=v["nodeId"])
+            for v in sorted(self.q["peers"], key=lambda v: v["name"])
         ]
-        config = "\n".join(lines) + "\n"
-        path = self.root / "platform/tenderdash/config/config.toml"
-        self.require(
-            not path.exists() or path.read_text() == config, "tenderdash-config-drift"
-        )
-        if not path.exists():
-            self.atomic("platform/tenderdash/config/config.toml", config)
-        for name in ["drive", "tenderdash/data"]:
-            (self.root / "platform" / name).mkdir(
-                parents=True, exist_ok=True, mode=0o700
-            )
-        self.atomic("platform/tls/cert.pem", secret["tlsCertificate"])
-        self.atomic("platform/tls/key.pem", secret["tlsPrivateKey"])
+        self.immutable("platform/inputs.json", dict(genesisCoreHeight=self.q["genesisCoreHeight"], peers=peers))
+        r = self.render()
+        try:
+            # Core was finalized with exactly this configuration: never restart it here.
+            core = self.inspect_container("core")
+            self.require(core and self.label(core) == r.fingerprints["core"], "core-config-changed")
+            services = [s for s in r.selection if s in PLATFORM_SERVICES]
+            self.install(r, services)
+            self.certificates()
+            self.stage = "platform-start"
+            self.up(r, services)
+        finally:
+            self.discard(r)
         if self.c.get("gatewayTls"):
-            # Envoy loads the certificate through a watched SDS file. It starts on
-            # the persisted self-signed pair; the ACME client swaps in trusted
-            # certificates. A certificate it already installed is kept.
-            current = self.read("platform/tls/sds.json")
-            chain = (((current or {}).get("resources") or [{}])[0].get("tls_certificate") or {}).get("certificate_chain", {}).get("filename", "")
-            if not chain.startswith("/tls/") or not (self.root / "platform" / chain[1:]).is_file():
-                self.atomic("platform/tls/sds.json", self.sds("/tls/cert.pem", "/tls/key.pem"))
-        self.atomic("platform/envoy.json", self.envoy())
+            self.acme_start()
+        return {}
 
-    @staticmethod
-    def sds(chain, key):
-        return {"resources": [{
-            "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret",
-            "name": "gateway",
-            "tls_certificate": {"certificate_chain": {"filename": chain}, "private_key": {"filename": key}},
-        }]}
+    def ssl(self):
+        return self.home / self.config_name / "platform/gateway/ssl"
+
+    def certificates(self):
+        """The gateway starts on this node's persisted self-signed pair. Trusted
+        certificates, once issued, replace it in place and are kept."""
+        secret = self.read("secrets.json")
+        for name, value, mode in [
+            ("private.key", secret["tlsPrivateKey"], 0o600),
+            ("bundle.crt", secret["tlsCertificate"], 0o644),
+        ]:
+            if not (self.ssl() / name).exists():
+                self.write(self.ssl() / name, value.encode(), mode)
+        self.own(self.ssl())
 
     def acme_script(self):
         tls = self.c["gatewayTls"]
         ip, server, email = self.t["peerAddress"], ACME_ISSUERS[tls["issuer"]], tls["email"]
         self.require(re.fullmatch(r"[0-9.]{7,15}", ip) and re.fullmatch(r"[A-Za-z0-9._%+@-]{3,300}", email), "acme-parameters")
-        template = json.dumps(self.sds("/tls/DIR/cert.pem", "/tls/DIR/key.pem"), sort_keys=True)
-        head, middle, tail = template.split("DIR")
         return "\n".join([
             "#!/bin/sh",
             "# Obtains and renews a publicly trusted certificate for this validator's",
-            "# public IP (ACME HTTP-01 on port 80) and hands it to Envoy through SDS.",
+            "# public IP (ACME HTTP-01 on port 80) and installs it where dashmate's",
+            "# gateway reads it. The host then signals Envoy to reload, as dashmate does.",
             "set -u",
             "ip=" + ip, "server=" + server, "email=" + email,
-            "path=/acme/lego; tls=/tls",
+            "path=/acme/lego",
             "install() {",
             '  crt="$path/certificates/$ip.crt"; key="$path/certificates/$ip.key"',
             '  [ -s "$crt" ] && [ -s "$key" ] || return 1',
-            '  dir="acme-$(cat "$crt" "$key" | sha256sum | cut -c1-16)"',
-            '  grep -q "/tls/$dir/" "$tls/sds.json" 2>/dev/null && return 0',
-            '  if [ ! -d "$tls/$dir" ]; then',
-            '    rm -rf "$tls/.$dir" && mkdir -m 700 "$tls/.$dir" && cp "$crt" "$tls/.$dir/cert.pem" && cp "$key" "$tls/.$dir/key.pem" \\',
-            '      && chmod 600 "$tls/.$dir/cert.pem" "$tls/.$dir/key.pem" && mv "$tls/.$dir" "$tls/$dir" || return 1',
-            '  fi',
-            "  printf '%s' '" + head + "'\"$dir\"'" + middle + "'\"$dir\"'" + tail + "' > \"$tls/.sds.json\" && mv \"$tls/.sds.json\" \"$tls/sds.json\" || return 1",
-            '  for old in "$tls"/acme-*; do [ "$old" = "$tls/$dir" ] || rm -rf "$old"; done',
-            '  echo "installed $dir"',
+            '  cmp -s "$crt" /ssl/bundle.crt && cmp -s "$key" /ssl/private.key && return 0',
+            "  # In place: the gateway bind-mounts these files.",
+            '  cat "$key" >/ssl/private.key && cat "$crt" >/ssl/bundle.crt || return 1',
+            "  date +%s >/acme/reload",
+            '  echo "installed certificate for $ip"',
             "}",
             "while :; do",
             '  if /lego run --server "$server" --accept-tos --email "$email" --path "$path" --domains "$ip" \\',
-            '      --http --http.address :80 --profile shortlived --key-type EC256 --renew-days 3 && install; then',
+            '      --http --http.address :80 --profile shortlived --key-type rsa2048 --renew-days 3 && install; then',
             "    sleep 21600",
             "  else",
             "    sleep 900",
@@ -988,257 +1431,58 @@ class Worker:
             "",
         ])
 
+    def reload_units(self):
+        """A host path unit that signals Envoy's hot restarter after each
+        certificate installation: dashmate's own reload, without Docker access
+        inside a container."""
+        unit = "dashnet-" + self.project + "-gateway-reload"
+        return unit, {
+            unit + ".path": "\n".join([
+                "[Unit]",
+                "Description=Reload " + self.container_name("gateway") + " after a certificate renewal",
+                "[Path]",
+                "PathChanged=" + str(self.root / "acme/reload"),
+                "[Install]",
+                "WantedBy=multi-user.target",
+                "",
+            ]),
+            unit + ".service": "\n".join([
+                "[Unit]",
+                "Description=Reload " + self.container_name("gateway") + " certificates",
+                "[Service]",
+                "Type=oneshot",
+                "ExecStart=/usr/bin/docker kill --signal HUP " + self.container_name("gateway"),
+                "",
+            ]),
+        }
+
+    def systemd(self, units, enable):
+        changed = False
+        for name, text in units.items():
+            path = Path("/etc/systemd/system") / name
+            if not path.exists() or path.read_text() != text:
+                path.write_text(text)
+                changed = True
+        if changed:
+            self.run(["/usr/bin/systemctl", "daemon-reload"])
+        self.run(["/usr/bin/systemctl", "enable", "--now", enable])
+
     def acme_start(self):
         tls = self.c["gatewayTls"]
         image = tls["images"][self.t["architecture"]]
         self.docker("pull", "--platform", "linux/" + self.t["architecture"], image, timeout=600)
         self.atomic("acme/renew.sh", self.acme_script())
         (self.root / "acme/lego").mkdir(parents=True, exist_ok=True, mode=0o700)
+        unit, units = self.reload_units()
+        self.systemd(units, unit + ".path")
         service = self.service("acme", image)
         service.update(
             entrypoint=["/bin/sh", "/acme/renew.sh"],
-            volumes=[str(self.root / "acme") + ":/acme", str(self.root / "platform/tls") + ":/tls"],
+            volumes=[str(self.root / "acme") + ":/acme", str(self.ssl()) + ":/ssl"],
             stop_grace_period="10s",
         )
         self.compose("acme", {"acme": service})
         self.verify_image(self.inspect_container("acme"), image)
-
-    def envoy(self):
-        def address(port):
-            return dict(socket_address=dict(address="127.0.0.1", port_value=port))
-
-        def cluster(name, port, http2=False):
-            value = dict(
-                name=name,
-                connect_timeout="5s",
-                type="STATIC",
-                load_assignment=dict(
-                    cluster_name=name,
-                    endpoints=[
-                        dict(lb_endpoints=[dict(endpoint=dict(address=address(port)))])
-                    ],
-                ),
-            )
-            if http2:
-                value["typed_extension_protocol_options"] = {
-                    "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
-                        "@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
-                        "explicit_http_config": {"http2_protocol_options": {}},
-                    }
-                }
-            return value
-
-        manager = {
-            "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-            "stat_prefix": "dashnet",
-            "codec_type": "AUTO",
-            # As dashmate's gateway: browser SDKs join base URL and method path
-            # into "//org.dash...", which must still reach the gRPC route.
-            "merge_slashes": True,
-            "normalize_path": True,
-            "route_config": dict(
-                name="dapi",
-                virtual_hosts=[
-                    dict(
-                        name="dapi",
-                        domains=["*"],
-                        # Browser clients (grpc-web SDKs, explorers) need CORS, as
-                        # served by dashmate's gateway.
-                        typed_per_filter_config={
-                            "envoy.filters.http.cors": {
-                                "@type": "type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy",
-                                "allow_origin_string_match": [{"prefix": "*"}],
-                                "allow_methods": "GET, PUT, DELETE, POST, OPTIONS",
-                                "allow_headers": "keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout",
-                                "max_age": "1728000",
-                                "expose_headers": "custom-header-1,grpc-status,grpc-message,code,drive-error-data-bin,dash-serialized-consensus-error-bin,stack-bin",
-                            }
-                        },
-                        routes=[
-                            dict(
-                                match=dict(prefix="/org.dash.platform.dapi."),
-                                route=dict(cluster="grpc", timeout="120s"),
-                            ),
-                            dict(
-                                match=dict(prefix="/"),
-                                route=dict(cluster="json", timeout="30s"),
-                            ),
-                        ],
-                    )
-                ],
-            ),
-            # grpc_web translates application/grpc-web requests and frames the
-            # trailers into the body; native gRPC and JSON-RPC pass through.
-            "http_filters": [
-                {
-                    "name": "envoy.filters.http.cors",
-                    "typed_config": {
-                        "@type": "type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors"
-                    },
-                },
-                {
-                    "name": "envoy.filters.http.grpc_web",
-                    "typed_config": {
-                        "@type": "type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb"
-                    },
-                },
-                {
-                    "name": "envoy.filters.http.router",
-                    "typed_config": {
-                        "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router"
-                    },
-                }
-            ],
-        }
-        tls = {
-            "name": "envoy.transport_sockets.tls",
-            "typed_config": {
-                "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext",
-                "common_tls_context": {
-                    "alpn_protocols": ["h2", "http/1.1"],
-                    "tls_certificates": [
-                        {
-                            "certificate_chain": {"filename": "/tls/cert.pem"},
-                            "private_key": {"filename": "/tls/key.pem"},
-                        }
-                    ],
-                },
-            },
-        }
-        if self.c.get("gatewayTls"):
-            # Trusted certificates rotate every few days: load them through a
-            # file-based SDS secret that Envoy re-reads when files move in /tls.
-            context = tls["typed_config"]["common_tls_context"]
-            del context["tls_certificates"]
-            context["tls_certificate_sds_secret_configs"] = [{
-                "name": "gateway",
-                "sds_config": {
-                    "path_config_source": {"path": "/tls/sds.json", "watched_directory": {"path": "/tls"}},
-                    "resource_api_version": "V3",
-                },
-            }]
-        config = dict(
-            static_resources=dict(
-                listeners=[
-                    dict(
-                        name="dapi_tls",
-                        address=dict(
-                            socket_address=dict(
-                                address="0.0.0.0", port_value=self.ports["gateway"]
-                            )
-                        ),
-                        filter_chains=[
-                            dict(
-                                transport_socket=tls,
-                                filters=[
-                                    dict(
-                                        name="envoy.filters.network.http_connection_manager",
-                                        typed_config=manager,
-                                    )
-                                ],
-                            )
-                        ],
-                    )
-                ],
-                clusters=[
-                    cluster("grpc", self.ports["dapiGRPC"], True),
-                    cluster("json", self.ports["dapiJSON"]),
-                ],
-            )
-        )
-        if self.c.get("gatewayTls"):
-            # SDS secrets require a node identity in the bootstrap.
-            config["node"] = {"id": self.t["name"], "cluster": "dashnet-gateway"}
-        return config
-
-    def platform_services(self):
-        secret, p = self.read("secrets.json"), self.ports
-        environment = dict(
-            CHAIN_ID=self.c["platformChainId"],
-            NETWORK="devnet",
-            DB_PATH="/db",
-            EPOCH_TIME_LENGTH_S=str(int(self.c.get("platformEpochSeconds") or 3600)),
-            ABCI_CONSENSUS_BIND_ADDRESS="tcp://127.0.0.1:" + str(p["driveABCI"]),
-            GRPC_BIND_ADDRESS="127.0.0.1:" + str(p["driveGRPC"]),
-            TOKIO_CONSOLE_ENABLED="false",
-            GROVEDB_VISUALIZER_ENABLED="false",
-            ABCI_LOG_STDOUT_DESTINATION="stdout",
-            ABCI_LOG_STDOUT_LEVEL="info",
-            ABCI_LOG_STDOUT_FORMAT="json",
-            ABCI_LOG_STDOUT_COLOR="false",
-        )
-        for prefix in ["CORE_CONSENSUS", "CORE_CHECK_TX"]:
-            environment.update(
-                {
-                    prefix + "_JSON_RPC_USERNAME": "dashnet",
-                    prefix + "_JSON_RPC_PASSWORD": secret["rpcPassword"],
-                    prefix + "_JSON_RPC_HOST": "127.0.0.1",
-                    prefix + "_JSON_RPC_PORT": str(p["coreRPC"]),
-                }
-            )
-        for prefix, kind, size, window, signers, rotation in [
-            ("VALIDATOR_SET", 107, 12, 24, 4, False),
-            ("CHAIN_LOCK", 101, 12, 24, 4, False),
-            ("INSTANT_LOCK", 105, 8, 48, 2, True),
-        ]:
-            environment.update(
-                {
-                    prefix + "_QUORUM_SIZE": str(size),
-                    prefix + "_QUORUM_TYPE": str(kind),
-                    prefix + "_QUORUM_WINDOW": str(window),
-                    prefix + "_QUORUM_ACTIVE_SIGNERS": str(signers),
-                    prefix + "_QUORUM_ROTATION": str(rotation).lower(),
-                }
-            )
-        drive = self.service("drive", self.images["drive"])
-        drive.update(
-            environment=environment,
-            volumes=[str(self.root / "platform/drive") + ":/db"],
-            stop_grace_period="120s",
-        )
-        td = self.service("tenderdash", self.images["tenderdash"])
-        td.update(
-            entrypoint=["tenderdash"],
-            command=["node", "--home", "/tenderdash"],
-            volumes=[str(self.root / "platform/tenderdash") + ":/tenderdash"],
-            stop_grace_period="120s",
-        )
-        dapi = self.service("dapi", self.images["dapi"])
-        dapi.update(
-            environment=dict(
-                DAPI_GRPC_SERVER_PORT=str(p["dapiGRPC"]),
-                DAPI_JSON_RPC_PORT=str(p["dapiJSON"]),
-                DAPI_BIND_ADDRESS="127.0.0.1",
-                DAPI_DRIVE_URI="http://127.0.0.1:" + str(p["driveGRPC"]),
-                DAPI_TENDERDASH_URI="http://127.0.0.1:" + str(p["platformRPC"]),
-                DAPI_TENDERDASH_WEBSOCKET_URI="ws://127.0.0.1:"
-                + str(p["platformRPC"])
-                + "/websocket",
-                DAPI_CORE_ZMQ_URL="tcp://127.0.0.1:" + str(p["coreZMQ"]),
-                DAPI_CORE_RPC_URL="http://127.0.0.1:" + str(p["coreRPC"]),
-                DAPI_CORE_RPC_USER="dashnet",
-                DAPI_CORE_RPC_PASS=secret["rpcPassword"],
-                DAPI_STATE_TRANSITION_WAIT_TIMEOUT="120000",
-                DAPI_LOG_LEVEL="info",
-            )
-        )
-        gateway = self.service("gateway", self.images["gateway"])
-        gateway.update(
-            entrypoint=["envoy"],
-            command=["-c", "/etc/envoy/config.json", "--log-level", "warning"],
-            volumes=[
-                str(self.root / "platform/envoy.json") + ":/etc/envoy/config.json:ro",
-                str(self.root / "platform/tls") + ":/tls:ro",
-            ],
-        )
-        return dict(drive=drive, tenderdash=td, dapi=dapi, gateway=gateway)
-
-    def platform_start(self):
-        self.platform_files()
-        self.compose("platform", self.platform_services())
-        if self.c.get("gatewayTls"):
-            self.acme_start()
-        return {}
 
     def tenderdash(self, method):
         with self.opener.open(
@@ -1270,14 +1514,16 @@ class Worker:
         # trusted gateway certificates, also accept the system CAs for this
         # node's public IP, which is what clients see.
         port = str(self.ports["gateway"])
+        secret = self.read("secrets.json")
         with tempfile.TemporaryDirectory(dir=self.root) as tmp:
             headers = Path(tmp) / "headers"
-            trust, url, route = str(self.root / "platform/tls/cert.pem"), "https://127.0.0.1:" + port, []
+            trust, url, route = Path(tmp) / "trust.pem", "https://127.0.0.1:" + port, []
+            pem = secret["tlsCertificate"]
             if self.c.get("gatewayTls"):
-                bundle = Path(tmp) / "trust.pem"
-                bundle.write_text((self.root / "platform/tls/cert.pem").read_text() + "\n" + Path("/etc/ssl/certs/ca-certificates.crt").read_text())
+                pem += "\n" + Path("/etc/ssl/certs/ca-certificates.crt").read_text()
                 peer = self.t["peerAddress"]
-                trust, url, route = str(bundle), "https://" + peer + ":" + port, ["--connect-to", peer + ":" + port + ":127.0.0.1:" + port]
+                url, route = "https://" + peer + ":" + port, ["--connect-to", peer + ":" + port + ":127.0.0.1:" + port]
+            trust.write_text(pem)
             raw = self.run(
                 [
                     "/usr/bin/curl",
@@ -1290,7 +1536,7 @@ class Worker:
                     "--max-time",
                     "20",
                     "--cacert",
-                    trust,
+                    str(trust),
                     *route,
                     "--dump-header",
                     str(headers),
@@ -1315,10 +1561,12 @@ class Worker:
         )
         return protobuf(protobuf(raw[5:])[1])
 
-    def platform_status(self):
-        self.require(self.t["role"] == "validator", "validator-only")
+    def platform_containers(self):
+        """Every running Platform service, keyed by release component (drive,
+        tenderdash, dapi, gateway) or by sidecar service name."""
+        pins = json.loads((self.home / ".dashnet-compose.json").read_text())["services"]
         containers, restarts = {}, {}
-        for name in ["drive", "tenderdash", "dapi", "gateway"]:
+        for name in [s for s in self.selection() if s in PLATFORM_SERVICES]:
             value = self.inspect_container(name)
             self.require(
                 value
@@ -1326,9 +1574,18 @@ class Worker:
                 and not value["State"].get("Restarting"),
                 "platform-not-running",
             )
-            self.verify_image(value, self.images[name])
-            containers[name] = value["Id"]
-            restarts[name] = value["RestartCount"]
+            key = COMPONENTS.get(name, name)
+            pin = self.images[key] if name in COMPONENTS else pins[name].get("image")
+            self.require(pin, "sidecar-image-not-pinned")
+            self.verify_image(value, pin)
+            containers[key] = value["Id"]
+            restarts[key] = value["RestartCount"]
+        self.require(all(k in containers for k in ["drive", "tenderdash", "dapi", "gateway"]), "platform-not-running")
+        return containers, restarts
+
+    def platform_status(self):
+        self.require(self.t["role"] == "validator", "validator-only")
+        containers, restarts = self.platform_containers()
         status = self.tenderdash("status")
         dapi = self.dapi_status()
         software = protobuf(protobuf(dapi.get(1, b"")).get(1, b""))
@@ -1364,6 +1621,7 @@ class Worker:
             self.q["action"]
             in [
                 "inspect",
+                "render",
                 "core-start",
                 "core-status",
                 "identity",
@@ -1399,7 +1657,9 @@ class Worker:
             )
             if action == "inspect":
                 return result
-            if action in ["core-start", "core-finalize"]:
+            if action == "render":
+                result.update(self.render_info())
+            elif action in ["core-start", "core-finalize"]:
                 result["core"] = self.ensure_core(action == "core-finalize")
             elif action == "core-status":
                 result["core"] = self.core_status()
@@ -1429,10 +1689,13 @@ class Worker:
 
     def stop(self):
         # Only stop owned containers, preserving all volumes and identities.
-        for name in ["acme", "miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
+        for name in AUXILIARY:
             if self.inspect_container(name):
-                self.docker("stop", "-t", "120", self.container_name(name), timeout=150)
-        for name in ["acme", "miner", "gateway", "dapi", "tenderdash", "drive", "core"]:
+                self.docker("stop", "-t", "20", self.container_name(name), timeout=60)
+        if self.selection():
+            # dashmate's own stop: dependants first, each with its grace period.
+            self.dm_compose(self.home, "stop", *self.selection(), timeout=600)
+        for name in self.known_services():
             value = self.inspect_container(name)
             self.require(
                 value is None or not value["State"]["Running"], "stop-not-observed"

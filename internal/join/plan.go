@@ -68,7 +68,7 @@ func (p Plan) Validate() error {
 	ids, addresses := map[string]bool{}, map[string]bool{}
 	for i, t := range p.Targets {
 		want := p.Bootstrap.Compute.Targets[i]
-		if t.Role != "fullnode" || t.Role != want.Role || t.Name != want.Name || t.Architecture != want.Architecture || !reflect.DeepEqual(t.Images, p.Bootstrap.Targets[i].Images) || len(t.Images) != 1 || t.Images[0].Component != "core" {
+		if t.Role != "fullnode" || t.Role != want.Role || t.Name != want.Name || t.Architecture != want.Architecture || !reflect.DeepEqual(t.Images, p.Bootstrap.Targets[i].Images) || !coreOnly(t.Images) {
 			return errors.New("join supports complete Core-only fullnode allocations")
 		}
 		if e := t.Validate(); e != nil {
@@ -84,4 +84,10 @@ func (p Plan) Validate() error {
 }
 func (p Plan) Request(t node.Target, action string) node.Request {
 	return node.Request{Action: action, Target: t, Join: &p.Chain, Context: node.Context{PlanID: p.ID, ComputePlanID: p.Bootstrap.Compute.ID, BootstrapID: p.Bootstrap.ID, Network: p.Bootstrap.Compute.Network.Metadata.Name, CoreNetwork: p.Chain.CoreNetwork, Ports: node.DefaultPorts}}
+}
+
+// coreOnly: a fullnode runs Core; it also caches the release's dashmate
+// helper, which a join never runs.
+func coreOnly(images []bootstrap.Image) bool {
+	return len(images) == 2 && images[0].Component == "core" && images[1].Component == "helper"
 }

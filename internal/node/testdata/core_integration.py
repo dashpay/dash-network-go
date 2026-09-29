@@ -1,7 +1,8 @@
 """Real Core RPC contract proof, in an ephemeral CI runner only. No AWS calls.
 
-Test subclass substitutes instance identity and filesystem location; all Core
-configuration, Compose, wallet, registration and reconciliation code is real.
+Test subclass substitutes instance identity and filesystem location; the
+release's dashmate helper renders Core, dashmate's compose files run it with its
+Tor sidecar, and all wallet, registration and reconciliation code is real.
 No wallet/config/key/transaction artifacts or raw container logs are published.
 """
 
@@ -11,7 +12,6 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
-import socket
 from test_worker import worker, request
 
 
@@ -25,7 +25,8 @@ class Disposable(worker.Worker):
 def main():
     image = os.environ["CORE_IMAGE"]
     q = request()
-    q["target"]["images"] = [dict(component="core", pinned=image)]
+    q["target"]["images"] = [dict(component="core", pinned=image), dict(component="helper", pinned=os.environ["HELPER_IMAGE"])]
+    q["context"]["sidecarImages"] = {"core_tor": os.environ["TOR_IMAGE"]}
     with tempfile.TemporaryDirectory(prefix="dashnet-core-ci-") as tmp:
         root = Path(tmp)
         root.chmod(0o700)
@@ -75,43 +76,13 @@ def main():
             assert w.rpc("listlockunspent", [], True), "Collateral was not locked"
             resumed = call("core-start")["core"]
             assert first["genesis"] == resumed["genesis"]
-            w.images.update(
-                drive=os.environ["DRIVE_IMAGE"],
-                tenderdash=image,
-                dapi=image,
-                gateway=image,
-            )
-            (root / "platform/drive").mkdir(parents=True, mode=0o700)
-            w.compose("drive-contract", {"drive": w.platform_services()["drive"]})
-            # Drive deliberately waits for a ChainLock and mnsync before opening
-            # ABCI/gRPC. This one-Core fixture cannot form a quorum: verify the
-            # actual waiting gate, rather than falsely asserting consensus startup.
-            drive_deadline = time.monotonic() + 30
-            while True:
-                logs = w.docker("logs", "--tail", "50", w.container_name("drive"))
-                if (
-                    b"cannot get best chain lock" in logs
-                    or b"waiting for core to sync" in logs
-                ):
-                    break
-                assert (
-                    time.monotonic() < drive_deadline
-                ), "Drive did not reach its Core-readiness gate"
-                time.sleep(1)
-            running = w.inspect_container("drive")
-            assert running["State"]["Running"] and running["RestartCount"] == 0
-            w.verify_image(running, w.images["drive"])
-            try:
-                with socket.create_connection(
-                    ("127.0.0.1", q["context"]["ports"]["driveGRPC"]), timeout=1
-                ):
-                    raise AssertionError("Drive bypassed its missing-ChainLock gate")
-            except OSError:
-                pass
-            print(
-                "Real Drive accepts native configuration and waits for Core readiness; no consensus claim.",
-                flush=True,
-            )
+            conf = (w.home / w.config_name / "core/dash.conf").read_text()
+            assert "rpcauth=dapi:" in conf and "peerblockfilters=1" in conf, "Core runs dashmate's dash.conf"
+            assert w.inspect_container("core_tor")["State"]["Running"], "dashmate's Tor sidecar"
+            # Operators and the status console run dash-cli inside Core, as before.
+            count = w.docker("exec", w.container_name("core"), "dash-cli", "-conf=/etc/dash/dash.conf", "getblockcount")
+            assert int(count) == w.rpc("getblockcount")
+            print("Real dashmate render: Core, Tor and the client configuration.", flush=True)
             q["payoutAddress"] = wallet["payoutAddress"]
             height = w.rpc("getblockcount")
             call("mine-start")
@@ -157,7 +128,7 @@ def main():
                 flush=True,
             )
         finally:
-            for name in ["core", "miner", "drive"]:
+            for name in ["core_tor", "core", "miner"]:
                 subprocess.run(
                     ["docker", "rm", "-f", w.container_name(name)],
                     stdout=subprocess.DEVNULL,

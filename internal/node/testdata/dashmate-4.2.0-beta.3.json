@@ -1,0 +1,510 @@
+{
+  "configFormatVersion": "4.2.0",
+  "configs": {
+    "node": {
+      "core": {
+        "compactFilters": true,
+        "devnet": {
+          "llmq": {
+            "chainLocks": "llmq_devnet",
+            "instantSend": "llmq_devnet_dip0024",
+            "mnhf": "llmq_devnet",
+            "platform": "llmq_devnet_platform"
+          },
+          "minimumDifficultyBlocks": 0,
+          "name": null,
+          "powTargetSpacing": 150
+        },
+        "docker": {
+          "commandArgs": [],
+          "image": "dashpay/dashd:23"
+        },
+        "indexes": [],
+        "insight": {
+          "docker": {
+            "image": "dashpay/insight-api:latest"
+          },
+          "enabled": false,
+          "port": 3001,
+          "ui": {
+            "docker": {
+              "image": "dashpay/insight:latest"
+            },
+            "enabled": false
+          }
+        },
+        "log": {
+          "debug": {
+            "enabled": false,
+            "exclude": [],
+            "includeOnly": [],
+            "ips": false,
+            "sourceLocations": false,
+            "threadNames": false,
+            "timeMicros": false
+          },
+          "filePath": null
+        },
+        "masternode": {
+          "enable": true,
+          "operator": {
+            "privateKey": null
+          }
+        },
+        "miner": {
+          "address": null,
+          "enable": false,
+          "interval": "2.5m"
+        },
+        "p2p": {
+          "host": "0.0.0.0",
+          "port": 9999,
+          "seeds": []
+        },
+        "rpc": {
+          "allowIps": [
+            "127.0.0.1",
+            "172.16.0.0/12",
+            "192.168.0.0/16"
+          ],
+          "host": "127.0.0.1",
+          "port": 9998,
+          "users": {
+            "dapi": {
+              "lowPriority": true,
+              "password": "rpcpassword",
+              "whitelist": [
+                "getbestblockhash",
+                "getblockhash",
+                "sendrawtransaction",
+                "getrawtransaction",
+                "getblockstats",
+                "getmerkleblocks",
+                "getrawtransactionmulti",
+                "getrawmempool",
+                "getblockcount",
+                "getbestchainlock",
+                "getblock",
+                "getblockheader",
+                "getblockheaders",
+                "protxdiff",
+                "getnetworkinfo",
+                "getblockchaininfo",
+                "mnsyncstatus",
+                "masternodestatus"
+              ]
+            },
+            "dashmate": {
+              "lowPriority": false,
+              "password": "rpcpassword",
+              "whitelist": null
+            },
+            "drive_check_tx": {
+              "lowPriority": true,
+              "password": "rpcpassword",
+              "whitelist": [
+                "getrawtransaction"
+              ]
+            },
+            "drive_consensus": {
+              "lowPriority": false,
+              "password": "rpcpassword",
+              "whitelist": [
+                "getbestchainlock",
+                "getblockchaininfo",
+                "getrawtransaction",
+                "submitchainlock",
+                "verifychainlock",
+                "protxlistdiff",
+                "quorumlistextended",
+                "quoruminfo",
+                "getassetunlockstatuses",
+                "sendrawtransaction",
+                "mnsyncstatus",
+                "getblockheader",
+                "getblockhash"
+              ]
+            },
+            "quorum_list": {
+              "lowPriority": true,
+              "password": "rpcpassword",
+              "whitelist": [
+                "quorum",
+                "masternode",
+                "getblockcount"
+              ]
+            },
+            "tenderdash": {
+              "lowPriority": false,
+              "password": "rpcpassword",
+              "whitelist": [
+                "quoruminfo",
+                "quorumverify",
+                "quorumplatformsign",
+                "masternodestatus",
+                "masternodelist",
+                "ping",
+                "getnetworkinfo"
+              ]
+            }
+          }
+        },
+        "spork": {
+          "address": null,
+          "privateKey": null
+        },
+        "tor": {
+          "control": {
+            "password": "torControlFixture"
+          },
+          "docker": {
+            "image": "osminogin/tor-simple:0.4.9.11@sha256:7aef2e7d957e2236d5fac7fca8e67c15fe65e6349eb90099da1cdc26bc4caa69"
+          },
+          "enabled": true
+        },
+        "zmq": {
+          "host": "127.0.0.1",
+          "port": 29998
+        }
+      },
+      "dashmate": {
+        "helper": {
+          "api": {
+            "enable": false,
+            "port": 9100
+          },
+          "docker": {
+            "build": {
+              "context": "/platform",
+              "dockerFile": "/platform/Dockerfile",
+              "enabled": false,
+              "target": "dashmate-helper"
+            }
+          }
+        }
+      },
+      "description": "base config for use as template",
+      "docker": {
+        "baseImage": {
+          "build": {
+            "context": "/platform",
+            "dockerFile": "/platform/Dockerfile",
+            "enabled": false,
+            "target": ""
+          }
+        },
+        "network": {
+          "subnet": "0.0.0.0/0"
+        }
+      },
+      "environment": "production",
+      "externalIp": null,
+      "group": null,
+      "network": "mainnet",
+      "platform": {
+        "dapi": {
+          "rsDapi": {
+            "docker": {
+              "build": {
+                "buildArgs": {},
+                "context": "/platform",
+                "dockerFile": "/platform/Dockerfile",
+                "enabled": false,
+                "target": "rs-dapi"
+              },
+              "deploy": {
+                "replicas": 1
+              },
+              "image": null
+            },
+            "logs": {
+              "accessLogFormat": "combined",
+              "accessLogPath": null,
+              "jsonFormat": false,
+              "level": "debug"
+            },
+            "metrics": {
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 9091
+            },
+            "waitForStResultTimeout": 120000
+          }
+        },
+        "drive": {
+          "abci": {
+            "chainLock": {
+              "quorum": {
+                "activeSigners": 4,
+                "dkgInterval": 288,
+                "llmqType": 2,
+                "rotation": false
+              }
+            },
+            "docker": {
+              "build": {
+                "buildArgs": {},
+                "context": "/platform",
+                "dockerFile": "/platform/Dockerfile",
+                "enabled": false,
+                "target": "drive-abci"
+              },
+              "image": null
+            },
+            "epochTime": 788400,
+            "grovedbVisualizer": {
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 8083
+            },
+            "instantLock": {
+              "quorum": {
+                "activeSigners": 32,
+                "dkgInterval": 288,
+                "llmqType": 5,
+                "rotation": true
+              }
+            },
+            "logs": {
+              "stdout": {
+                "color": true,
+                "destination": "stdout",
+                "format": "compact",
+                "level": "info"
+              }
+            },
+            "metrics": {
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 29090
+            },
+            "proposer": {
+              "txProcessingTimeLimit": null
+            },
+            "tokioConsole": {
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 6669,
+              "retention": 180
+            },
+            "validatorSet": {
+              "quorum": {
+                "activeSigners": 24,
+                "dkgInterval": 24,
+                "llmqType": 4,
+                "rotation": false
+              }
+            }
+          },
+          "tenderdash": {
+            "consensus": {
+              "createEmptyBlocks": true,
+              "createEmptyBlocksInterval": "3m",
+              "peer": {
+                "gossipSleepDuration": "100ms",
+                "queryMaj23SleepDuration": "2s"
+              },
+              "unsafeOverride": {
+                "propose": {
+                  "delta": null,
+                  "timeout": null
+                },
+                "vote": {
+                  "delta": null,
+                  "timeout": null
+                }
+              }
+            },
+            "docker": {
+              "image": "dashpay/tenderdash:1.8.0"
+            },
+            "genesis": {
+              "consensus_params": {
+                "abci": {
+                  "recheck_tx": true
+                },
+                "block": {
+                  "max_bytes": "2097152",
+                  "max_gas": "57631392000",
+                  "time_iota_ms": "5000"
+                },
+                "evidence": {
+                  "max_age": "100000",
+                  "max_age_duration": "172800000000000",
+                  "max_age_num_blocks": "100000"
+                },
+                "synchrony": {
+                  "message_delay": "70000000000",
+                  "precision": "1000000000"
+                },
+                "timeout": {
+                  "propose": "50000000000",
+                  "propose_delta": "5000000000",
+                  "vote": "10000000000",
+                  "vote_delta": "1000000000"
+                },
+                "validator": {
+                  "pub_key_types": [
+                    "bls12381"
+                  ]
+                }
+              }
+            },
+            "log": {
+              "format": "plain",
+              "level": "info",
+              "path": null
+            },
+            "mempool": {
+              "cacheSize": 15000,
+              "maxConcurrentCheckTx": 250,
+              "maxTxsBytes": 1073741824,
+              "size": 5000,
+              "timeoutCheckTx": "1s",
+              "ttlDuration": "0s",
+              "ttlNumBlocks": 0,
+              "txEnqueueTimeout": "10ms",
+              "txRecvRateLimit": 12,
+              "txSendRateLimit": 10
+            },
+            "metrics": {
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 26660
+            },
+            "mode": "full",
+            "moniker": null,
+            "node": {
+              "id": null,
+              "key": null
+            },
+            "p2p": {
+              "allowlistOnly": false,
+              "flushThrottleTimeout": "100ms",
+              "host": "0.0.0.0",
+              "maxConnections": 64,
+              "maxOutgoingConnections": 30,
+              "maxPacketMsgPayloadSize": 10240,
+              "persistentPeers": [],
+              "port": 26656,
+              "recvRate": 5120000,
+              "seeds": [],
+              "sendRate": 5120000
+            },
+            "pprof": {
+              "enabled": false,
+              "port": 6060
+            },
+            "rpc": {
+              "host": "127.0.0.1",
+              "maxOpenConnections": 900,
+              "port": 26657,
+              "timeoutBroadcastTx": "0"
+            }
+          }
+        },
+        "enable": true,
+        "gateway": {
+          "admin": {
+            "enabled": false,
+            "host": "127.0.0.1",
+            "port": 9901
+          },
+          "docker": {
+            "image": "dashpay/envoy:1.39.0-impr.1"
+          },
+          "listeners": {
+            "dapiAndDrive": {
+              "host": "0.0.0.0",
+              "http2": {
+                "maxConcurrentStreams": 10
+              },
+              "port": 443,
+              "waitForStResultTimeout": "125s"
+            }
+          },
+          "log": {
+            "accessLogs": [
+              {
+                "format": "text",
+                "template": null,
+                "type": "stdout"
+              }
+            ],
+            "level": "info"
+          },
+          "maxConnections": 1000,
+          "maxHeapSizeInBytes": 125000000,
+          "metrics": {
+            "enabled": false,
+            "host": "127.0.0.1",
+            "port": 9090
+          },
+          "rateLimiter": {
+            "blacklist": [],
+            "docker": {
+              "image": "envoyproxy/ratelimit:3fcc3609"
+            },
+            "enabled": true,
+            "metrics": {
+              "docker": {
+                "image": "prom/statsd-exporter:v0.26.1"
+              },
+              "enabled": false,
+              "host": "127.0.0.1",
+              "port": 9102
+            },
+            "requestsPerUnit": 150,
+            "responseHeaders": {
+              "enabled": true
+            },
+            "unit": "minute",
+            "whitelist": []
+          },
+          "ssl": {
+            "enabled": false,
+            "provider": "zerossl",
+            "providerConfigs": {
+              "letsencrypt": {
+                "acmeDirectoryUrl": "https://acme-v02.api.letsencrypt.org/directory",
+                "email": null
+              },
+              "zerossl": {
+                "apiKey": null,
+                "id": null
+              }
+            }
+          },
+          "upstreams": {
+            "dapiJsonRpc": {
+              "maxRequests": 100
+            },
+            "driveGrpc": {
+              "maxRequests": 100
+            },
+            "rsDapi": {
+              "maxRequests": 100
+            }
+          }
+        },
+        "quorumList": {
+          "addressHostOverride": "",
+          "api": {
+            "host": "127.0.0.1",
+            "port": 2444
+          },
+          "docker": {
+            "image": "dashpay/quorum-list-server:latest"
+          },
+          "enabled": false,
+          "previousBlocksOffset": 8,
+          "versionCheckHost": ""
+        },
+        "sourcePath": null
+      }
+    }
+  },
+  "defaultConfigName": null,
+  "defaultGroupName": null,
+  "projectId": "00000000"
+}

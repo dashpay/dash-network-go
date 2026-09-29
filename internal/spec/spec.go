@@ -83,6 +83,19 @@ var instanceType = regexp.MustCompile(`^[a-z][a-z0-9-]*\.[a-z0-9]+$`)
 
 var Components = []string{"core", "dapi", "drive", "gateway", "helper", "tenderdash"}
 
+// RoleComponents are the release components a node of a role runs. Every node
+// that runs Core renders its services with the release's dashmate (helper).
+func RoleComponents(role string) []string {
+	switch role {
+	case "validator":
+		return Components
+	case "seed":
+		return []string{"core", "tenderdash"}
+	default:
+		return []string{"core", "helper"}
+	}
+}
+
 // OptionalComponents may be added to images: acme is the ACME client (lego)
 // that obtains publicly trusted gateway certificates for validators' public IPs.
 var OptionalComponents = []string{"acme"}

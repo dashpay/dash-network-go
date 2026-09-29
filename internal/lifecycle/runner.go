@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/inventory"
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
+	"github.com/dashpay/dash-network-go/internal/release"
 )
 
 type Runner struct {
@@ -31,6 +33,8 @@ type Runner struct {
 	// form without further action; a later deploy of the same plan resumes at
 	// the quorum wait and starts Platform.
 	CoreOnly bool
+	// Registry pins the sidecar images each release's dashmate requests.
+	Registry release.Inspector
 }
 
 type execution struct {
@@ -346,11 +350,50 @@ func (e *execution) core(t node.Target, o node.Observation) error {
 	d.Nodes[t.Name] = n
 	return nil
 }
+
+// render has every node render its services with its release's dashmate,
+// then pins the sidecar images that release requests. Nothing starts.
+func (e *execution) render() error {
+	observed := map[string]*node.Render{}
+	if err := e.each(e.p.Targets, "render", nil, func(t node.Target, o node.Observation) error {
+		observed[t.Name] = o.Render
+		return nil
+	}); err != nil {
+		return err
+	}
+	version, requested, err := renders(observed)
+	if err != nil {
+		return err
+	}
+	current := effectiveSidecars(e.r)
+	pins, err := e.runner.pinSidecars(e.ctx, e.p, current, requested)
+	if err != nil {
+		return err
+	}
+	if len(current) > 0 && !reflect.DeepEqual(pins, current) {
+		return errors.New("the release's dashmate requests sidecar images other than the pinned ones; only an upgrade changes them")
+	}
+	if len(current) == 0 && len(pins) > 0 {
+		e.r.Deployment.Sidecars = pins
+		if err = e.save(); err != nil {
+			return err
+		}
+	}
+	e.report(fmt.Sprintf("dashmate %s renders every node (%d sidecar images pinned)", version, len(pins)))
+	return nil
+}
+
 func unchanged(previous, actual string) bool {
 	return actual != "" && (previous == "" || previous == actual)
 }
 func (e *execution) deploy() error {
 	p, d := e.p, e.r.Deployment
+	if err := e.stage("render"); err != nil {
+		return err
+	}
+	if err := e.render(); err != nil {
+		return err
+	}
 	if err := e.stage("core-start"); err != nil {
 		return err
 	}

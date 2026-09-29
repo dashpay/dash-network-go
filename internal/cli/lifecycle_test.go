@@ -73,3 +73,10 @@ func TestRecipesPrintsTheDigestsPlansBind(t *testing.T) {
 		t.Fatal("unexpected recipe digests", got)
 	}
 }
+
+func TestPrivateAddressesRefusedBeforeReadingPlans(t *testing.T) {
+	err := cli.Run(context.Background(), []string{"deployment-plan", "--bootstrap-plan", "missing.json", "--protocol", "14", "--advertise", "private"}, &bytes.Buffer{}, &bytes.Buffer{}, "test")
+	if err == nil || !strings.Contains(err.Error(), "allowprivatenet=0") {
+		t.Fatal("private service addresses accepted", err)
+	}
+}

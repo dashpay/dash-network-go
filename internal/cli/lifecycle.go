@@ -37,11 +37,11 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
-	fs.DurationVar(&observationWindow, "observation-window", 15*time.Second, "minimum interval between health samples; allow for consensus round timeouts")
+	fs.DurationVar(&observationWindow, "observation-window", 15*time.Second, "minimum interval between health samples; health checks stretch it past an idle Platform's 3-minute empty-block interval")
 	if args[0] == "deployment-plan" {
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
-		fs.StringVar(&advertise, "advertise", "auto", "service addresses to register: public (IPAM Elastic IPs), private (VPC), or auto (public when every host has an IPAM address)")
+		fs.StringVar(&advertise, "advertise", "auto", "service addresses to register: public or auto (IPAM Elastic IPs; dashmate's Core never uses private addresses)")
 		fs.StringVar(&gatewayTLS, "gateway-tls", "auto", "gateway certificates: letsencrypt, letsencrypt-staging, self-signed, or auto (letsencrypt with public addresses, an acme image and --acme-email)")
 		fs.StringVar(&acmeEmail, "acme-email", "", "ACME account contact for trusted gateway certificates")
 		fs.UintVar(&blockSeconds, "block-time", lifecycle.DefaultBlockSeconds, fmt.Sprintf("Core block interval in seconds (%d..%d): powtargetspacing and the miner's cadence", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds))
@@ -83,8 +83,11 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if bootstrapPath == "" || protocol < 1 || protocol > 100 {
 			return errors.New("--bootstrap-plan and explicit --protocol (1..100) required")
 		}
-		if advertise != "auto" && advertise != "public" && advertise != "private" {
-			return errors.New("--advertise must be auto, public or private")
+		if advertise == "private" {
+			return errors.New("--advertise private is not supported: dashmate's Core never connects to private addresses (allowprivatenet=0); allocate IPAM Elastic IPs")
+		}
+		if advertise != "auto" && advertise != "public" {
+			return errors.New("--advertise must be auto or public")
 		}
 		if gatewayTLS != "auto" && gatewayTLS != "self-signed" && node.ACMEIssuers[gatewayTLS] == "" {
 			return errors.New("--gateway-tls must be auto, self-signed, letsencrypt or letsencrypt-staging")
@@ -143,9 +146,14 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err := p.Validate(); err != nil {
 			return err
 		}
-		// Doctor stretches the window to 2.5 blocks on slower chains.
-		if effective := max(observationWindow, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2); p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds && effective >= timeout && args[0] != "stop" {
-			return fmt.Errorf("--timeout must exceed the %s observation window this %ds-block chain needs", effective, p.MiningIntervalSeconds)
+		// Doctor stretches the window to 2.5 blocks on slower chains, and past
+		// an idle Platform's empty-block interval.
+		effective := max(observationWindow, lifecycle.PlatformObservationWindow)
+		if p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds {
+			effective = max(effective, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2)
+		}
+		if effective >= timeout && args[0] != "stop" {
+			return fmt.Errorf("--timeout must exceed the %s health observation window", effective)
 		}
 		b = p.Bootstrap
 		expectedID := p.ID
@@ -206,10 +214,8 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 			return err
 		}
 		public := ipamAddresses(b, record)
-		if advertise == "private" || (advertise == "auto" && public == nil) {
-			public = nil
-		} else if public == nil {
-			return errors.New("--advertise public requires an IPAM Elastic IP on every host")
+		if public == nil {
+			return errors.New("dashmate-rendered devnets advertise public addresses: every host needs an IPAM Elastic IP (see docs/ipam.md)")
 		}
 		opts := lifecycle.Options{Public: public, BlockSeconds: int(blockSeconds), EpochSeconds: int(epochSeconds)}
 		if gatewayTLS == "auto" && public != nil && acmeEmail != "" && hasImage(b, "acme") {
@@ -222,15 +228,12 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err != nil {
 			return err
 		}
-		mode := "private VPC service addresses"
-		if p.Advertise == "public" {
-			mode = "public IPAM service addresses (security groups must allow Core 20001 and Tenderdash 26656 from the fleet's public IPs)"
-		}
+		mode := "public IPAM service addresses (security groups must allow Core 20001 and Tenderdash 26656 from the fleet's public IPs)"
 		certs := "persisted self-signed gateway certificates"
 		if p.GatewayTLS != nil {
 			certs = p.GatewayTLS.Issuer + " certificates for each validator's public IP (ACME HTTP-01: port 80 must be reachable)"
 		}
-		fmt.Fprintln(stderr, "Devnet plan: start Core, mine local collateral, register EvoNodes with "+mode+", start Platform and TLS gateway with "+certs+". Existing security groups unchanged. Review the exact plan and retain this binary.")
+		fmt.Fprintln(stderr, "Devnet plan: each node's services are rendered by its release's dashmate and run from dashmate's compose files. Start Core, mine local collateral, register EvoNodes with "+mode+", start Platform and TLS gateway with "+certs+". Existing security groups unchanged. Review the exact plan and retain this binary.")
 		return emit(out, output, p)
 	}
 	var random [16]byte
@@ -238,8 +241,12 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		return err
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
-	runner.ObservationWindow = observationWindow
+	// Both samples must also see a Platform block, which an idle chain makes
+	// only every dashmate createEmptyBlocksInterval.
+	runner.ObservationWindow = max(observationWindow, lifecycle.PlatformObservationWindow)
 	runner.CoreOnly = coreOnly
+	// Anonymous: pins the sidecar images each release's dashmate requests.
+	runner.Registry = release.Registry{}
 	if args[0] == "upgrade-plan" {
 		if owner != "" {
 			return errors.New("network has an active runner; finish or recover it before upgrade planning")

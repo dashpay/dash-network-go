@@ -12,6 +12,11 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
+// PlatformObservationWindow outlasts dashmate's createEmptyBlocksInterval
+// (3m), so an idle but healthy Platform still advances between samples. The
+// CLI never observes for less.
+const PlatformObservationWindow = 3*time.Minute + 20*time.Second
+
 type HealthNode struct {
 	Healthy        bool     `json:"healthy"`
 	CoreHeight     int64    `json:"coreHeight"`
@@ -181,8 +186,11 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 				} else if commonHash != x.ReferenceBlockHash {
 					n.Problems = append(n.Problems, "Platform block hash disagreement")
 				}
-				if len(x.Containers) != 4 {
-					n.Problems = append(n.Problems, "incomplete Platform service set")
+				for _, component := range []string{"drive", "tenderdash", "dapi", "gateway"} {
+					if x.Containers[component] == "" {
+						n.Problems = append(n.Problems, "incomplete Platform service set")
+						break
+					}
 				}
 				if first.platform != nil {
 					for name, id := range first.platform.Containers {

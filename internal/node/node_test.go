@@ -140,3 +140,29 @@ func TestUpgradeEntryPointCannotExecuteLifecycleMutation(t *testing.T) {
 		t.Fatal("upgrade adapter reached arbitrary lifecycle entry point", string(out), err)
 	}
 }
+
+func TestRenderObservationIsStrict(t *testing.T) {
+	good := &Render{Version: "4.2.0-beta.3", Sidecars: map[string]string{
+		"core_tor":                   "osminogin/tor-simple:0.4.9.11@sha256:" + strings.Repeat("a", 64),
+		"gateway_rate_limiter_redis": "redis:alpine",
+	}, Changes: []string{"drive_abci", "gateway"}, Deferred: []string{"core", "core_tor"}}
+	if err := good.validate(); err != nil {
+		t.Fatal(err)
+	}
+	var none *Render
+	if err := none.validate(); err != nil {
+		t.Fatal("actions without a render", err)
+	}
+	for _, change := range []func(*Render){
+		func(r *Render) { r.Version = "latest" },
+		func(r *Render) { r.Sidecars = map[string]string{"quorum_list": "dashpay/quorum-list-server:latest"} },
+		func(r *Render) { r.Sidecars = map[string]string{"core_tor": "Not A Reference"} },
+		func(r *Render) { r.Changes = []string{"dashmate_helper"} },
+	} {
+		bad := *good
+		change(&bad)
+		if bad.validate() == nil {
+			t.Fatal("invalid render accepted", bad)
+		}
+	}
+}

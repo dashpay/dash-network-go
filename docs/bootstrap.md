@@ -92,9 +92,10 @@ binary alongside the plan. These operator artifacts are not public status data.
 5. Verify image OS, architecture and repository digests. Publish the host-ready
    marker last. Probe again independently and perform a final fleet readback.
 
-Validators cache all six components. Seeds cache Core and Tenderdash. Wallet,
-miner, and fullnode roles cache Core only. No Compose service definitions or
-application configuration are generated yet. Dedicated data/release directories
+Validators cache all six components. Every other node caches Core and the
+dashmate helper, with which the lifecycle renders its services (a join's
+fullnodes cache the helper but never run it). Seeds cache Core and Tenderdash.
+No Compose service definitions or application configuration are generated yet. Dedicated data/release directories
 are root-owned mode 0700; application-specific ownership comes with the service
 stage. Existing containers cause refusal even if they are stopped.
 
