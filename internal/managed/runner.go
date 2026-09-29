@@ -107,8 +107,9 @@ func (r Runner) awaitReady(ctx context.Context, f Fleet, t Target) error {
 			last = status
 		}
 		if e := r.wait(ready, 15*time.Second); e != nil {
+			// The operation deadline bounds the whole rollout, this wait included.
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return fmt.Errorf("%s was still starting when the operation stopped (%s): %w", t.Name, status, ctx.Err())
 			}
 			return fmt.Errorf("%s not ready within %s: %s", t.Name, timeout, status)
 		}

@@ -507,6 +507,14 @@ func TestManagedUpgradeReadyTimeout(t *testing.T) {
 	if m.r.Phase != "interrupted" || m.r.Current != "validator-01" {
 		t.Fatal("interruption not journaled for resume", m.r.Phase, m.r.Current)
 	}
+	// The operation deadline ends the wait with a message naming it.
+	r.ReadyTimeout = time.Hour
+	short, c2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer c2()
+	_, e = r.Execute(short, p)
+	if !errors.Is(e, context.DeadlineExceeded) || !strings.Contains(e.Error(), "validator-01 was still starting when the operation stopped (Core starting (Verifying blocks))") {
+		t.Fatal(e)
+	}
 }
 
 // Public testnet can go several minutes without a block: a window in which no
