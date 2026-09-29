@@ -750,3 +750,33 @@ func TestBlockTimeIsAPlanParameter(t *testing.T) {
 		t.Fatal("observation window not stretched for a slow chain", health.ObservationWindow)
 	}
 }
+
+func TestChainIsNamedAfterTheDevnet(t *testing.T) {
+	p, _, _, _ := setup(t)
+	name := strings.TrimPrefix(p.Bootstrap.Compute.Network.Metadata.Name, "devnet-")
+	if p.Bootstrap.Compute.Network.Chain.Generation != 1 || p.CoreNetwork != name || p.PlatformChainID != "dash-devnet-"+name {
+		t.Fatal("a first-generation chain is not named after the devnet", p.CoreNetwork, p.PlatformChainID)
+	}
+	if ChainName("devnet-x", 1) != "x" || ChainName("devnet-x", 2) != "x-g2" {
+		t.Fatal("a reset chain must get a new name", ChainName("devnet-x", 2))
+	}
+	rehash := func(q Plan) Plan { q.ID = ""; q.ID = hash(q); return q }
+	// Plans made while generation 1 carried its suffix stay valid.
+	legacy := p
+	legacy.CoreNetwork, legacy.PlatformChainID = name+"-g1", "dash-devnet-"+name+"-g1"
+	if err := rehash(legacy).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, core := range []string{name + "-g2", "other", name + "-g1x"} {
+		q := p
+		q.CoreNetwork, q.PlatformChainID = core, "dash-devnet-"+core
+		if rehash(q).Validate() == nil {
+			t.Fatal("foreign chain identity accepted", core)
+		}
+	}
+	mismatch := p
+	mismatch.PlatformChainID = "dash-devnet-" + name + "-g1"
+	if rehash(mismatch).Validate() == nil {
+		t.Fatal("Platform chain ID must follow the Core chain")
+	}
+}
