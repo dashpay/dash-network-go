@@ -27,6 +27,10 @@ class Failure(Exception):
     pass
 
 
+class Warmup(Exception):
+    pass
+
+
 def require(value, code):
     if not value:
         raise Failure(code)
@@ -274,7 +278,13 @@ class Worker:
         core=selected['core']
         paths=[m['Destination'] for m in core['Mounts'] if m['Destination'].endswith('/dash.conf')]
         require(len(paths)==1,'core-config-mount')
-        raw=run(['docker','exec',core['Id'],'dash-cli','-conf='+paths[0],method,*[str(x) for x in args]])
+        p=subprocess.run(['docker','exec',core['Id'],'dash-cli','-conf='+paths[0],method,*[str(x) for x in args]],
+                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60,check=False)
+        # dash-cli exits 28 (RPC_IN_WARMUP) while dashd loads, migrates or
+        # verifies its databases; its last stderr line is dashd's init message.
+        if p.returncode==28:raise Warmup(re.sub(r'[^A-Za-z0-9 .,:()/%-]','',p.stderr.decode(errors='replace').strip().splitlines()[-1] if p.stderr.strip() else '')[:80].strip())
+        require(p.returncode==0,'command-failed');require(len(p.stdout)<=2*1024*1024,'command-output-size')
+        raw=p.stdout
         try:return json.loads(raw)
         except json.JSONDecodeError:return raw.decode().strip()
 
@@ -319,6 +329,7 @@ class Worker:
                 require(info['chain']==self.f['coreNetwork'],'wrong-core-chain')
                 if self.t['role'] in ['validator','masternode']:
                     mn=self.rpc(selected,'masternode','status');chain.update(masternodeState=mn.get('state',''),proTxHash=mn.get('proTxHash',''))
+            except Warmup as w:problems.append('core-starting: '+(str(w) or 'RPC warm-up'))
             except Exception:problems.append('core-health-unavailable')
         if self.t['role']=='validator':
             try:

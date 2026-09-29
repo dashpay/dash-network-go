@@ -28,7 +28,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var manifestPath, snapshotPath, planPath, key, hosts, profile, output, confirm, scope, operation, choicesPath, expectedOwner string
-	var timeout, window time.Duration
+	var timeout, window, ready time.Duration
 	var stopped bool
 	var source, selectedNodes string
 	if command == "managed-plan" || command == "managed-enroll" {
@@ -48,6 +48,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		fs.StringVar(&snapshotPath, "snapshot", "", "complete existing-state snapshot")
 	case "managed-deploy", "managed-upgrade":
 		fs.StringVar(&planPath, "plan", "", "reviewed existing-workload operation plan")
+		fs.DurationVar(&ready, "ready-timeout", 60*time.Minute, "how long an upgraded node may take to serve again (a new Core may migrate its indexes on first start)")
 	default:
 		return errors.New("unknown managed command")
 	}
@@ -79,7 +80,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		targets = strings.Split(selectedNodes, ",")
 	}
 	healthOperation := command == "managed-doctor" || command == "managed-upgrade" || command == "managed-deploy"
-	if fs.NArg() != 0 || timeout <= 0 || window <= 0 || (healthOperation && window >= timeout) {
+	if fs.NArg() != 0 || timeout <= 0 || window <= 0 || (ready <= 0 && planPath != "") || (healthOperation && window >= timeout) {
 		return errors.New("named arguments and positive bounded observation/timeout required")
 	}
 	if needsSSH && (key == "" || hosts == "") {
@@ -254,7 +255,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	}
 	owner := hex.EncodeToString(ownerBytes[:])
 	fmt.Fprintln(stderr, "runner:", owner)
-	runner := managed.Runner{Targets: targets, Identity: identity, Cloud: cloud, Store: store, Remote: remote, Owner: owner, Window: window, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
+	runner := managed.Runner{Targets: targets, Identity: identity, Cloud: cloud, Store: store, Remote: remote, Owner: owner, Window: window, ReadyTimeout: ready, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
 	var record managed.Record
 	if command == "managed-enroll" {
 		record, e = runner.Enroll(ctx, s)

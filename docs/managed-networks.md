@@ -89,7 +89,7 @@ dashnet managed-plan --snapshot snapshot.json --operation upgrade \
 
 dashnet managed-upgrade --plan change.json --confirm PLAN_ID \
   --ssh-key /secure/key --known-hosts /secure/known_hosts --profile OPS \
-  --observation-window 4m --timeout 110m --out upgraded.json
+  --observation-window 4m --ready-timeout 60m --timeout 110m --out upgraded.json
 
 dashnet managed-doctor --snapshot snapshot.json \
   --ssh-key /secure/key --known-hosts /secure/known_hosts --profile OPS \
@@ -142,6 +142,22 @@ The managed default is four minutes: current Moutai emits empty blocks every
 three minutes, so a 90-second sample can report no progress on a healthy idle
 network. The gate still requires actual advancement; it does not reinterpret an
 unchanged height as healthy. Actions exposes the same observation-window input.
+A node whose Core did not advance during the window is sampled again, against
+its first sample, after another window, up to three times: public testnet can go
+several minutes between blocks, and a block that lands mid-sweep reaches only the
+nodes sampled after it. An operation's gates extend only for its selected
+targets, so an unrelated stuck node does not slow them. A stalled chain or node
+still fails, and an extension that cannot finish before the deadline is skipped.
+
+After replacing a target, `managed-upgrade` first waits for that node alone to
+serve again (Core synced and ChainLocked, masternode `READY`, and Platform for
+validators), polling it every 15 seconds for up to `--ready-timeout` (default 60
+minutes), and reports dashd's own warm-up status meanwhile. A masternode that
+comes back `POSE_BANNED` or `REMOVED` fails immediately. A new Core release
+can rebuild or migrate databases on first start: v24 moves the address, spent and
+timestamp indexes out of the block index database, about four minutes on a
+testnet masternode. Only then does the fleet-wide gate run, with several windows
+of allowance.
 
 The network journal records the pending target before withdrawal. On-host
 write-ahead state records each selected container's original configuration and
