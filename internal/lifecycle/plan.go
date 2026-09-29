@@ -76,7 +76,7 @@ type Options struct {
 // DefaultEpochSeconds and the supported range of Platform epoch lengths.
 const (
 	DefaultEpochSeconds = 3600
-	MinEpochSeconds     = 60
+	MinEpochSeconds     = 180 // dashmate's minimum epochTime
 	MaxEpochSeconds     = 30 * 24 * 3600
 )
 

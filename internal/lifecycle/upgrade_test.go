@@ -185,7 +185,9 @@ func TestUpgradeOneValidatorAtATimeAndRetainedRuntime(t *testing.T) {
 			if result.Upgrade.Phase != "complete" || len(result.Upgrade.Completed) != 13 || f.store.owner != "" {
 				t.Fatal("incomplete rollout", result.Upgrade)
 			}
-			if callsFor(f.remote, "upgrade-stage") != 13 || callsFor(f.remote, "upgrade-apply") != 13 {
+			// A Platform rollout also stages the wallet, whose helper moves.
+			stages := map[string]int{"platform": 14, "tenderdash": 13}[scope]
+			if callsFor(f.remote, "upgrade-stage") != stages || callsFor(f.remote, "upgrade-apply") != 13 {
 				t.Fatal("lost intended validator")
 			}
 			for _, q := range f.remote.calls {

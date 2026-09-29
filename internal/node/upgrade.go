@@ -54,6 +54,13 @@ func (q Request) validateUpgrade() error {
 		if len(u.From) != 6 || len(u.To) != 6 || u.From["core"] != u.To["core"] {
 			return errors.New("upgrade requires complete image sets and unchanged Core")
 		}
+	case u.Scope == "" && q.Action == "upgrade-stage":
+		// Other nodes only move to the rollout's dashmate helper; staging
+		// renders them with it to prove Core's configuration unchanged.
+		components = spec.RoleComponents(q.Target.Role)
+		if len(u.From) != len(components) || len(u.To) != len(components) || u.From["core"] != u.To["core"] || u.From["helper"] == u.To["helper"] {
+			return errors.New("a Platform rollout changes only the dashmate helper on other nodes")
+		}
 	default:
 		return errors.New("Platform upgrades apply to validators only")
 	}

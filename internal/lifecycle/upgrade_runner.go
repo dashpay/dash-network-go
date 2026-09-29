@@ -15,6 +15,18 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
+// stageTargets are the nodes a Platform rollout stages: its validators, and
+// every other node whose dashmate helper it changes.
+func stageTargets(u UpgradePlan) []node.Target {
+	out := u.Deployment.Validators()
+	for _, t := range u.Deployment.Targets {
+		if t.Role != "validator" && u.From[t.Name]["helper"] != u.To[t.Name]["helper"] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // componentServices names the dashmate service of each Platform component.
 var componentServices = map[string]string{"drive": "drive_abci", "tenderdash": "drive_tenderdash", "dapi": "rs_dapi", "gateway": "gateway"}
 
@@ -166,7 +178,7 @@ func upgradeSidecars(record provision.Record) provision.Sidecars {
 	return effectiveSidecars(record)
 }
 
-func (e *execution) stageUpgrade(u UpgradePlan) (map[string]*node.Render, error) {
+func (e *execution) stageUpgrade(u UpgradePlan, targets []node.Target) (map[string]*node.Render, error) {
 	// Cache images and render the target release concurrently, but never
 	// withdraw a service in this phase.
 	var wg sync.WaitGroup
@@ -176,7 +188,7 @@ func (e *execution) stageUpgrade(u UpgradePlan) (map[string]*node.Render, error)
 	// Staging renders the target release on every node: as many at once as
 	// a deploy's render-heavy steps.
 	limit := make(chan struct{}, concurrency("render"))
-	for _, t := range upgradeOrder(e.p, u.Scope) {
+	for _, t := range targets {
 		wg.Add(1)
 		go func(t node.Target) {
 			defer wg.Done()
@@ -212,17 +224,27 @@ func (e *execution) stageUpgrade(u UpgradePlan) (map[string]*node.Render, error)
 // pinned and staged again; each validator's staged changes are journaled once.
 func (e *execution) stagePlatform(u UpgradePlan) error {
 	for pass := 0; ; pass++ {
-		observed, err := e.stageUpgrade(u)
+		targets := stageTargets(u)
+		observed, err := e.stageUpgrade(u, targets)
 		if err != nil {
 			return err
 		}
-		validators := map[string]*node.Render{}
-		for _, t := range e.p.Validators() {
-			validators[t.Name] = observed[t.Name]
+		staged := map[string]*node.Render{}
+		var deferred []string
+		for _, t := range targets {
+			staged[t.Name] = observed[t.Name]
+			if r := observed[t.Name]; r != nil && len(r.Deferred) > 0 {
+				deferred = append(deferred, t.Name)
+			}
 		}
-		version, requested, err := renders(validators)
+		version, requested, err := renders(staged)
 		if err != nil {
 			return err
+		}
+		// Core's configuration changes only with Core: a Platform rollout that
+		// would leave the new release's Core configuration behind stops here.
+		if len(deferred) > 0 {
+			return fmt.Errorf("dashmate %s changes Core's configuration on %s; a Platform rollout cannot apply that", version, strings.Join(deferred, ", "))
 		}
 		current := upgradeSidecars(e.r)
 		pins, err := e.runner.pinSidecars(e.ctx, e.p, current, requested)
@@ -243,21 +265,16 @@ func (e *execution) stagePlatform(u UpgradePlan) error {
 		if e.r.Upgrade.Changes == nil {
 			e.r.Upgrade.Changes = map[string][]string{}
 		}
-		deferred := false
 		for _, t := range e.p.Validators() {
 			r := observed[t.Name]
 			if _, ok := e.r.Upgrade.Changes[t.Name]; !ok && !e.r.Upgrade.Completed[t.Name] && t.Name != e.r.Upgrade.CurrentNode {
 				e.r.Upgrade.Changes[t.Name] = append([]string{}, r.Changes...)
 			}
-			deferred = deferred || len(r.Deferred) > 0
 		}
 		if err = e.save(); err != nil {
 			return err
 		}
-		e.report("dashmate " + version + " renders every validator for this rollout")
-		if deferred {
-			e.report("the target release also changes Core's rendered configuration; that takes effect at the next Core rollout")
-		}
+		e.report(fmt.Sprintf("dashmate %s renders all %d staged nodes for this rollout", version, len(targets)))
 		return nil
 	}
 }
@@ -416,7 +433,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	}
 	e.report("upgrade-staging")
 	if u.Scope == "core" {
-		_, err = e.stageUpgrade(u)
+		_, err = e.stageUpgrade(u, upgradeOrder(p, u.Scope))
 	} else {
 		err = e.stagePlatform(u)
 	}
@@ -506,6 +523,11 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if health, err = e.verifyUpgrade(); err != nil {
 			return
 		}
+	}
+	// Nodes the rollout only moved to its dashmate helper (proved at staging
+	// to leave their Core configuration unchanged) take it now.
+	for _, t := range p.Targets {
+		e.r.Runtime.Images[t.Name] = cloneImages(u.To)[t.Name]
 	}
 	e.r.Upgrade.Phase = "complete"
 	e.r.Upgrade.ObservedAt = health.ObservedAt
