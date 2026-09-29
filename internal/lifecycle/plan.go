@@ -92,6 +92,17 @@ const (
 // DefaultPremineHeight matches the legacy devnet tooling.
 const DefaultPremineHeight = 4032
 
+// ChainName is the Core devnet name. Core derives a devnet's genesis block
+// from its name, so a reset chain (generation 2 on) is named <name>-g<N>;
+// the first chain, usually the only one, is just <name>.
+func ChainName(network string, generation int) string {
+	short := strings.TrimPrefix(network, "devnet-")
+	if generation <= 1 {
+		return short
+	}
+	return fmt.Sprintf("%s-g%d", short, generation)
+}
+
 func hash(v any) string {
 	b, _ := json.Marshal(v)
 	s := sha256.Sum256(b)
@@ -122,7 +133,7 @@ func BuildWith(b bootstrap.Plan, live map[string]types.Instance, o Options, prot
 	if o.EpochSeconds != 0 {
 		p.PlatformEpochSeconds = o.EpochSeconds
 	}
-	p.CoreNetwork = fmt.Sprintf("%s-g%d", strings.TrimPrefix(b.Compute.Network.Metadata.Name, "devnet-"), b.Compute.Network.Chain.Generation)
+	p.CoreNetwork = ChainName(b.Compute.Network.Metadata.Name, b.Compute.Network.Chain.Generation)
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
 	if public != nil {
 		p.Advertise = "public"
@@ -176,8 +187,10 @@ func (p Plan) Validate() error {
 	if p.PlatformEpochSeconds != 0 && (p.PlatformEpochSeconds < MinEpochSeconds || p.PlatformEpochSeconds > MaxEpochSeconds) {
 		return fmt.Errorf("Platform epoch must be %d..%d seconds", MinEpochSeconds, MaxEpochSeconds)
 	}
-	coreNetwork := fmt.Sprintf("%s-g%d", strings.TrimPrefix(p.Bootstrap.Compute.Network.Metadata.Name, "devnet-"), p.Bootstrap.Compute.Network.Chain.Generation)
-	if p.CoreNetwork != coreNetwork || p.PlatformChainID != "dash-devnet-"+coreNetwork || len(p.PlatformChainID) > 50 {
+	name, generation := p.Bootstrap.Compute.Network.Metadata.Name, p.Bootstrap.Compute.Network.Chain.Generation
+	// Plans made before generation 1 dropped its suffix name the chain <name>-g1.
+	legacy := fmt.Sprintf("%s-g%d", strings.TrimPrefix(name, "devnet-"), generation)
+	if (p.CoreNetwork != ChainName(name, generation) && p.CoreNetwork != legacy) || p.PlatformChainID != "dash-devnet-"+p.CoreNetwork || len(p.PlatformChainID) > 50 {
 		return errors.New("invalid or overlong chain identity; use a shorter devnet name")
 	}
 	if len(p.Targets) != len(p.Bootstrap.Targets) {

@@ -59,7 +59,9 @@ directory is ignored).
 
 - Strict YAML: unknown/duplicate fields and additional documents are errors.
 - Network name, generation, cloud account, region, visibility, topology, and image
-  references are explicit. Increment generation when resetting a devnet.
+  references are explicit. Increment generation when resetting a devnet. The Core
+  devnet (and Platform chain ID `dash-devnet-<name>`) is named after the network;
+  a reset chain gets `<name>-g<generation>`, since Core derives the genesis from the name.
 - Visibility must be `private` or `public`; it never defaults to publication.
 - Mutable tags, including nightlies, are allowed as **input**. Resolved output is
   pinned by digest. A changed network definition invalidates the previous lock.
