@@ -78,6 +78,10 @@ default 10): Core's `powtargetspacing` and the miner's cadence. DKG, ChainLock
 and upgrade timing follow it; doctor stretches its observation window to at
 least two and a half blocks on chains slower than the default.
 
+`deployment-plan --epoch-time N` sets the Platform epoch length (60 seconds to
+30 days, default 3600): Drive's `EPOCH_TIME_LENGTH_S` on every validator, kept
+through Platform upgrades. Plans made before the option existed run one hour.
+
 `deploy --core-only` ends once Core is mining with DKG enabled (stage
 `quorums`). Quorums then form on their own; running `deploy` again with the
 same plan waits for them, starts Platform and completes the health gate.

@@ -527,6 +527,12 @@ class Tests(unittest.TestCase):
             self.assertEqual(
                 services["dapi"]["environment"]["DAPI_BIND_ADDRESS"], "127.0.0.1"
             )
+            # Plans without the option run one-hour epochs; the plan's value wins.
+            self.assertEqual(services["drive"]["environment"]["EPOCH_TIME_LENGTH_S"], "3600")
+            w.c["platformEpochSeconds"] = 600
+            self.assertEqual(
+                w.platform_services()["drive"]["environment"]["EPOCH_TIME_LENGTH_S"], "600"
+            )
 
     def test_protobuf_malformed_and_missing_fields(self):
         self.assertEqual(worker.protobuf(b"\x0a\x02hi\x20\x05"), {1: b"hi", 4: 5})

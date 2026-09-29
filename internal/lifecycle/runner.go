@@ -50,7 +50,8 @@ func (p Plan) Request(t node.Target, action string) node.Request {
 			GenesisTime:            p.GenesisTime.Format(time.RFC3339Nano),
 			InitialProtocolVersion: p.InitialProtocolVersion,
 			MiningIntervalSeconds:  p.MiningIntervalSeconds, MiningNodeName: p.Miner().Name, PremineHeight: p.PremineHeight,
-			Advertise: p.Advertise, GatewayTLS: p.GatewayTLS, CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
+			PlatformEpochSeconds: p.PlatformEpochSeconds,
+			Advertise:            p.Advertise, GatewayTLS: p.GatewayTLS, CorePeers: p.PeerAddresses(), Ports: node.DefaultPorts,
 		},
 	}
 }
