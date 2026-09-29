@@ -90,6 +90,7 @@ type backend struct {
 	fail     string
 	failOnce bool
 	after    func(Request) error
+	observe  func(Request, *Observation)
 }
 
 func (b *backend) Call(ctx context.Context, q Request) (Observation, error) {
@@ -111,6 +112,9 @@ func (b *backend) Call(ctx context.Context, q Request) (Observation, error) {
 		o.Chain.DAPIHeight++
 		if q.ReferenceHeight > 0 {
 			o.Chain.PlatformHash = h64("same-block")
+		}
+		if b.observe != nil {
+			b.observe(q, &o)
 		}
 		b.nodes[q.Target.Name] = o
 	}
@@ -432,5 +436,165 @@ func TestReadOnlyImportPreservesUnknownTarget(t *testing.T) {
 	}
 	if observed.Validate() != nil {
 		t.Fatal("partial evidence could not be retained")
+	}
+}
+
+// A new Core release may spend minutes migrating its indexes on first start
+// (v24 on testnet). The gate waits on the replaced node alone, then verifies.
+func TestManagedUpgradeWaitsForCoreStartup(t *testing.T) {
+	s, r, _, b := setup(t)
+	enroll(t, s, r)
+	p, e := Build(s, "upgrade", "core", "", pins(s, "core", "b"), time.Now())
+	if e != nil {
+		t.Fatal(e)
+	}
+	starting := map[string]int{}
+	b.after = func(q Request) error {
+		if q.Action == "apply" {
+			starting[q.Target.Name] = 5
+		}
+		return nil
+	}
+	b.observe = func(q Request, o *Observation) {
+		if starting[q.Target.Name] > 0 {
+			starting[q.Target.Name]--
+			o.Problems = []string{"core-starting: Loading block index", "platform-health-unavailable"}
+		} else {
+			o.Problems = []string{}
+		}
+	}
+	var progress []string
+	r.Progress = func(line string) { progress = append(progress, line) }
+	ctx, c := deadline()
+	defer c()
+	if _, e = r.Execute(ctx, p); e != nil {
+		t.Fatal(e)
+	}
+	log := strings.Join(progress, "\n")
+	if !strings.Contains(log, "managed target validator-01 starting: Core starting (Loading block index)") || !strings.Contains(log, "managed target validator-01 ready") {
+		t.Fatal("startup not reported:\n" + log)
+	}
+	if strings.Contains(log, "health gate waiting") {
+		t.Fatal("fleet gate ran before the replaced node served again:\n" + log)
+	}
+}
+
+func TestManagedUpgradeReadyTimeout(t *testing.T) {
+	s, r, m, b := setup(t)
+	enroll(t, s, r)
+	p, e := Build(s, "upgrade", "core", "", pins(s, "core", "b"), time.Now())
+	if e != nil {
+		t.Fatal(e)
+	}
+	applied := false
+	b.after = func(q Request) error {
+		applied = applied || q.Action == "apply"
+		return nil
+	}
+	b.observe = func(q Request, o *Observation) {
+		if applied && q.Target.Name == "validator-01" {
+			o.Problems = []string{"core-starting: Verifying blocks"}
+		}
+	}
+	r.ReadyTimeout = 50 * time.Millisecond
+	r.Wait = func(ctx context.Context, _ time.Duration) error { return sleep(ctx, 5*time.Millisecond) }
+	ctx, c := deadline()
+	defer c()
+	_, e = r.Execute(ctx, p)
+	if e == nil || !strings.Contains(e.Error(), "validator-01 not ready within 50ms: Core starting (Verifying blocks)") {
+		t.Fatal(e)
+	}
+	if m.r.Phase != "interrupted" || m.r.Current != "validator-01" {
+		t.Fatal("interruption not journaled for resume", m.r.Phase, m.r.Current)
+	}
+	// The operation deadline ends the wait with a message naming it.
+	r.ReadyTimeout = time.Hour
+	short, c2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer c2()
+	_, e = r.Execute(short, p)
+	if !errors.Is(e, context.DeadlineExceeded) || !strings.Contains(e.Error(), "validator-01 was still starting when the operation stopped (Core starting (Verifying blocks))") {
+		t.Fatal(e)
+	}
+}
+
+// Public testnet can go several minutes without a block: a window in which no
+// node advanced proves nothing, so Doctor extends it instead of failing all.
+func TestDoctorExtendsWindowWithoutNewBlock(t *testing.T) {
+	s, r, _, b := setup(t)
+	sweeps := map[string]int{}
+	idle := 2
+	b.observe = func(q Request, o *Observation) {
+		sweeps[q.Target.Name]++
+		if sweeps[q.Target.Name] <= idle {
+			o.Chain.CoreHeight--
+			o.Chain.ChainLockHeight--
+		}
+	}
+	waits := 0
+	wait := func(ctx context.Context, _ time.Duration) error { waits++; return ctx.Err() }
+	ctx, c := deadline()
+	defer c()
+	h, e := Doctor(ctx, s, r.Remote, time.Second, wait)
+	if e != nil || !h.Healthy || waits != 2 {
+		t.Fatal(e, h.Problems, waits)
+	}
+	// A chain that stays stalled past every extension still fails.
+	sweeps, idle, waits = map[string]int{}, 100, 0
+	h, e = Doctor(ctx, s, r.Remote, time.Second, wait)
+	if e != nil || h.Healthy || waits != 1+idleExtensions || !strings.Contains(strings.Join(h.Problems, ";"), "validator-01: Core not advancing") {
+		t.Fatal(e, h.Problems, waits)
+	}
+}
+
+// A block that lands mid-sweep reaches only the nodes sampled after it: only
+// the nodes that have not advanced are sampled again, and only focus targets.
+func TestDoctorResamplesOnlyLaggingFocusNodes(t *testing.T) {
+	s, r, _, b := setup(t)
+	sweeps := map[string]int{}
+	b.observe = func(q Request, o *Observation) {
+		sweeps[q.Target.Name]++
+		// validator-01..06 miss the block in the second sweep; validator-13 is stuck.
+		n := q.Target.Name
+		if (n <= "validator-06" && sweeps[n] == 2) || n == "validator-13" {
+			o.Chain.CoreHeight--
+			o.Chain.ChainLockHeight--
+		}
+	}
+	wait := func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	ctx, c := deadline()
+	defer c()
+	h, e := doctor(ctx, s, r.Remote, time.Second, wait, []string{"validator-02"})
+	if e != nil || !h.Nodes["validator-02"].Healthy || sweeps["validator-02"] != 3 || sweeps["validator-01"] != 2 || sweeps["validator-13"] != 2 {
+		t.Fatal(e, h.Nodes["validator-02"], sweeps)
+	}
+	if h.Nodes["validator-13"].Healthy || h.Snapshot.Validate() != nil {
+		t.Fatal("stuck node hidden or snapshot not rehashed")
+	}
+	// Whole-fleet doctor: every lagging node is re-sampled; the stuck one still fails.
+	sweeps = map[string]int{}
+	h, e = Doctor(ctx, s, r.Remote, time.Second, wait)
+	if e != nil || !h.Nodes["validator-01"].Healthy || h.Nodes["validator-13"].Healthy || sweeps["validator-13"] != 2+idleExtensions || sweeps["validator-07"] != 2 {
+		t.Fatal(e, h.Problems, sweeps)
+	}
+}
+
+func TestManagedUpgradeFailsFastOnPoSeBan(t *testing.T) {
+	s, r, _, b := setup(t)
+	enroll(t, s, r)
+	p, e := Build(s, "upgrade", "core", "", pins(s, "core", "b"), time.Now())
+	if e != nil {
+		t.Fatal(e)
+	}
+	applied := false
+	b.after = func(q Request) error { applied = applied || q.Action == "apply"; return nil }
+	b.observe = func(q Request, o *Observation) {
+		if applied && q.Target.Name == "validator-01" {
+			o.Chain.MasternodeState = "POSE_BANNED"
+		}
+	}
+	ctx, c := deadline()
+	defer c()
+	if _, e = r.Execute(ctx, p); e == nil || !strings.Contains(e.Error(), "validator-01: masternode POSE_BANNED after the change") {
+		t.Fatal(e)
 	}
 }

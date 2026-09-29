@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -17,11 +18,16 @@ func request(f Fleet, t Target, action string) Request {
 	return Request{Fleet: f, FleetID: f.Authority(), Target: t, Action: action}
 }
 func Observe(ctx context.Context, f Fleet, remote Backend, reference int64) Snapshot {
-	result := Snapshot{APIVersion: spec.Version, Kind: "ExistingSnapshot", Fleet: f, ObservedAt: time.Now().UTC(), Nodes: map[string]Observation{}}
+	result := Snapshot{APIVersion: spec.Version, Kind: "ExistingSnapshot", Fleet: f, ObservedAt: time.Now().UTC(), Nodes: observeTargets(ctx, f, remote, reference, f.Targets)}
+	result.ID = hash(result)
+	return result
+}
+func observeTargets(ctx context.Context, f Fleet, remote Backend, reference int64, targets []Target) map[string]Observation {
+	nodes := map[string]Observation{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	limit := make(chan struct{}, 4)
-	for _, t := range f.Targets {
+	for _, t := range targets {
 		wg.Add(1)
 		go func(t Target) {
 			defer wg.Done()
@@ -40,13 +46,12 @@ func Observe(ctx context.Context, f Fleet, remote Backend, reference int64) Snap
 				o = Observation{InstanceID: t.InstanceID, At: time.Now().UTC(), Error: node.SafeError(err)}
 			}
 			mu.Lock()
-			result.Nodes[t.Name] = o
+			nodes[t.Name] = o
 			mu.Unlock()
 		}(t)
 	}
 	wg.Wait()
-	result.ID = hash(result)
-	return result
+	return nodes
 }
 
 type NodeHealth struct {
@@ -65,6 +70,15 @@ type Health struct {
 }
 
 func (o Observation) Healthy(t Target) error {
+	if o.Error == "" {
+		for _, p := range o.Problems {
+			// dashd answers "in warmup" while it loads, migrates or verifies its
+			// databases; the worker passes on dashd's own init message.
+			if status, ok := strings.CutPrefix(p, "core-starting: "); ok {
+				return errors.New("Core starting (" + status + ")")
+			}
+		}
+	}
 	if o.Error != "" || len(o.Problems) > 0 {
 		return errors.New("observation incomplete")
 	}
@@ -104,6 +118,12 @@ func SameIdentity(old, new Observation, t Target) bool {
 	return true
 }
 func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error) (Health, error) {
+	return doctor(ctx, s, remote, window, wait, nil)
+}
+
+// doctor extends the window for the focus targets (all when empty) that have
+// not advanced, so a gate on one node never waits on an unrelated stuck node.
+func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error, focus []string) (Health, error) {
 	h := Health{Window: window.String(), Problems: []string{}, Nodes: map[string]NodeHealth{}}
 	if err := s.Validate(); err != nil {
 		return h, err
@@ -111,7 +131,9 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 	if window <= 0 {
 		return h, errors.New("positive observation window required")
 	}
+	started := time.Now()
 	first := Observe(ctx, s.Fleet, remote, 0)
+	sweep := time.Since(started)
 	reference := int64(0)
 	for _, t := range s.Fleet.Targets {
 		if t.Role == "validator" {
@@ -125,6 +147,25 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 		return h, err
 	}
 	second := Observe(ctx, s.Fleet, remote, reference)
+	// A public network can go several minutes without a block, and a block that
+	// lands mid-sweep reaches only the nodes sampled after it. A node that has
+	// not advanced is sampled again (against its first sample) after another
+	// window, a bounded number of times; a stalled chain or node still fails.
+	for extra := 0; extra < idleExtensions; extra++ {
+		lagging := laggingCore(s.Fleet, first, second, focus)
+		if len(lagging) == 0 {
+			break
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < window+sweep {
+			break
+		}
+		if err := wait(ctx, window); err != nil {
+			break
+		}
+		maps.Copy(second.Nodes, observeTargets(ctx, s.Fleet, remote, reference, lagging))
+		second.ID = ""
+		second.ID = hash(second)
+	}
 	h.Snapshot = second
 	block := ""
 	for _, t := range s.Fleet.Targets {
@@ -183,6 +224,27 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 	h.Healthy = len(h.Problems) == 0
 	h.ObservedAt = time.Now().UTC()
 	return h, nil
+}
+
+// idleExtensions bounds how many extra observation windows a node that has not
+// advanced is given.
+const idleExtensions = 3
+
+func laggingCore(f Fleet, first, second Snapshot, focus []string) []Target {
+	var out []Target
+	for _, t := range f.Targets {
+		if len(focus) > 0 && !slices.Contains(focus, t.Name) {
+			continue
+		}
+		a, b := first.Nodes[t.Name], second.Nodes[t.Name]
+		if t.Containers["core"] == "" || a.Error != "" || b.Error != "" || a.Chain.CoreHeight <= 0 || b.Chain.CoreHeight <= 0 {
+			continue
+		}
+		if b.Chain.CoreHeight <= a.Chain.CoreHeight {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // Count only observed healthy owned validators, not guessed availability of

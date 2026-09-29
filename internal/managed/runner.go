@@ -22,8 +22,11 @@ type Runner struct {
 	Remote   Backend
 	Owner    string
 	Window   time.Duration
-	Progress func(string)
-	Wait     func(context.Context, time.Duration) error
+	// ReadyTimeout bounds how long a replaced target may take to serve again
+	// (synced, ChainLocked, masternode READY) before the fleet-wide gate.
+	ReadyTimeout time.Duration
+	Progress     func(string)
+	Wait         func(context.Context, time.Duration) error
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -56,12 +59,61 @@ func (r Runner) report(s string) {
 		r.Progress(s)
 	}
 }
-func (r Runner) health(ctx context.Context, s Snapshot) (Health, error) {
-	w := r.Window
-	if w == 0 {
-		w = 4 * time.Minute
+func (r Runner) window() time.Duration {
+	if r.Window == 0 {
+		return 4 * time.Minute
 	}
-	return Doctor(ctx, s, r.Remote, w, r.wait)
+	return r.Window
+}
+func (r Runner) health(ctx context.Context, s Snapshot, focus []string) (Health, error) {
+	return doctor(ctx, s, r.Remote, r.window(), r.wait, focus)
+}
+
+// awaitReady waits for a replaced target to serve again before the fleet-wide
+// gate. A new Core release may rebuild or migrate its databases on first start
+// (v24 moves the address, spent and timestamp indexes into their own databases:
+// several minutes on a testnet masternode), and a fleet-wide gate round costs a
+// whole observation window plus two sweeps of every node. Only the target is
+// polled here, every 15 s.
+func (r Runner) awaitReady(ctx context.Context, f Fleet, t Target) error {
+	timeout := r.ReadyTimeout
+	if timeout == 0 {
+		timeout = 60 * time.Minute
+	}
+	ready, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	last := ""
+	for {
+		status := ""
+		o, e := r.Remote.Call(ready, request(f, t, "observe"))
+		switch {
+		case e != nil && ready.Err() != nil:
+			status = last // cut off by the deadline; keep what was last seen
+		case e != nil:
+			status = "observation unavailable: " + truncate(node.SafeError(e), 200)
+		case o.Chain.MasternodeState == "POSE_BANNED" || o.Chain.MasternodeState == "REMOVED":
+			return fmt.Errorf("%s: masternode %s after the change", t.Name, o.Chain.MasternodeState)
+		default:
+			if e = o.Healthy(t); e == nil {
+				if last != "" {
+					r.report("managed target " + t.Name + " ready")
+				}
+				return nil
+			}
+			status = e.Error()
+		}
+		if status != last {
+			r.report("managed target " + t.Name + " starting: " + status)
+			last = status
+		}
+		if e := r.wait(ready, 15*time.Second); e != nil {
+			// The operation deadline bounds the whole rollout, this wait included.
+			if ctx.Err() != nil {
+				return fmt.Errorf("%s was still starting when the operation stopped (%s): %w", t.Name, status, ctx.Err())
+			}
+			return fmt.Errorf("%s not ready within %s: %s", t.Name, timeout, status)
+		}
+	}
 }
 func (r Runner) Enroll(ctx context.Context, s Snapshot) (record Record, err error) {
 	if err = s.CompleteTargets(r.Targets); err != nil {
@@ -184,7 +236,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			}
 		}
 		if p.Operation == "upgrade" {
-			h, e := r.health(ctx, p.Snapshot)
+			h, e := r.health(ctx, p.Snapshot, p.Targets)
 			if e != nil {
 				return record, e
 			}
@@ -205,7 +257,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 	}
 	if record.Phase == "complete" {
-		h, e := r.health(ctx, p.Snapshot)
+		h, e := r.health(ctx, p.Snapshot, p.Targets)
 		if e != nil {
 			return record, e
 		}
@@ -244,7 +296,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 		// Resume only the journaled target; it may be between stop/remove/create.
 		if p.Operation == "upgrade" && record.Current == "" {
-			h, e := r.health(ctx, p.Snapshot)
+			h, e := r.health(ctx, p.Snapshot, p.Targets)
 			if e != nil {
 				return record, e
 			}
@@ -276,6 +328,9 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			return
 		}
 		if p.Operation == "upgrade" {
+			if err = r.awaitReady(ctx, f, t); err != nil {
+				return
+			}
 			if err = r.verify(ctx, p, record); err != nil {
 				return
 			}
@@ -296,11 +351,13 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 	return
 }
 func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
-	check, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// One gate round is a window plus two fleet sweeps, and a round may extend
+	// while the network is between blocks; allow several.
+	check, cancel := context.WithTimeout(ctx, max(10*time.Minute, (idleExtensions+5)*r.window()))
 	defer cancel()
 	r.report("managed-verifying")
 	for {
-		h, e := r.health(check, p.Snapshot)
+		h, e := r.health(check, p.Snapshot, p.Targets)
 		if e != nil {
 			return e
 		}
@@ -341,6 +398,13 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 			return e
 		}
 	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // Display/monitoring is per-node. Operations require the selected nodes healthy;

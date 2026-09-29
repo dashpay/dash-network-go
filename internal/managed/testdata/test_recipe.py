@@ -52,6 +52,23 @@ class RecipeTest(unittest.TestCase):
             path.write_text(path.read_text()+'includeconf=/private/other.conf\n')
             with self.assertRaisesRegex(worker.Failure,'unsupported-chain-override'):w.join_profile()
 
+    def test_core_warmup_reports_dashd_init_message(self):
+        q=dict(fleet=dict(metadata=dict(name='testnet'),chainType='testnet',coreNetwork='test'),
+               target=dict(instanceId='i-00000001',address='10.0.0.1',role='masternode'))
+        w=worker.Worker(q)
+        core=dict(Id='c'*64,Mounts=[dict(Source='/etc/dash.conf',Destination='/etc/dash.conf')])
+        real=worker.subprocess.run
+        def warming(args,**kw):
+            return worker.subprocess.CompletedProcess(args,28,b'',b'error code: -28\nerror message:\nLoading block index\xe2\x80\xa6\n')
+        worker.subprocess.run=warming
+        try:
+            with self.assertRaisesRegex(worker.Warmup,'^Loading block index$'):w.rpc({'core':core},'getblockchaininfo')
+            self.assertEqual(w.health({'core':core})[1],['core-starting: Loading block index'])
+            worker.subprocess.run=lambda args,**kw:worker.subprocess.CompletedProcess(args,1,b'',b'error: Could not connect to the server\n')
+            self.assertEqual(w.health({'core':core})[1],['core-health-unavailable'])
+        finally:
+            worker.subprocess.run=real
+
     def test_unrecognized_core_config_retains_exact_byte_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'dash.conf';path.write_text('rpcauth=opaque\n')
