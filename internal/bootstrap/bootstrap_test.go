@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +72,8 @@ func (s *memoryStore) Release(_ context.Context, _ provision.Plan, o string) err
 }
 
 type remoteFake struct {
+	mu              sync.Mutex
+	active, peak    int
 	plan            Plan
 	prepared        map[string]bool
 	applies, probes int
@@ -80,6 +83,16 @@ type remoteFake struct {
 }
 
 func (f *remoteFake) Run(ctx context.Context, e transport.Endpoint, command, script string) ([]byte, error) {
+	f.mu.Lock()
+	f.active++
+	f.peak = max(f.peak, f.active)
+	f.mu.Unlock()
+	if strings.Contains(command, " 'apply' ") {
+		time.Sleep(5 * time.Millisecond) // let concurrent preparations overlap
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	defer func() { f.active-- }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -151,6 +164,24 @@ func TestPrepareResumeAndReadback(t *testing.T) {
 	}
 	if f.applies != 2 || f.probes != 10 || len(c.Requests) != 2 {
 		t.Fatalf("resume repeated mutation or skipped readback: %d/%d", f.applies, f.probes)
+	}
+}
+func TestHostsPrepareConcurrently(t *testing.T) {
+	p, c, s, f := setup(t)
+	if len(p.Targets) < 2 {
+		t.Fatal("fixture needs several hosts")
+	}
+	r, err := run(t, p, c, s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.peak < 2 || f.applies != len(p.Targets) {
+		t.Fatalf("hosts were prepared one at a time (peak %d, applies %d)", f.peak, f.applies)
+	}
+	for _, target := range p.Targets {
+		if r.Bootstrap.Nodes[target.Name].Phase != "ready" {
+			t.Fatalf("%s not ready", target.Name)
+		}
 	}
 }
 func TestLostSSHResponseReconcilesBeforeApplying(t *testing.T) {
@@ -325,11 +356,48 @@ func TestCompletedHostWithLostCheckpointIsNotReapplied(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := run(t, p, c, s, f); err == nil || f.applies != 1 {
+	// Hosts prepare concurrently: the failed checkpoint cancels whatever has
+	// not been applied yet, and the resume applies only those hosts.
+	if _, err := run(t, p, c, s, f); err == nil || f.applies < 1 {
 		t.Fatal("expected post-apply journal failure", err)
 	}
 	s.failSave = nil
-	if _, err := run(t, p, c, s, f); err != nil || f.applies != 2 {
-		t.Fatal("checkpoint loss caused a duplicate apply", err)
+	if _, err := run(t, p, c, s, f); err != nil || f.applies != len(p.Targets) {
+		t.Fatal("checkpoint loss caused a duplicate or missing apply", f.applies, err)
+	}
+}
+func TestFleetStartsNothingPastAFailedCheckpoint(t *testing.T) {
+	targets := make([]Target, parallelHosts+4)
+	for i := range targets {
+		targets[i] = Target{Name: fmt.Sprintf("h%02d", i)}
+	}
+	var mu sync.Mutex
+	started, running, peak := 0, 0, 0
+	work := func(_ context.Context, target Target) (provision.BootstrapNode, error) {
+		mu.Lock()
+		started++
+		running++
+		peak = max(peak, running)
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		mu.Lock()
+		running--
+		mu.Unlock()
+		if target.Name == "h01" {
+			return provision.BootstrapNode{Phase: "unknown"}, errors.New("prepare h01: apt failed")
+		}
+		return provision.BootstrapNode{Phase: "ready"}, nil
+	}
+	recorded := 0
+	if err := fleet(context.Background(), targets, work, func(Target, provision.BootstrapNode) error { recorded++; return nil }); err == nil || !strings.Contains(err.Error(), "apt failed") {
+		t.Fatal("work error lost", err)
+	}
+	if started != len(targets) || recorded != len(targets) || peak > parallelHosts || peak < 2 {
+		t.Fatalf("started %d recorded %d peak %d", started, recorded, peak)
+	}
+	started = 0
+	err := fleet(context.Background(), targets, work, func(Target, provision.BootstrapNode) error { return errors.New("lost claim") })
+	if err == nil || !strings.Contains(err.Error(), "lost claim") || started != parallelHosts {
+		t.Fatalf("a host started past a failed checkpoint (started %d): %v", started, err)
 	}
 }

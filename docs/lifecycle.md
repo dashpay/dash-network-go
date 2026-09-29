@@ -84,8 +84,19 @@ The controller runs named stages:
    serially on the wallet. Quorums and the Platform genesis ChainLock therefore
    form on a mature chain instead of during the first few hundred blocks, where
    DKG sessions were observed to PoSe-ban late-registered validators.
-5. Activate devnet sporks (InstantSend 2/3, superblocks 9, DKG 17, ChainLocks 19, all-connected quorums 21), start persistent mining, wait for READY
-   masternodes, all three quorum types and ChainLocks.
+5. Mine the quorum rotation cycles at minimum difficulty, then activate devnet
+   sporks (InstantSend 2/3, superblocks 9, DKG 17, ChainLocks 19, all-connected
+   quorums 21), start persistent mining, wait for READY masternodes, all three
+   quorum types and ChainLocks. A rotated `llmq_devnet_dip0024` quorum (48-block
+   cycle) is assembled from quarters picked at the three previous cycle bases,
+   each from the masternode list 8 blocks earlier (a masternode counts once
+   confirmed), so its first full instance
+   forms three cycles after the last registration: about 190 blocks, over 30
+   minutes at ten seconds a block. Block processing records those picks whether
+   or not DKG runs, and before activation (SPORK_17 off) no DKG session exists,
+   so no member can be PoSe-punished: the wallet mines to 6 blocks before that
+   cycle at minimum difficulty, and every quorum type then forms in the same
+   normally paced DKG. Nothing is mined this way once DKG is enabled (resume).
 6. Persist the initial chainlocked Core height once, render immutable Platform
    genesis/node identity, and start Drive/Tenderdash/rs-dapi/Envoy on validators.
 7. Observe all nodes twice: advancing Core and Platform, common-height Platform

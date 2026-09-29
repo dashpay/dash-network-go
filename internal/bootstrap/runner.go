@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -124,83 +125,82 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud provisio
 		id := aws.ToString(instance.InstanceId)
 		hosts[t.Name] = host{endpoint: transport.Endpoint{Address: ip, Port: p.Access.Port, HostAlias: p.HostAlias(id)}, id: id}
 	}
-	var preflightErrors []error
+	// Hosts are independent: probe, prepare and verify them concurrently. SSH
+	// work runs in the pool; this goroutine records each result and saves the
+	// journal, so checkpoints stay serial and a failed save stops the batch.
+	sayMu := sync.Mutex{}
+	say := func(s string) { sayMu.Lock(); defer sayMu.Unlock(); report(s) }
+	record := func(t Target, n provision.BootstrapNode) error { r.Bootstrap.Nodes[t.Name] = n; return save() }
+	unknown := func() provision.BootstrapNode {
+		return provision.BootstrapNode{Phase: "unknown", ObservedAt: time.Now().UTC()}
+	}
 	for _, t := range p.Targets {
-		if err = ctx.Err(); err != nil {
-			return
-		}
 		r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "checking"}
-		if err = save(); err != nil {
-			return
-		}
+	}
+	if err = save(); err != nil {
+		return
+	}
+	if err = fleet(ctx, p.Targets, func(ctx context.Context, t Target) (provision.BootstrapNode, error) {
 		h := hosts[t.Name]
-		report("checking " + t.Name)
+		say("checking " + t.Name)
 		observation, probeErr := Observe(ctx, remote, h.endpoint, p, t, h.id, "probe")
-		n := provision.BootstrapNode{Phase: "pending", ObservedAt: time.Now().UTC()}
 		if probeErr != nil {
-			n.Phase = "unknown"
-			preflightErrors = append(preflightErrors, fmt.Errorf("preflight %s: %w", t.Name, probeErr))
-		} else if observation.Ready {
-			n = ready(observation)
+			return unknown(), fmt.Errorf("preflight %s: %w", t.Name, probeErr)
 		}
-		r.Bootstrap.Nodes[t.Name] = n
-		if err = save(); err != nil {
-			return
+		if observation.Ready {
+			return ready(observation), nil
 		}
+		return provision.BootstrapNode{Phase: "pending", ObservedAt: time.Now().UTC()}, nil
+	}, record); err != nil {
+		return
 	}
-	if len(preflightErrors) > 0 {
-		return result, errors.Join(preflightErrors...)
-	}
+	var pending []Target
 	for _, t := range p.Targets {
-		if r.Bootstrap.Nodes[t.Name].Phase == "ready" {
-			continue
+		if r.Bootstrap.Nodes[t.Name].Phase != "ready" {
+			pending = append(pending, t)
+			r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "preparing"}
 		}
-		if err = ctx.Err(); err != nil {
-			return
-		}
-		h := hosts[t.Name]
-		r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "preparing"}
+	}
+	if len(pending) > 0 {
+		// No host is mutated unless this claim is still ours.
 		if err = save(); err != nil {
 			return
 		}
-		report("preparing " + t.Name)
-		_, applyErr := Observe(ctx, remote, h.endpoint, p, t, h.id, "apply")
-		if applyErr != nil {
-			r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "unknown", ObservedAt: time.Now().UTC()}
-			return result, fmt.Errorf("prepare %s (resume rechecks host state): %w", t.Name, applyErr)
+	}
+	if err = fleet(ctx, pending, func(ctx context.Context, t Target) (provision.BootstrapNode, error) {
+		h := hosts[t.Name]
+		say("preparing " + t.Name)
+		if _, applyErr := Observe(ctx, remote, h.endpoint, p, t, h.id, "apply"); applyErr != nil {
+			return unknown(), fmt.Errorf("prepare %s (resume rechecks host state): %w", t.Name, applyErr)
 		}
 		// Independent readback after mutation; do not trust the apply response alone.
 		observation, probeErr := Observe(ctx, remote, h.endpoint, p, t, h.id, "probe")
 		if probeErr != nil || !observation.Ready {
-			r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "unknown", ObservedAt: time.Now().UTC()}
 			if probeErr == nil {
 				probeErr = errors.New("runtime/images not ready after preparation")
 			}
-			return result, fmt.Errorf("verify %s: %w", t.Name, probeErr)
+			return unknown(), fmt.Errorf("verify %s: %w", t.Name, probeErr)
 		}
-		r.Bootstrap.Nodes[t.Name] = ready(observation)
-		if err = save(); err != nil {
-			return
-		}
+		return ready(observation), nil
+	}, record); err != nil {
+		return
 	}
 	// Read the whole fleet once more: no earlier target disappears behind later work.
 	if _, err = provision.RunningTargets(ctx, p.Compute, r, cloud); err != nil {
 		return
 	}
-	for _, t := range p.Targets {
+	if err = fleet(ctx, p.Targets, func(ctx context.Context, t Target) (provision.BootstrapNode, error) {
 		h := hosts[t.Name]
 		observation, probeErr := Observe(ctx, remote, h.endpoint, p, t, h.id, "probe")
 		if probeErr != nil || !observation.Ready {
-			r.Bootstrap.Nodes[t.Name] = provision.BootstrapNode{Phase: "unknown", ObservedAt: time.Now().UTC()}
 			if probeErr == nil {
 				probeErr = errors.New("runtime/images no longer ready")
 			}
-			return result, fmt.Errorf("final verification %s: %w", t.Name, probeErr)
+			return unknown(), fmt.Errorf("final verification %s: %w", t.Name, probeErr)
 		}
-		r.Bootstrap.Nodes[t.Name] = ready(observation)
-		if err = save(); err != nil {
-			return
-		}
+		return ready(observation), nil
+	}, record); err != nil {
+		return
 	}
 	r.Bootstrap.Phase = "hosts-ready"
 	if err = save(); err != nil {
@@ -208,6 +208,61 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud provisio
 	}
 	report("all hosts prepared and images verified; no Dash services started; application health unknown")
 	return
+}
+
+// parallelHosts bounds concurrent SSH sessions. Preparing a host (runtime
+// install and image pulls) takes about a minute, so a fleet prepares in about
+// the time of one host.
+const parallelHosts = 16
+
+// fleet runs work for every target, at most parallelHosts at a time, and passes
+// each result to record on the calling goroutine in completion order. A new
+// target starts only after the previous result was recorded, so no host is
+// touched past a failed checkpoint (a lost claim). A work error is kept and the
+// others still finish; each host's state is rechecked on resume. After a record
+// error nothing further starts; work already running finishes unrecorded.
+func fleet(ctx context.Context, targets []Target, work func(context.Context, Target) (provision.BootstrapNode, error), record func(Target, provision.BootstrapNode) error) error {
+	type reply struct {
+		t   Target
+		n   provision.BootstrapNode
+		err error
+	}
+	replies := make(chan reply)
+	next, active := 0, 0
+	start := func() {
+		t := targets[next]
+		next++
+		active++
+		go func() {
+			n, err := work(ctx, t)
+			replies <- reply{t, n, err}
+		}()
+	}
+	for next < len(targets) && active < parallelHosts {
+		start()
+	}
+	var errs []error
+	var recordErr error
+	for active > 0 {
+		x := <-replies
+		active--
+		if x.err != nil {
+			errs = append(errs, x.err)
+		}
+		if recordErr != nil {
+			continue
+		}
+		if recordErr = record(x.t, x.n); recordErr == nil && next < len(targets) && ctx.Err() == nil {
+			start()
+		}
+	}
+	if recordErr != nil {
+		return errors.Join(append([]error{recordErr}, errs...)...)
+	}
+	if next < len(targets) {
+		errs = append(errs, ctx.Err())
+	}
+	return errors.Join(errs...)
 }
 
 func ready(o Observation) provision.BootstrapNode {

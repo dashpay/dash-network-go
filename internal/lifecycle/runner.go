@@ -416,6 +416,17 @@ func (e *execution) deploy() error {
 		}
 		e.report("registered " + t.Name)
 	}
+	// The first full rotated (DIP-0024) quorum forms three cycles after
+	// registration. Before activation no DKG runs, so the worker mines those
+	// cycles at minimum difficulty (about 30 minutes at ten seconds a block).
+	o, err := e.call(p.Wallet(), "fast-forward", nil)
+	if err != nil {
+		return err
+	}
+	if err = e.core(p.Wallet(), o); err != nil {
+		return err
+	}
+	e.report(fmt.Sprintf("mined the quorum rotation cycles to height %d before enabling DKG", o.Core.Height))
 	if _, err = e.call(p.Wallet(), "activate", nil); err != nil {
 		return err
 	}

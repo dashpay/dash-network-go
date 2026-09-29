@@ -80,8 +80,10 @@ binary alongside the plan. These operator artifacts are not public status data.
 2. Probe every host over authenticated SSH before any node mutation: Ubuntu/CPU,
    IMDSv2 instance identity, cloud-init, host ownership/lock, existing containers,
    Docker/Compose, and any previously prepared image digests.
-3. If all probes pass, prepare unready hosts in deterministic order. Each
-   mutation is preceded by a revision-conditional journal checkpoint.
+3. If all probes pass, prepare unready hosts concurrently (up to 16 at a time;
+   a host takes about a minute, so a fleet takes about as long as one host).
+   The whole batch is checkpointed in one revision-conditional journal write
+   before any mutation, and each result is journaled as it arrives.
 4. On each host, acquire a nonblocking `flock`, claim `/var/lib/dashnet`, install
    missing `docker.io`/`docker-compose-v2` from configured signed Ubuntu package
    repositories, enable/start Docker, and pull role-specific **child-manifest
