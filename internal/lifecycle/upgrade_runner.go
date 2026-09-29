@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,9 @@ import (
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
+
+// componentServices names the dashmate service of each Platform component.
+var componentServices = map[string]string{"drive": "drive_abci", "tenderdash": "drive_tenderdash", "dapi": "rs_dapi", "gateway": "gateway"}
 
 // platformQuorumMinimum is llmq_devnet_platform's minimum size (12/9/8).
 const platformQuorumMinimum = 9
@@ -116,8 +120,15 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 						}
 						continue
 					}
+					// A node the rollout has reached runs its target images and
+					// every service the target release reconfigured anew.
+					reached := record.Upgrade.Completed[t.Name] || t.Name == record.Upgrade.CurrentNode
+					changes := record.Upgrade.Changes[t.Name]
+					if reached && slices.Contains(changes, componentServices[component]) {
+						continue
+					}
 					expectedRestarts := old.Restarts[component]
-					if component == "tenderdash" && record.Upgrade.From[t.Name]["drive"] != record.Runtime.Images[t.Name]["drive"] {
+					if component == "tenderdash" && reached && slices.Contains(changes, "drive_abci") {
 						// A planned graceful stop/start around Drive preserves the
 						// Tenderdash container/image, but resets Docker's counter.
 						expectedRestarts = 0
@@ -139,15 +150,32 @@ func (e *execution) upgradeRequest(u UpgradePlan, t node.Target, action string) 
 	if u.Scope == "core" {
 		q.Upgrade.Scope = "core"
 	}
+	q.Context.SidecarImages = nil
+	if pins := upgradeSidecars(e.r).For(t.Architecture); len(pins) > 0 {
+		q.Context.SidecarImages = pins
+	}
 	return q
 }
 
-func (e *execution) stageUpgrade(u UpgradePlan) error {
-	// Cache images concurrently, but never withdraw a service in this phase.
+// upgradeSidecars are the sidecar pins a rollout installs: the target
+// release's when they differ, else the fleet's.
+func upgradeSidecars(record provision.Record) provision.Sidecars {
+	if record.Upgrade != nil && len(record.Upgrade.Sidecars) > 0 {
+		return record.Upgrade.Sidecars
+	}
+	return effectiveSidecars(record)
+}
+
+func (e *execution) stageUpgrade(u UpgradePlan) (map[string]*node.Render, error) {
+	// Cache images and render the target release concurrently, but never
+	// withdraw a service in this phase.
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var failures []string
-	limit := make(chan struct{}, 4)
+	observed := map[string]*node.Render{}
+	// Staging renders the target release on every node: as many at once as
+	// a deploy's render-heavy steps.
+	limit := make(chan struct{}, concurrency("render"))
 	for _, t := range upgradeOrder(e.p, u.Scope) {
 		wg.Add(1)
 		go func(t node.Target) {
@@ -161,20 +189,77 @@ func (e *execution) stageUpgrade(u UpgradePlan) error {
 				return
 			}
 			defer func() { <-limit }()
-			_, err := e.runner.Remote.Call(e.ctx, e.upgradeRequest(u, t, "upgrade-stage"))
+			o, err := e.runner.Remote.Call(e.ctx, e.upgradeRequest(u, t, "upgrade-stage"))
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
-				mu.Lock()
 				failures = append(failures, t.Name+": "+node.SafeError(err))
-				mu.Unlock()
+			} else if o.Render != nil {
+				observed[t.Name] = o.Render
 			}
 		}(t)
 	}
 	wg.Wait()
 	if len(failures) > 0 {
 		sort.Strings(failures)
-		return errors.New("image staging failed: " + strings.Join(failures, "; "))
+		return nil, errors.New("image staging failed: " + strings.Join(failures, "; "))
 	}
-	return nil
+	return observed, nil
+}
+
+// stagePlatform stages a Platform rollout: every validator renders the target
+// release. Sidecar images that release requests beyond the pinned ones are
+// pinned and staged again; each validator's staged changes are journaled once.
+func (e *execution) stagePlatform(u UpgradePlan) error {
+	for pass := 0; ; pass++ {
+		observed, err := e.stageUpgrade(u)
+		if err != nil {
+			return err
+		}
+		validators := map[string]*node.Render{}
+		for _, t := range e.p.Validators() {
+			validators[t.Name] = observed[t.Name]
+		}
+		version, requested, err := renders(validators)
+		if err != nil {
+			return err
+		}
+		current := upgradeSidecars(e.r)
+		pins, err := e.runner.pinSidecars(e.ctx, e.p, current, requested)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(pins, current) {
+			if pass > 0 {
+				return errors.New("sidecar images changed while staging")
+			}
+			e.r.Upgrade.Sidecars = pins
+			if err = e.save(); err != nil {
+				return err
+			}
+			e.report(fmt.Sprintf("dashmate %s requests new sidecar images; pinned %d and staging again", version, len(pins)))
+			continue
+		}
+		if e.r.Upgrade.Changes == nil {
+			e.r.Upgrade.Changes = map[string][]string{}
+		}
+		deferred := false
+		for _, t := range e.p.Validators() {
+			r := observed[t.Name]
+			if _, ok := e.r.Upgrade.Changes[t.Name]; !ok && !e.r.Upgrade.Completed[t.Name] && t.Name != e.r.Upgrade.CurrentNode {
+				e.r.Upgrade.Changes[t.Name] = append([]string{}, r.Changes...)
+			}
+			deferred = deferred || len(r.Deferred) > 0
+		}
+		if err = e.save(); err != nil {
+			return err
+		}
+		e.report("dashmate " + version + " renders every validator for this rollout")
+		if deferred {
+			e.report("the target release also changes Core's rendered configuration; that takes effect at the next Core rollout")
+		}
+		return nil
+	}
 }
 
 func (e *execution) verifyUpgrade() (Health, error) {
@@ -300,7 +385,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if baselineErr != nil {
 			return result, baselineErr
 		}
-		e.r.Runtime = &provision.RuntimeState{DeploymentID: p.ID, UpgradeID: u.ID, Images: cloneImages(u.From)}
+		e.r.Runtime = &provision.RuntimeState{DeploymentID: p.ID, UpgradeID: u.ID, Images: cloneImages(u.From), Sidecars: effectiveSidecars(e.r)}
 		e.r.Upgrade = &provision.UpgradeProgress{PlanID: u.ID, PreviousID: u.PreviousID, Phase: "staging", From: cloneImages(u.From), To: cloneImages(u.To), Baseline: baseline, Completed: map[string]bool{}}
 		if u.Scope == "core" {
 			e.r.Upgrade.Scope = "core"
@@ -330,7 +415,12 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		e.report("stage exact upgrade images on all validators")
 	}
 	e.report("upgrade-staging")
-	if err = e.stageUpgrade(u); err != nil {
+	if u.Scope == "core" {
+		_, err = e.stageUpgrade(u)
+	} else {
+		err = e.stagePlatform(u)
+	}
+	if err != nil {
 		return
 	}
 	var health Health
@@ -394,6 +484,8 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 			}
 		} else if !preservedCore(observed.Core, e.r.Upgrade.Baseline[t.Name]) {
 			return result, errors.New("upgrade response failed Core preservation")
+		} else if observed.Render == nil || !slices.Equal(observed.Render.Changes, e.r.Upgrade.Changes[t.Name]) {
+			return result, fmt.Errorf("%s applied changes other than those staged", t.Name)
 		}
 		e.r.Upgrade.Phase = "verifying"
 		e.report("upgrade-verifying")
@@ -417,6 +509,9 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	}
 	e.r.Upgrade.Phase = "complete"
 	e.r.Upgrade.ObservedAt = health.ObservedAt
+	if len(e.r.Upgrade.Sidecars) > 0 {
+		e.r.Runtime.Sidecars = e.r.Upgrade.Sidecars
+	}
 	err = e.acceptHealth(health)
 	return
 }

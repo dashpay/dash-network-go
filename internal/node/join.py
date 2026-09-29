@@ -70,11 +70,12 @@ class JoinWorker(Worker):
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise Failure('host-busy') from None
             self.owned()
-            self.require(self.t['role']=='fullnode' and set(self.images)=={'core'},'join-fullnodes-only')
+            # Fullnodes may also cache the release's dashmate helper; joins never render.
+            self.require(self.t['role']=='fullnode' and 'core' in self.images and set(self.images)<={'core','helper'},'join-fullnodes-only')
             if action=='join-start':
                 prior=self.read('deployment.json')
                 if not prior:self.atomic('deployment.json',dict(planId=self.c['planId'],kind='CoreJoin'))
-                for component in ['miner','drive','tenderdash','gateway','dapi']:
+                for component in AUXILIARY+[x for x in CORE_SERVICES+PLATFORM_SERVICES if x!='core']:
                     self.require(self.inspect_container(component) is None,'join-unexpected-service')
             self.stage=action
             core=self.join_start() if action=='join-start' else self.join_status()

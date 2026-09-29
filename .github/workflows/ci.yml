@@ -134,58 +134,49 @@ jobs:
   core-contract:
     if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Resolve real Core image once and exercise wallet/registration recovery
+      - name: Real Core rendered by dashmate; wallet, registration recovery and join
         run: |
           set -euo pipefail
-          docker pull dashpay/dashd:23
-          image=$(docker image inspect dashpay/dashd:23 --format '{{index .RepoDigests 0}}')
-          docker pull dashpay/drive:4.2.0-beta.3
-          drive=$(docker image inspect dashpay/drive:4.2.0-beta.3 --format '{{index .RepoDigests 0}}')
-          sudo env CORE_IMAGE="$image" DRIVE_IMAGE="$drive" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
-          sudo env CORE_IMAGE="$image" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
+          pin() { docker pull -q "$1" >/dev/null && docker image inspect "$1" --format '{{index .RepoDigests 0}}'; }
+          core=$(pin dashpay/dashd:23)
+          helper=$(pin dashpay/dashmate-helper:4.2.0-beta.3)
+          # The Tor image dashmate 4.2.0-beta.3 selects (digest-pinned by dashmate).
+          tor=$(pin osminogin/tor-simple:0.4.9.11@sha256:7aef2e7d957e2236d5fac7fca8e67c15fe65e6349eb90099da1cdc26bc4caa69)
+          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
+          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
 
   platform-contract:
     if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Verify native Tenderdash, Envoy TLS and DAPI gRPC contracts
+      - name: A validator rendered by dashmate and run from its compose files
         run: |
           set -euo pipefail
-          images='[]'
-          for spec in 'tenderdash=dashpay/tenderdash:1.8.0' 'gateway=dashpay/envoy:1.39.0-impr.1' 'dapi=dashpay/rs-dapi:4.2.0-beta.3' 'drive=dashpay/drive:4.2.0-beta.3'; do
-            component=${spec%%=*}
-            tag=${spec#*=}
-            docker pull "$tag"
-            pinned=$(docker image inspect "$tag" --format '{{index .RepoDigests 0}}')
-            images=$(jq -c --arg component "$component" --arg pinned "$pinned" '. + [{component:$component,pinned:$pinned}]' <<< "$images")
-          done
+          pin() { docker pull -q "$1" >/dev/null && docker image inspect "$1" --format '{{index .RepoDigests 0}}'; }
+          images=$(jq -n \
+            --arg core "$(pin dashpay/dashd:23)" \
+            --arg helper "$(pin dashpay/dashmate-helper:4.2.0-beta.3)" \
+            --arg drive "$(pin dashpay/drive:4.2.0-beta.3)" \
+            --arg tenderdash "$(pin dashpay/tenderdash:1.8.0)" \
+            --arg dapi "$(pin dashpay/rs-dapi:4.2.0-beta.3)" \
+            --arg gateway "$(pin dashpay/envoy:1.39.0-impr.1)" \
+            --arg tor "$(pin osminogin/tor-simple:0.4.9.11@sha256:7aef2e7d957e2236d5fac7fca8e67c15fe65e6349eb90099da1cdc26bc4caa69)" \
+            --arg ratelimit "$(pin envoyproxy/ratelimit:3fcc3609)" \
+            --arg redis "$(pin redis:alpine)" \
+            --arg next "$(pin dashpay/rs-dapi:4.2.0-beta.6)" \
+            '{components: {core: $core, helper: $helper, drive: $drive, tenderdash: $tenderdash, dapi: $dapi, gateway: $gateway},
+              sidecars: {core_tor: $tor, gateway_rate_limiter: $ratelimit, gateway_rate_limiter_redis: $redis},
+              upgrade: {dapi: $next}}')
           sudo env PLATFORM_IMAGES="$images" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/platform_contract.py
-
-  upgrade-contract:
-    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Prove real Compose image replacement, preservation and lost-response replay
-        run: |
-          set -euo pipefail
-          docker pull busybox:1.36.1
-          before=$(docker image inspect busybox:1.36.1 --format '{{index .RepoDigests 0}}')
-          docker pull busybox:1.37.0
-          after=$(docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}')
-          sudo env UPGRADE_FROM="$before" UPGRADE_TO="$after" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/upgrade_contract.py
 
   managed-contract:
     if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'

@@ -46,6 +46,9 @@ func upgradeSetupFrom(t *testing.T, build func(*testing.T) (Plan, Runner, *memor
 		if q.Action == "upgrade-stage" || q.Action == "upgrade-apply" {
 			b := q.Upgrade.Preserve
 			o.Core = &node.Core{ContainerID: b.CoreID, StartedAt: b.CoreStarted, ConfigSHA256: b.CoreConfig, Genesis: b.CoreGenesis}
+			if q.Upgrade.Scope != "core" {
+				o.Render = &node.Render{Version: "4.2.0-beta.3", Sidecars: sidecarRequests(q.Target.Role), Changes: stagedChanges(q.Upgrade)}
+			}
 		}
 		if o.Platform != nil {
 			o.Platform.Protocol = 14
@@ -74,6 +77,21 @@ func upgradeSetupFrom(t *testing.T, build func(*testing.T) (Plan, Runner, *memor
 	}
 	return fixture
 }
+
+// stagedChanges are the services a worker reports for an image-only rollout:
+// each whose image changes, in dashmate's start order.
+func stagedChanges(u *node.ImageChange) []string {
+	var out []string
+	for _, service := range provision.PlatformServices {
+		for component, name := range componentServices {
+			if name == service && u.From[component] != u.To[component] {
+				out = append(out, service)
+			}
+		}
+	}
+	return out
+}
+
 func (f *upgradeFixture) change(t *testing.T, scope, letter string) UpgradePlan {
 	t.Helper()
 	candidate := f.plan.Bootstrap.Compute.Network

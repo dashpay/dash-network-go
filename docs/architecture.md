@@ -30,7 +30,10 @@ That stage uses explicit existing networking, owner-pinned AMIs, a DynamoDB jour
 and non-expiring runner claims, and per-target launch reconciliation. The additive
 bootstrap stage shares that
 claim and journal, verifies SSH/instance identity, and prepares runtime/images
-without starting containers. Chain lifecycle and scoped image-upgrade executors
+without starting containers. Node services are the deployed release's dashmate
+services: its pinned helper image renders them (config create/migrate, render,
+envs) and Compose runs its compose files; dashmate's own lifecycle, helper
+service and Docker access are never used. Chain lifecycle and scoped image-upgrade executors
 are implemented; UI integration and web authentication remain future work.
 See [provisioning and recovery](provisioning.md) for the exact boundary.
 
@@ -55,8 +58,10 @@ requested channels, stable Core, and available dependency hints in the matching
 Platform/Dashmate source, with explicit version/channel overrides. It will test
 the combinations we intend to use, not all possible permutations.
 
-Today the operator declares image candidates and the registry resolver verifies
-their architecture-specific artifacts. `artifacts-verified` is deliberately not
+Service configuration is not ours to reinvent: each release's own dashmate
+renders it, so devnets run what testnet and mainnet nodes run and a new release's
+configuration arrives with it. Today the operator declares image candidates and
+the registry resolver verifies their architecture-specific artifacts. `artifacts-verified` is deliberately not
 called `compatible`. Future evidence can distinguish config checks, fresh-network
 boot, and existing-state upgrade verification.
 

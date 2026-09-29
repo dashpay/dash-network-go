@@ -3,6 +3,7 @@ package provision
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/spec"
@@ -19,6 +20,9 @@ type RuntimeState struct {
 	DeploymentID string      `json:"deploymentId"`
 	UpgradeID    string      `json:"upgradeId"`
 	Images       FleetImages `json:"images"`
+	// Sidecars replaces the deployment's sidecar pins once an upgrade's
+	// release selects different ones.
+	Sidecars Sidecars `json:"sidecars,omitempty"`
 }
 
 // Preservation contains public fingerprints only, never rendered Compose or
@@ -45,17 +49,22 @@ type UpgradeProgress struct {
 	// Scope "core" replaces only Core (and the miner) on every node; other
 	// scopes replace Platform components on validators and preserve Core.
 	Scope string `json:"scope,omitempty"`
+	// Sidecars pins the target release's sidecar images, when they differ.
+	Sidecars Sidecars `json:"sidecars,omitempty"`
+	// Changes lists, per validator, the dashmate services whose image or
+	// rendered configuration the target release changes, as staged.
+	Changes map[string][]string `json:"changes,omitempty"`
 }
+
+// PlatformServices are the dashmate services a Platform rollout may recreate.
+var PlatformServices = []string{"drive_abci", "drive_tenderdash", "rs_dapi", "gateway_rate_limiter_redis", "gateway_rate_limiter", "gateway"}
 
 func (images FleetImages) Validate(p Plan) error {
 	if len(images) != len(p.Targets) {
 		return errors.New("runtime image set lost an intended target")
 	}
 	for _, t := range p.Targets {
-		components := []string{"core"}
-		if t.Role == "validator" {
-			components = spec.Components
-		}
+		components := spec.RoleComponents(t.Role)
 		v := images[t.Name]
 		if len(v) != len(components) {
 			return fmt.Errorf("incomplete runtime images for %s", t.Name)
@@ -96,6 +105,22 @@ func (r Record) validateUpgrade(p Plan) error {
 	}
 	if u.Scope != "" && u.Scope != "core" {
 		return errors.New("invalid upgrade scope")
+	}
+	for _, sidecars := range []Sidecars{r.Runtime.Sidecars, u.Sidecars} {
+		if err := sidecars.Validate(p); err != nil {
+			return err
+		}
+	}
+	for name, services := range u.Changes {
+		target, ok := p.Target(name)
+		if !ok || target.Role != "validator" || u.Scope == "core" {
+			return errors.New("upgrade changes name a node outside the rollout")
+		}
+		for i, service := range services {
+			if !slices.Contains(PlatformServices, service) || slices.Index(services, service) != i {
+				return errors.New("invalid staged upgrade change")
+			}
+		}
 	}
 	core := u.Scope == "core"
 	tracked := 0

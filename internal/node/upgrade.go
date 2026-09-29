@@ -41,9 +41,7 @@ func (q Request) validateUpgrade() error {
 	components := spec.Components
 	switch {
 	case u.Scope == "core":
-		if q.Target.Role != "validator" {
-			components = []string{"core"}
-		}
+		components = spec.RoleComponents(q.Target.Role)
 		if len(u.From) != len(components) || len(u.To) != len(components) {
 			return errors.New("Core upgrade requires the node's complete image set")
 		}

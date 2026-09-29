@@ -23,7 +23,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
-const Profile = "devnet-core23-platform4-tenderdash1"
+// Profile: every node's services are rendered by its release's dashmate and run
+// from that release's dashmate compose files.
+const Profile = "devnet-dashmate-compose"
 
 type Plan struct {
 	APIVersion             string         `json:"apiVersion"`
@@ -135,9 +137,11 @@ func BuildWith(b bootstrap.Plan, live map[string]types.Instance, o Options, prot
 	}
 	p.CoreNetwork = ChainName(b.Compute.Network.Metadata.Name, b.Compute.Network.Chain.Generation)
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
-	if public != nil {
-		p.Advertise = "public"
+	if public == nil {
+		// dashmate's Core never connects to private addresses (allowprivatenet=0).
+		return Plan{}, errors.New("dashmate-rendered devnets advertise public addresses: every host needs an IPAM Elastic IP")
 	}
+	p.Advertise = "public"
 	if o.ACMEIssuer != "" {
 		tls, err := gatewayTLS(b, o.ACMEIssuer, o.ACMEEmail)
 		if err != nil {
@@ -196,8 +200,8 @@ func (p Plan) Validate() error {
 	if len(p.Targets) != len(p.Bootstrap.Targets) {
 		return errors.New("deployment target set incomplete")
 	}
-	if p.Advertise != "" && p.Advertise != "public" {
-		return errors.New("advertise must be public or omitted (private)")
+	if p.Advertise != "public" {
+		return errors.New("dashmate-rendered devnets advertise public addresses")
 	}
 	if p.GatewayTLS != nil {
 		if p.Advertise != "public" {

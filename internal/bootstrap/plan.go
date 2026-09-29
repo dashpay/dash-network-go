@@ -67,8 +67,8 @@ func Build(compute provision.Plan, lock release.Lock, access Access) (Plan, erro
 		t := Target{Name: node.Name, Architecture: node.Architecture}
 		for _, image := range lock.Images {
 			// Optional components (the ACME client) are pinned by the deployment
-			// plan instead; target image sets stay the six upgradable components.
-			needed := !slices.Contains(spec.OptionalComponents, image.Component) && (image.Component == "core" || node.Role == "validator" || (node.Role == "seed" && image.Component == "tenderdash"))
+			// plan instead; target image sets stay the upgradable components.
+			needed := !slices.Contains(spec.OptionalComponents, image.Component) && slices.Contains(spec.RoleComponents(node.Role), image.Component)
 			if !needed {
 				continue
 			}

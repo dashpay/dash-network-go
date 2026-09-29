@@ -6,13 +6,19 @@ protocols. The original deployment/genesis plan stays immutable.
 
 The current profiles are:
 
-- `platform`: update selected release images other than Core on validator hosts.
-  The helper image is cached only; no helper container is started.
+- `platform`: update selected release images other than Core on validator hosts,
+  including the dashmate helper: the **target release's dashmate renders each
+  validator again**, migrating its config as `dashmate update` does, and Compose
+  recreates exactly the Platform services whose image or rendered configuration
+  changed. A newer dashmate's configuration therefore arrives with its release.
+  Core's rendered files are not installed by this profile: when a release changes
+  them too, the rollout reports it and they take effect at the next Core rollout.
 - `tenderdash`: replace Tenderdash only; Drive, DAPI, gateway and Core stay intact.
 - `core`: replace the Core image on **every node**, one at a time: validators,
   then fullnodes and other nodes, then the mining node. On a validator, Tenderdash,
-  DAPI and Drive are stopped gracefully (Tenderdash first), Core's Compose image is
-  replaced, Core must come back synced (and the masternode READY in the next
+  DAPI and Drive are stopped gracefully (Tenderdash first), the node's dashmate
+  renders Core's new image and Compose replaces Core (and its Tor sidecar, which
+  shares Core's network namespace), Core must come back synced (and the masternode READY in the next
   health gate), then Drive, Tenderdash and DAPI restart in place; the gateway keeps
   serving. Core ignores MNAUTH until its own sync completes, so peers that
   reconnect during startup verify the validator while it never verifies them, and
@@ -78,12 +84,18 @@ resolved again during a resumed operation.
 
 1. Claim the same network journal used by terminal/Actions deployment operations.
 2. Require fresh whole-fleet health and capture public preservation fingerprints.
-3. Stage/verify all needed image digests, at most four hosts concurrently. Cached
-   exact artifacts are reused. A staging failure withdraws no services.
+3. Stage/verify all needed image digests, at most sixteen hosts concurrently. Cached
+   exact artifacts are reused. A staging failure withdraws no services. For a
+   Platform rollout every validator also renders the target release (nothing is
+   installed): every validator must render with the same dashmate release; sidecar
+   images it requests beyond the pinned ones are pinned, and staging repeats. The
+   services each validator will recreate are journaled, and its apply must change
+   exactly those.
 4. Record intent for **one validator** before its remote operation.
 5. Under the host lock, verify ownership, exact Core process ID/start time/config,
-   current images and unchanged service identities. Edit only image fields in the
-   existing Platform Compose document; do not regenerate configuration or keys.
+   current images and unchanged service identities. Install the target render's
+   Platform files and Compose environment (keys and genesis are never
+   regenerated) and let Compose recreate the changed services.
    A Drive change gracefully stops Tenderdash before the ABCI disconnect, waits
    for Drive's ABCI listener, then starts Tenderdash. Its unchanged-image container
    and state are preserved; its process is intentionally restarted. Stop/start
@@ -119,11 +131,11 @@ is not yet an automated abandon/rebase/rollback or emergency full-fleet stop
 for a partially applied upgrade. A failed live version change is not "supported"
 merely because its images were pulled.
 
-If Compose removed a selected old container but failed before creating its
-replacement, the exact unfinished host marker permits recreating that selected
-service on resume. Missing unselected services, a missing container after a
-completed host rollout, or absent/mismatched markers are treated as drift—not as
-permission to recreate arbitrary containers.
+The host marker records the target render's fingerprints. A resumed apply renders
+again and must reproduce them exactly; Compose then converges only services not
+yet on them, so a lost response never recreates a service twice. Missing
+unselected services, changed unselected services, or absent/mismatched markers are
+treated as drift—not as permission to recreate arbitrary containers.
 
 ## Actions
 
@@ -143,8 +155,11 @@ has been proved by the disposable terminal run.
 ## Evidence boundary
 
 Go failure-path tests exercise sequencing, stale plans, lost responses, healthy
-resume, membership, Core preservation and runtime-image retention. Python tests
-exercise document-only edits, host markers, drift rejection and input boundaries.
-The disposable Docker contract exercises actual image replacement and lost-response
-replay with small stand-in services. **It does not prove a Dash version-to-version
-upgrade.** A live existing-state version change remains a separate acceptance run.
+resume, membership, Core preservation, runtime-image and sidecar retention, and
+staged-change enforcement. Python tests exercise re-rendering, deferred Core
+changes, host markers, drift rejection and input boundaries. The disposable Docker
+contract runs a validator rendered by the real dashmate helper and shows Compose
+recreating exactly the service a new image changes. Re-rendering a 4.2.0-beta.3
+node with the 4.2.0-beta.6 helper migrated its config and changed no service.
+**This does not prove a Dash version-to-version upgrade.** A live existing-state
+version change remains a separate acceptance run.

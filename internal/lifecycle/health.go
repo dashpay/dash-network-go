@@ -12,6 +12,10 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
+// PlatformIdleLimit bounds the age of an idle Platform chain's latest block:
+// dashmate's createEmptyBlocksInterval (3m) plus a minute for consensus.
+const PlatformIdleLimit = 4 * time.Minute
+
 type HealthNode struct {
 	Healthy        bool     `json:"healthy"`
 	CoreHeight     int64    `json:"coreHeight"`
@@ -171,8 +175,10 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 				if x.CatchingUp || x.Height < 1 || x.DAPIHeight < 1 || x.DAPIHeight < x.Height-3 || x.DriveVersion == "" || x.ChainID != p.PlatformChainID || x.NodeID != expected.PlatformNodeID || !strings.EqualFold(x.ProTxHash, expected.ProTxHash) {
 					n.Problems = append(n.Problems, "Platform/DAPI identity or sync mismatch")
 				}
-				if first.platform == nil || x.Height <= first.platform.Height {
-					n.Problems = append(n.Problems, "Platform did not advance")
+				// An idle chain makes a block only every three minutes: a
+				// recent block proves it live without waiting for the next.
+				if first.platform == nil || (x.Height <= first.platform.Height && (x.BlockAge < 0 || time.Duration(x.BlockAge)*time.Second > PlatformIdleLimit)) {
+					n.Problems = append(n.Problems, fmt.Sprintf("Platform did not advance and its last block is %ds old", x.BlockAge))
 				}
 				if len(x.ReferenceBlockHash) != 64 {
 					n.Problems = append(n.Problems, "missing common-height block hash")
@@ -181,8 +187,11 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 				} else if commonHash != x.ReferenceBlockHash {
 					n.Problems = append(n.Problems, "Platform block hash disagreement")
 				}
-				if len(x.Containers) != 4 {
-					n.Problems = append(n.Problems, "incomplete Platform service set")
+				for _, component := range []string{"drive", "tenderdash", "dapi", "gateway"} {
+					if x.Containers[component] == "" {
+						n.Problems = append(n.Problems, "incomplete Platform service set")
+						break
+					}
 				}
 				if first.platform != nil {
 					for name, id := range first.platform.Containers {

@@ -1,9 +1,10 @@
-"""Fixed in-place image rollout. Never renders new configuration.
+"""Fixed in-place rollouts through the target release's own dashmate.
 
-A Platform rollout changes only image fields in the owned Platform Compose
-document and never touches Core. A Core rollout ("core" scope) changes only the
-Core (and miner) image in their owned Compose documents; dash.conf, genesis,
-keys, wallets and chain data are kept.
+The target release's dashmate renders the node again (migrating its config, as
+`dashmate update` does); Compose then recreates exactly the services whose image
+or rendered configuration changed. A Platform rollout never touches Core and
+never installs Core's rendered files. A Core rollout ("core" scope) changes
+Core's image only; dash.conf, genesis, keys, wallets and chain data are kept.
 An on-host write-ahead marker reconciles lost SSH responses with the same plan.
 There is deliberately no downgrade/rollback/reset action.
 """
@@ -17,16 +18,26 @@ PERMANENT = ["wrong-chain", "running-image-drift", "image-platform-drift"]
 
 
 class UpgradeWorker(Worker):
+    def abci_address(self):
+        """Drive's ABCI listener, on dashmate's Compose network."""
+        value = self.inspect_container("drive_abci")
+        self.require(value is not None, "upgrade-missing-service")
+        networks = value["NetworkSettings"].get("Networks") or {}
+        address = (networks.get(self.project + "_default") or {}).get("IPAddress")
+        self.require(address, "upgrade-drive-abci-address")
+        return address, 26658
+
     def wait_abci(self):
+        # Tenderdash exits on a missing ABCI listener: start it after Drive's.
         deadline = time.monotonic() + 150
-        while time.monotonic() < deadline:
-            self.preserve_core()
+        while True:
             try:
-                with socket.create_connection(('127.0.0.1', self.ports['driveABCI']), timeout=2):
+                with socket.create_connection(self.abci_address(), timeout=2):
                     return
             except OSError:
+                if time.monotonic() > deadline:
+                    raise Failure("upgrade-drive-abci-timeout") from None
                 time.sleep(1)
-        raise Failure('upgrade-drive-abci-timeout')
 
     def preserve_core(self):
         expected = self.q["upgrade"]["preserve"]
@@ -37,16 +48,6 @@ class UpgradeWorker(Worker):
                      and actual["genesis"] == expected["coreGenesis"],
                      "upgrade-core-changed")
         return actual
-
-    def check_images(self, compose, pins):
-        self.require(compose.get("name") == self.project
-                     and set(compose.get("services", {})) ==
-                         {"drive", "tenderdash", "dapi", "gateway"},
-                     "upgrade-compose-scope")
-        for service, value in compose["services"].items():
-            self.require(value["image"] == pins[service], "upgrade-compose-drift")
-            self.require(value["container_name"] == self.container_name(service)
-                         and value["labels"] == self.labels(), "upgrade-compose-owner")
 
     def core_observe(self, pin):
         """Core status with the running image checked against the given pin.
@@ -59,16 +60,6 @@ class UpgradeWorker(Worker):
             return self.core_status()
         finally:
             self.images["core"], self.c["miningNodeName"] = saved, miner
-
-    def stage_image(self, pin):
-        try:
-            image = json.loads(self.docker("image", "inspect", pin))[0]
-        except Failure:
-            self.docker("pull", "--platform", "linux/" + self.t["architecture"], pin, timeout=600)
-            image = json.loads(self.docker("image", "inspect", pin))[0]
-        self.require(image["Architecture"] == self.t["architecture"] and image["Os"] == "linux"
-                     and any(v.split("@")[-1] == pin.split("@")[-1] for v in image.get("RepoDigests", [])),
-                     "upgrade-image-proof")
 
     def running(self, name, pin):
         value = self.inspect_container(name)
@@ -152,17 +143,15 @@ class UpgradeWorker(Worker):
                 raise Failure("core-upgrade-quorum-links-missing")
             time.sleep(3)
 
-    def wait_drive(self):
-        # Tenderdash exits on a missing ABCI listener: start it after Drive's.
-        deadline = time.monotonic() + 150
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", self.ports["driveABCI"]), timeout=2):
-                    return
-            except OSError:
-                if time.monotonic() > deadline:
-                    raise Failure("upgrade-drive-abci-timeout") from None
-                time.sleep(1)
+    def locked(self):
+        self.verify_instance()
+        lock = self.lock.open("a")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            raise Failure("host-busy") from None
+        return lock
 
     def execute_core(self):
         """Replace Core's image on this node, withdrawing its dependants first.
@@ -173,12 +162,7 @@ class UpgradeWorker(Worker):
         before, after = change["from"], change["to"]
         self.require(set(before) == set(after) and "core" in before
                      and all(before[k] == after[k] for k in before if k != "core"), "core-upgrade-scope")
-        self.verify_instance()
-        with self.lock.open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Failure("host-busy") from None
+        with self.locked():
             self.owned()
             self.require(self.read("deployment.json") == {"planId": self.c["planId"]}, "upgrade-missing-deployment")
             self.stage = self.q["action"]
@@ -193,7 +177,7 @@ class UpgradeWorker(Worker):
                 # last marker may be older than previousId; only an unfinished
                 # different operation blocks.
                 self.require(marker is None or marker.get("phase") == "applied", "upgrade-previous-operation")
-            self.stage_image(after["core"])
+            self.verify_pin(after["core"])
             fresh = not same or marker.get("step") == "start"
             if fresh:
                 core = self.core_observe(before["core"])
@@ -216,7 +200,7 @@ class UpgradeWorker(Worker):
                 if miner and self.inspect_container("miner"):
                     self.docker("stop", "-t", "20", self.container_name("miner"), timeout=30)
                 if validator:
-                    for name in ["tenderdash", "dapi", "drive"]:
+                    for name in ["drive_tenderdash", "rs_dapi", "drive_abci"]:
                         self.docker("stop", "--time", "120", self.container_name(name), timeout=150)
                 step("withdrawn")
             if marker["step"] == "withdrawn":
@@ -224,13 +208,20 @@ class UpgradeWorker(Worker):
                     # Core itself stops only in the quiet part of the DKG cycle.
                     if validator and self.running("core", before["core"]):
                         self.wait_dkg_quiet(before["core"])
-                    # Stop Core (it may take up to its grace period) before the
-                    # recreate, so Compose never times out mid-replacement.
-                    if self.inspect_container("core"):
-                        self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
-                    services = self.read("core/compose.json")["services"]
-                    services["core"]["image"] = after["core"]
-                    self.compose("core", services)
+                    # The release's dashmate renders Core's new image; its
+                    # configuration is otherwise exactly what was preserved.
+                    self.images = dict(self.images, **after)
+                    r = self.render()
+                    try:
+                        services = [s for s in r.selection if s in CORE_SERVICES]
+                        self.install(r, services)
+                        # Stop Core (it may take up to its grace period) before the
+                        # recreate, so Compose never times out mid-replacement.
+                        if self.inspect_container("core"):
+                            self.docker("stop", "-t", "120", self.container_name("core"), timeout=150)
+                        self.up(r, services)
+                    finally:
+                        self.discard(r)
                 self.wait_core(after["core"], synced=False)
                 step("replaced")
             if marker["step"] == "replaced":
@@ -239,9 +230,9 @@ class UpgradeWorker(Worker):
                              "core-upgrade-identity-changed")
                 if validator:
                     self.refresh_quorum_links()
-                    self.docker("start", self.container_name("drive"))
-                    self.wait_drive()
-                    for name in ["tenderdash", "dapi"]:
+                    self.docker("start", self.container_name("drive_abci"))
+                    self.wait_abci()
+                    for name in ["drive_tenderdash", "rs_dapi"]:
                         self.docker("start", self.container_name(name))
                 if miner:
                     services = miner["services"]
@@ -253,9 +244,10 @@ class UpgradeWorker(Worker):
             self.require(core["configSha256"] == expected["coreConfig"] and core["genesis"] == expected["coreGenesis"],
                          "core-upgrade-identity-changed")
             if validator:
-                for name in ["drive", "tenderdash", "dapi", "gateway"]:
+                for component, name in [("drive", "drive_abci"), ("tenderdash", "drive_tenderdash"),
+                                        ("dapi", "rs_dapi"), ("gateway", "gateway")]:
                     value = self.inspect_container(name)
-                    self.require(value and value["State"]["Running"] and value["Id"] == expected["containers"][name],
+                    self.require(value and value["State"]["Running"] and value["Id"] == expected["containers"][component],
                                  "core-upgrade-platform-not-restored")
             if miner:
                 self.require(self.running("miner", after["core"]) and self.inspect_container("miner")["State"]["Running"],
@@ -273,22 +265,14 @@ class UpgradeWorker(Worker):
         components = {"core", "drive", "dapi", "gateway", "tenderdash", "helper"}
         self.require(set(before) == components and set(after) == components
                      and before["core"] == after["core"], "upgrade-core-refused")
-        self.verify_instance()
-        with self.lock.open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Failure("host-busy") from None
+        with self.locked():
             self.owned()
             self.require(self.read("deployment.json") == {"planId": self.c["planId"]},
                          "upgrade-missing-deployment")
             self.stage = self.q["action"]
             core = self.preserve_core()
-            compose = self.read("platform/compose.json")
-            self.require(compose is not None, "upgrade-missing-compose")
             marker = self.read("upgrade.json")
             same = marker and marker.get("id") == change["id"]
-            drain = before['drive'] != after['drive']
             if same:
                 self.require(marker["from"] == before and marker["to"] == after
                              and marker["preserve"] == change["preserve"]
@@ -299,112 +283,109 @@ class UpgradeWorker(Worker):
                              or (marker and marker.get("id") == change.get("previousId")
                                  and marker.get("phase") == "applied"),
                              "upgrade-previous-operation")
-                self.check_images(compose, before)
-            desired = copy.deepcopy(compose)
-            for service in desired["services"]:
-                desired["services"][service]["image"] = after[service]
-            # A saved marker contains hashes, not the secret-bearing document.
-            config_hash = hashlib.sha256(json.dumps(desired, sort_keys=True).encode()).hexdigest()
-            if same:
-                self.require(marker["desiredComposeHash"] == config_hash,
-                             "upgrade-config-changed")
-                for service, value in compose["services"].items():
-                    self.require(value["image"] in [before[service], after[service]],
-                                 "upgrade-unexpected-image")
-            for service in desired["services"]:
-                value = self.inspect_container(service)
-                # Compose can remove an old container before replacement fails.
-                # Only this exact unfinished, journaled image change may repair
-                # that absence. Missing unrelated/applied services remain drift.
-                if value is None and same and marker["phase"] == "applying" \
-                        and before[service] != after[service]:
-                    continue
-                self.require(value is not None, "upgrade-missing-service")
-                allowed = [before[service], after[service]] if same else [before[service]]
-                matches = False
-                for pin in allowed:
-                    try:
-                        self.verify_image(value, pin)
-                        matches = True
-                        break
-                    except Failure:
-                        pass
-                self.require(matches, "upgrade-running-image-drift")
-                if before[service] == after[service]:
-                    dependency = service == 'tenderdash' and drain and same and marker.get('dependency')
-                    self.require(value["Id"] == change["preserve"]["containers"][service]
-                                 and (value["RestartCount"] == change["preserve"]["restarts"][service]
-                                      or (dependency in ['start-requested', 'started'] and value["RestartCount"] == 0))
-                                 and (value["State"]["Running"] or
-                                      (dependency in ['stop-requested', 'stopped', 'start-requested'] and marker['phase'] == 'applying')),
-                                 "upgrade-unselected-service-changed")
             for component, pin in after.items():
                 if before[component] != pin:
-                    try:
-                        image = json.loads(self.docker("image", "inspect", pin))[0]
-                    except Failure:
-                        self.docker("pull", "--platform", "linux/" + self.t["architecture"],
-                                    pin, timeout=600)
-                        image = json.loads(self.docker("image", "inspect", pin))[0]
-                    self.require(image["Architecture"] == self.t["architecture"]
-                                 and image["Os"] == "linux"
-                                 and any(v.split("@")[-1] == pin.split("@")[-1]
-                                         for v in image.get("RepoDigests", [])),
-                                 "upgrade-image-proof")
-            self.preserve_core()
-            if self.q["action"] == "upgrade-stage":
-                return dict(instanceId=self.t["instanceId"], planId=self.c["planId"],
-                            action=self.q["action"], core=core)
-            if not same:
-                marker = dict(id=change["id"], previousId=change.get("previousId", ""),
-                              **{"from": before}, to=after, preserve=change["preserve"],
-                              desiredComposeHash=config_hash, phase="applying")
+                    self.verify_pin(pin)
+            # The target release's dashmate renders this node; Compose then
+            # recreates exactly the Platform services whose fingerprint changed.
+            self.images = dict(self.images, **after)
+            r = self.render()
+            try:
+                return self.apply_platform(change, marker if same else None, r, core)
+            finally:
+                self.discard(r)
+
+    def apply_platform(self, change, marker, r, core):
+        before, after, preserve = change["from"], change["to"], change["preserve"]
+        platform = [s for s in r.selection if s in PLATFORM_SERVICES]
+        desired = {s: r.fingerprints[s] for s in platform}
+        current = {s: self.inspect_container(s) for s in platform}
+        changes = [s for s in platform if current[s] is None or self.label(current[s]) != desired[s]]
+        # Rendered Core changes wait for a Core rollout: this one keeps Core.
+        deferred = [s for s in r.selection if s in CORE_SERVICES
+                    and self.label(self.inspect_container(s) or {"Config": {}}) != r.fingerprints[s]]
+        pins = self.c.get("sidecarImages") or {}
+        for name in platform:
+            if name not in COMPONENTS and name in pins:
+                self.verify_pin(pins[name])
+        if self.q["action"] == "upgrade-stage":
+            # Sidecars are those the release requests: the controller pins any
+            # it has not, then stages again. Changes follow the given pins.
+            return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"], core=core,
+                        render=dict(version=r.version, sidecars=r.sidecars(), changes=changes, deferred=deferred))
+        drain = "drive_abci" in (marker["changes"] if marker else changes)
+        if marker is None:
+            marker = dict(id=change["id"], previousId=change.get("previousId", ""),
+                          **{"from": before}, to=after, preserve=preserve,
+                          desired=desired, changes=changes, phase="applying")
+            if drain:
+                marker["dependency"] = "pending"
+            self.atomic("upgrade.json", marker)
+        else:
+            self.require(marker["desired"] == desired, "upgrade-config-changed")
+        if marker["phase"] == "applying":
+            # Services outside this change keep their exact containers. A
+            # Tenderdash withdrawn around Drive's replacement keeps its container.
+            dependency = marker.get("dependency")
+            for name in platform:
+                if name in marker["changes"]:
+                    continue
+                key = COMPONENTS.get(name, name)
+                value = current[name]
+                self.require(value is not None, "upgrade-missing-service")
+                if key in preserve["containers"]:
+                    self.require(value["Id"] == preserve["containers"][key]
+                                 and (value["RestartCount"] == preserve["restarts"][key]
+                                      or (name == "drive_tenderdash" and dependency in ["start-requested", "started"]
+                                          and value["RestartCount"] == 0))
+                                 and (value["State"]["Running"]
+                                      or (name == "drive_tenderdash" and dependency in ["stop-requested", "stopped", "start-requested"])),
+                                 "upgrade-unselected-service-changed")
+            self.install(r, platform)
+            self.certificates()
+            if drain and dependency not in ["start-requested", "started"]:
+                # Tenderdash exits on an ABCI EOF. Withdraw it gracefully before
+                # Drive, rather than relying on Docker's crash/restart policy.
+                # Save intent first so disconnects after stop are retry-safe.
+                marker["dependency"] = "stop-requested"
                 self.atomic("upgrade.json", marker)
-            self.atomic("platform/compose.json", desired)
-            path = str(self.root / "platform/compose.json")
-            self.docker("compose", "-p", self.project, "-f", path, "config", "--quiet")
-            changed = [k for k in desired["services"] if before[k] != after[k]]
-            # Tenderdash exits on an ABCI EOF. Gracefully withdraw it before
-            # Drive, rather than relying on Docker's crash/restart policy.
-            # Save intent first so disconnects after stop are retry-safe.
-            if drain and marker['phase'] == 'applying' and marker.get('dependency') not in ['start-requested', 'started']:
-                marker['dependency'] = 'stop-requested'
-                self.atomic('upgrade.json', marker)
-                self.docker('stop', '--time', '120', self.container_name('tenderdash'), timeout=150)
-                value = self.inspect_container('tenderdash')
-                self.require(value and not value['State']['Running'], 'upgrade-dependency-not-stopped')
-                marker['dependency'] = 'stopped'
-                self.atomic('upgrade.json', marker)
-            immediate = [k for k in changed if not (drain and k == 'tenderdash')]
+                self.docker("stop", "--time", "120", self.container_name("drive_tenderdash"), timeout=150)
+                value = self.inspect_container("drive_tenderdash")
+                self.require(value and not value["State"]["Running"], "upgrade-dependency-not-stopped")
+                marker["dependency"] = "stopped"
+                self.atomic("upgrade.json", marker)
+            immediate = [s for s in marker["changes"] if not (drain and s == "drive_tenderdash")]
             if immediate:
-                self.docker("compose", "-p", self.project, "-f", path, "up", "-d",
-                            "--no-deps", "--pull", "never", *immediate, timeout=300)
+                self.up(r, immediate)
             if drain:
                 self.wait_abci()
-                if marker.get('dependency') != 'started':
-                    marker['dependency'] = 'start-requested'
-                    self.atomic('upgrade.json', marker)
-                if 'tenderdash' in changed:
-                    self.docker('compose', '-p', self.project, '-f', path, 'up', '-d',
-                                '--no-deps', '--pull', 'never', 'tenderdash', timeout=300)
-                elif not self.inspect_container('tenderdash')['State']['Running']:
-                    self.docker('start', self.container_name('tenderdash'))
-                marker['dependency'] = 'started'
-                self.atomic('upgrade.json', marker)
-            core = self.preserve_core()
-            for service in desired["services"]:
-                value = self.inspect_container(service)
-                self.require(value and value["State"]["Running"], "upgrade-service-not-running")
-                self.verify_image(value, after[service])
-                if before[service] == after[service]:
-                    self.require(value["Id"] == change["preserve"]["containers"][service]
-                                 and value["RestartCount"] ==
-                                     (0 if service == 'tenderdash' and drain else change["preserve"]["restarts"][service]),
-                                 "upgrade-unselected-service-changed")
-            marker["phase"] = "applied"
-            self.atomic("upgrade.json", marker)
-            return dict(instanceId=self.t["instanceId"], planId=self.c["planId"],
-                        action=self.q["action"], core=core)
+                if marker["dependency"] != "started":
+                    marker["dependency"] = "start-requested"
+                    self.atomic("upgrade.json", marker)
+                if "drive_tenderdash" in marker["changes"]:
+                    self.up(r, ["drive_tenderdash"])
+                elif not self.inspect_container("drive_tenderdash")["State"]["Running"]:
+                    self.docker("start", self.container_name("drive_tenderdash"))
+                marker["dependency"] = "started"
+                self.atomic("upgrade.json", marker)
+        core = self.preserve_core()
+        for name in platform:
+            value = self.inspect_container(name)
+            self.require(value and value["State"]["Running"] and self.label(value) == desired[name],
+                         "upgrade-service-not-running")
+            key = COMPONENTS.get(name)
+            if key:
+                self.verify_image(value, after[key])
+            if key in preserve["containers"] and name not in marker["changes"]:
+                self.require(value["Id"] == preserve["containers"][key]
+                             and value["RestartCount"] == (0 if name == "drive_tenderdash" and drain
+                                                           else preserve["restarts"][key]),
+                             "upgrade-unselected-service-changed")
+        marker["phase"] = "applied"
+        self.atomic("upgrade.json", marker)
+        return dict(instanceId=self.t["instanceId"], planId=self.c["planId"],
+                    action=self.q["action"], core=core,
+                    render=dict(version=r.version, sidecars=r.sidecars(), changes=marker["changes"], deferred=deferred))
 
 
 Worker = UpgradeWorker

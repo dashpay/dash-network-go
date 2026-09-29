@@ -55,7 +55,7 @@ dashnet bootstrap --plan bootstrap.json --confirm BOOTSTRAP_ID --profile operato
   --ssh-key ~/.ssh/deploy --known-hosts ./node_hosts
 ```
 
-The Core image is cached by digest; bootstrap does not start services. Fresh-node
+The Core image (and the release's dashmate helper, which a join never runs) is cached by digest; bootstrap does not start services. Fresh-node
 checks refuse existing containers or foreign ownership. Testnet allocation refuses
 wallet/miner/validator roles rather than accidentally deploying a private genesis.
 

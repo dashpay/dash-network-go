@@ -22,10 +22,12 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
+	"github.com/dashpay/dash-network-go/internal/provision"
 	"github.com/dashpay/dash-network-go/internal/transport"
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -127,6 +129,9 @@ type Context struct {
 	GatewayTLS *GatewayTLS `json:"gatewayTls,omitempty"`
 	CorePeers  []string    `json:"corePeers"`
 	Ports      Ports       `json:"ports"`
+	// SidecarImages pins, for this node's architecture, the images its
+	// release's dashmate selects for Tor and the gateway rate limiter.
+	SidecarImages map[string]string `json:"sidecarImages,omitempty"`
 }
 
 // GatewayTLS makes each validator's gateway serve a publicly trusted ACME
@@ -213,9 +218,11 @@ type Core struct {
 	Quorums         map[string]int `json:"quorums"`
 }
 type Platform struct {
-	Protocol           uint32            `json:"protocol,omitempty"`
-	Validators         []string          `json:"validators,omitempty"`
-	Height             int64             `json:"height"`
+	Protocol   uint32   `json:"protocol,omitempty"`
+	Validators []string `json:"validators,omitempty"`
+	Height     int64    `json:"height"`
+	// BlockAge is the seconds since the latest Platform block, by the node's clock.
+	BlockAge           int64             `json:"blockAge"`
 	DAPIHeight         int64             `json:"dapiHeight"`
 	CatchingUp         bool              `json:"catchingUp"`
 	ChainID            string            `json:"chainId"`
@@ -226,6 +233,45 @@ type Platform struct {
 	Containers         map[string]string `json:"containers"`
 	Restarts           map[string]int    `json:"restarts"`
 }
+
+// Render describes a node's dashmate render: the release that rendered it,
+// the sidecar images that release requests, and (staging an upgrade) the
+// services it changes, or the Core services whose changes wait for a Core
+// rollout.
+type Render struct {
+	Version  string            `json:"version"`
+	Sidecars map[string]string `json:"sidecars"`
+	Changes  []string          `json:"changes,omitempty"`
+	Deferred []string          `json:"deferred,omitempty"`
+}
+
+var dashmateVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$`)
+
+func (r *Render) validate() error {
+	if r == nil {
+		return nil
+	}
+	if !dashmateVersion.MatchString(r.Version) || len(r.Sidecars) > len(provision.SidecarServices) {
+		return errors.New("invalid dashmate render observation")
+	}
+	for service, ref := range r.Sidecars {
+		if !slices.Contains(provision.SidecarServices, service) {
+			return errors.New("render requests an unsupported sidecar service")
+		}
+		if _, err := provision.Reference(ref); err != nil {
+			return errors.New("render requests an invalid sidecar image")
+		}
+	}
+	for _, list := range [][]string{r.Changes, r.Deferred} {
+		for _, service := range list {
+			if !slices.Contains(provision.PlatformServices, service) && service != "core" && service != "core_tor" {
+				return errors.New("render reports an unknown service")
+			}
+		}
+	}
+	return nil
+}
+
 type Observation struct {
 	InstanceID        string    `json:"instanceId"`
 	PlanID            string    `json:"planId"`
@@ -240,6 +286,7 @@ type Observation struct {
 	ProTxHash         string    `json:"proTxHash,omitempty"`
 	Confirmations     int       `json:"confirmations,omitempty"`
 	Balance           int64     `json:"balance,omitempty"`
+	Render            *Render   `json:"render,omitempty"`
 }
 type Backend interface {
 	Call(context.Context, Request) (Observation, error)
@@ -250,7 +297,7 @@ type Remote struct {
 	Account, Region string
 }
 
-var actions = map[string]bool{"inspect": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "fast-forward": true, "mine-start": true, "mine-pause": true, "platform-start": true, "platform-status": true, "stop": true}
+var actions = map[string]bool{"inspect": true, "render": true, "core-start": true, "core-status": true, "identity": true, "wallet": true, "core-finalize": true, "fund": true, "register": true, "activate": true, "fast-forward": true, "mine-start": true, "mine-pause": true, "platform-start": true, "platform-status": true, "stop": true}
 var diagnostic = regexp.MustCompile(`^[a-z0-9:_-]{1,120}$`)
 
 func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
@@ -316,7 +363,7 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 		}
 		return Observation{}, runErr
 	}
-	if decodeErr != nil || o.Error != "" || o.InstanceID != q.Target.InstanceID || o.PlanID != q.Context.PlanID || o.Action != q.Action {
+	if decodeErr != nil || o.Error != "" || o.InstanceID != q.Target.InstanceID || o.PlanID != q.Context.PlanID || o.Action != q.Action || o.Render.validate() != nil {
 		return Observation{}, errors.New("invalid/mismatched node observation; raw output withheld")
 	}
 	return o, nil

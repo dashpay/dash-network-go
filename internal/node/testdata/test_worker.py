@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import io
@@ -57,7 +58,7 @@ def request():
                 dict(
                     component=x, pinned="docker.io/example/" + x + "@sha256:" + "d" * 64
                 )
-                for x in ["core", "drive", "dapi", "tenderdash", "gateway"]
+                for x in ["core", "drive", "dapi", "tenderdash", "gateway", "helper"]
             ],
         ),
         action="inspect",
@@ -368,72 +369,333 @@ class Tests(unittest.TestCase):
             w.register()
             self.assertEqual((w.prepared, w.sent), (1, 2))
 
-    def test_public_advertising_disables_private_addresses(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            q = request()
-            q["target"]["peerAddress"] = "198.51.100.10"
-            q["context"]["corePeers"] = ["198.51.100.10:20001", "198.51.100.11:20001"]
-            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
-            self.assertIn("allowprivatenet=1\n", w.core_config())
-            self.assertIn("powtargetspacing=10\n", w.core_config(), "default config unchanged")
-            w.c["miningIntervalSeconds"] = 150
-            self.assertIn("powtargetspacing=150\n", w.core_config())
-            w.c["miningIntervalSeconds"] = 10
-            q["context"]["advertise"] = "public"
-            config = worker.Worker(q, Path(tmp), Path(tmp) / "lock").core_config()
-            self.assertIn("allowprivatenet=0\n", config)
-            self.assertIn("externalip=198.51.100.10:20001\n", config)
-            self.assertIn("addnode=198.51.100.11:20001\n", config)
-            self.assertNotIn("addnode=198.51.100.10:20001", config)
+    def test_platform_block_age_uses_tenderdash_block_time(self):
+        import datetime
+        now = datetime.datetime(2026, 9, 29, 12, 3, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(worker.block_age("2026-09-29T12:00:00.123456789Z", now), 179, "nanoseconds")
+        self.assertEqual(worker.block_age("2026-09-29T14:00:00+02:00", now), 180)
+        self.assertEqual(worker.block_age("2026-09-29T12:04:00Z", now), 0, "clock skew is not negative age")
+        for stamp in [None, "", "yesterday"]:
+            with self.assertRaisesRegex(worker.Failure, "tenderdash-block-time"):
+                worker.block_age(stamp, now)
 
-    def test_gateway_merges_slashes_like_dashmate(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            w = worker.Worker(request(), Path(tmp), Path(tmp) / "lock")
-            manager = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["filters"][0]["typed_config"]
-            self.assertIs(manager["merge_slashes"], True)
-            self.assertIs(manager["normalize_path"], True)
+    def test_protobuf_malformed_and_missing_fields(self):
+        self.assertEqual(worker.protobuf(b"\x0a\x02hi\x20\x05"), {1: b"hi", 4: 5})
+        for raw in [b"\x0a\x04x", b"\x00", b"\x0f", b"\x80" * 12, b"\x08\x00\x08\x00"]:
+            with self.assertRaises(worker.Failure):
+                worker.protobuf(raw)
 
-    def test_trusted_gateway_certificates_use_watched_sds(self):
+
+import fakehost
+
+SPORK = "yZ9ffZ5NjHqFyRAgcJCvXX1kHUh9yBHa4K"
+
+
+def pin(name):
+    return "index.docker.io/example/" + name + "@sha256:" + hashlib.sha256(name.encode()).hexdigest()
+
+
+class Host(fakehost.FakeHost, worker.Worker):
+    failure = worker.Failure
+
+    def __init__(self, q, root):
+        worker.Worker.__init__(self, q, root, root / "lock")
+        self.setup_host()
+        self.status_calls = 0
+
+    def core_status(self):
+        self.status_calls += 1
+        return dict(containerId=self.service_container("core")["Id"])
+
+
+def node_request(role="validator", name="validator-1", pins=True):
+    q = request()
+    peer = "198.51.100.1"
+    q["target"].update(role=role, name=name, peerAddress=peer)
+    if role != "validator":
+        q["target"]["images"] = [x for x in q["target"]["images"] if x["component"] in ["core", "helper"]]
+    q["context"].update(advertise="public", corePeers=["198.51.100.%d:20001" % i for i in range(1, 5)])
+    if pins:
+        q["context"]["sidecarImages"] = {s: pin(s) for s in ["core_tor", "gateway_rate_limiter", "gateway_rate_limiter_redis"]}
+    return q
+
+
+def host(tmp, role="validator", **kw):
+    w = Host(node_request(role, role + "-1", **kw), Path(tmp))
+    key = bytes(range(64))
+    secret = dict(rpcPassword="p" * 64)
+    if role == "validator":
+        secret.update(operatorPrivateKey="11" * 32, operatorPublicKey="22" * 48,
+                      nodePrivateKey=base64.b64encode(key).decode(),
+                      platformNodeID=hashlib.sha256(key[32:]).hexdigest()[:40],
+                      tlsCertificate="SELF-SIGNED", tlsPrivateKey="SELF-KEY")
+    if role == "wallet":
+        secret["sporkKey"] = "cSporkKey"
+    w.atomic("secrets.json", secret)
+    return w
+
+
+def platform_request(w):
+    peers = [dict(name="validator-%d" % i, address="198.51.100.%d" % i, nodeId="%040x" % i,
+                  operatorPublicKey="%096x" % i) for i in range(1, 5)]
+    secret = w.read("secrets.json")
+    peers[0].update(nodeId=secret["platformNodeID"], operatorPublicKey=secret["operatorPublicKey"])
+    w.q.update(peers=peers, genesisCoreHeight=4500, sporkAddress=SPORK)
+
+
+class DashmateTests(unittest.TestCase):
+    def test_dashmate_config_carries_the_devnet_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            q = request()
-            q["target"]["peerAddress"] = "198.51.100.10"
-            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
-            context = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["transport_socket"]["typed_config"]["common_tls_context"]
-            self.assertIn("tls_certificates", context)
-            q["context"]["gatewayTls"] = {"issuer": "letsencrypt", "email": "ops@example.org", "images": {}}
-            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
-            context = w.envoy()["static_resources"]["listeners"][0]["filter_chains"][0]["transport_socket"]["typed_config"]["common_tls_context"]
-            self.assertNotIn("tls_certificates", context)
-            source = context["tls_certificate_sds_secret_configs"][0]["sds_config"]["path_config_source"]
-            self.assertEqual(source, {"path": "/tls/sds.json", "watched_directory": {"path": "/tls"}})
-            self.assertEqual(w.envoy()["node"]["id"], q["target"]["name"], "SDS needs a node identity")
+            w = host(tmp)
+            config = json.loads(fakehost.FIXTURE.read_text())
+            config["configs"] = {w.config_name: config["configs"]["node"]}
+            w.configure(config, None)
+            d = config["configs"][w.config_name]
+            secret = w.read("secrets.json")
+            self.assertEqual((d["network"], d["externalIp"]), ("devnet", "198.51.100.1"))
+            self.assertEqual(d["core"]["p2p"]["seeds"], [dict(host="198.51.100.%d" % i, port=20001) for i in range(2, 5)])
+            users = d["core"]["rpc"]["users"]
+            self.assertEqual(users["dashnet"], dict(password="p" * 64, whitelist=None, lowPriority=False))
+            self.assertEqual(users["tenderdash"]["whitelist"][:2], ["quoruminfo", "quorumverify"], "dashmate's whitelists kept")
+            self.assertEqual({u: users[u]["password"] for u in secret["rpcUsers"]}, secret["rpcUsers"])
+            self.assertEqual(len({v["password"] for v in users.values()}), len(users), "a password per user")
+            self.assertNotIn("rpcpassword", json.dumps(users))
+            self.assertIs(d["core"]["masternode"]["enable"], False, "no BLS key before finalization")
+            self.assertIsNone(d["core"]["spork"]["address"])
+            self.assertEqual(d["core"]["devnet"]["powTargetSpacing"], 10)
+            self.assertEqual(d["core"]["indexes"], [])
+            self.assertIs(d["core"]["tor"]["enabled"], True, "dashmate's default is kept")
+            abci = d["platform"]["drive"]["abci"]
+            self.assertEqual(abci["validatorSet"]["quorum"]["llmqType"], 107)
+            self.assertEqual(abci["instantLock"]["quorum"], dict(llmqType=105, dkgInterval=48, activeSigners=2, rotation=True))
+            self.assertEqual(abci["epochTime"], 3600)
+            td = d["platform"]["drive"]["tenderdash"]
+            self.assertEqual((td["mode"], td["moniker"], td["node"]["id"]), ("validator", "validator-1", secret["platformNodeID"]))
+            self.assertEqual(td["genesis"]["validator_quorum_type"], 107)
+            self.assertEqual(td["genesis"]["consensus_params"]["version"], dict(app_version="14"))
+            self.assertEqual(td["genesis"]["consensus_params"]["timeout"]["propose"], "50000000000", "dashmate's own consensus params")
+            self.assertNotIn("initial_core_chain_locked_height", td["genesis"])
+            self.assertEqual(td["p2p"]["persistentPeers"], [])
+            self.assertEqual(td["consensus"]["createEmptyBlocksInterval"], "3m")
+            self.assertEqual(d["platform"]["gateway"]["ssl"]["provider"], "self-signed")
+            self.assertEqual(d["platform"]["gateway"]["rateLimiter"]["whitelist"], ["198.51.100.%d" % i for i in range(1, 5)])
+            self.assertEqual(d["platform"]["drive"]["abci"]["docker"]["image"], w.images["drive"])
+            # Finalized, with Platform started.
+            platform_request(w)
+            w.atomic("platform/inputs.json", dict(genesisCoreHeight=4500, peers=[
+                dict(name=v["name"], address=v["address"], nodeId=v["nodeId"]) for v in w.q["peers"]]))
+            w.configure(config, SPORK)
+            self.assertEqual(d["core"]["masternode"]["operator"]["privateKey"], "11" * 32)
+            self.assertEqual(d["core"]["spork"]["address"], SPORK)
+            self.assertIsNone(d["core"]["spork"]["privateKey"], "only the wallet signs sporks")
+            self.assertEqual(td["genesis"]["initial_core_chain_locked_height"], 4500)
+            self.assertEqual([p["host"] for p in td["p2p"]["persistentPeers"]], ["198.51.100.%d" % i for i in range(2, 5)])
+            # Trusted certificates use dashmate's own Let's Encrypt provider.
+            w.c["gatewayTls"] = dict(issuer="letsencrypt-staging", email="ops@example.org", images={})
+            w.configure(config, SPORK)
+            ssl = d["platform"]["gateway"]["ssl"]
+            self.assertEqual(ssl["provider"], "letsencrypt")
+            self.assertIn("staging", ssl["providerConfigs"]["letsencrypt"]["acmeDirectoryUrl"])
+            # An option a release no longer has fails closed.
+            del d["core"]["zmq"]
+            with self.assertRaisesRegex(worker.Failure, "dashmate-option-missing"):
+                w.configure(config, SPORK)
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp, "wallet")
+            config = json.loads(fakehost.FIXTURE.read_text())
+            config["configs"] = {w.config_name: config["configs"]["node"]}
+            w.configure(config, SPORK)
+            d = config["configs"][w.config_name]
+            self.assertEqual(d["core"]["indexes"], ["address", "spent", "timestamp", "tx"])
+            self.assertEqual(d["core"]["spork"]["privateKey"], "cSporkKey")
+            self.assertIs(d["platform"]["enable"], False)
+            self.assertIs(d["core"]["masternode"]["enable"], False)
+
+    def test_salted_render_lines_are_verified_then_normalized(self):
+        password = "torControlFixture"
+        self.assertTrue(worker.tor_hash_matches(fakehost.tor_hash(password), password))
+        self.assertFalse(worker.tor_hash_matches(fakehost.tor_hash(password), "other"))
+        self.assertFalse(worker.tor_hash_matches("16:ZZ", password))
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            first = w.render()
+            second = w.render()
+            self.assertEqual(first.fingerprints, second.fingerprints, "fresh salts are not changes")
+            conf = second.stage / w.config_name / "core/dash.conf"
+            config = copy.deepcopy(second.config)
+            config["configs"][w.config_name]["core"]["rpc"]["users"]["dapi"]["password"] = "changed"
+            with self.assertRaisesRegex(worker.Failure, "rpcauth-mismatch"):
+                w.normalized(conf, conf.read_bytes(), config)
+            config = copy.deepcopy(second.config)
+            config["configs"][w.config_name]["core"]["tor"]["control"]["password"] = "changed"
+            torrc = second.stage / w.config_name / "core/tor/torrc"
+            with self.assertRaisesRegex(worker.Failure, "tor-password-mismatch"):
+                w.normalized(torrc, torrc.read_bytes(), config)
+
+    def test_core_start_then_finalize_recreates_core_and_tor_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            w.ensure_core(False)
+            self.assertEqual(set(w.containers), {w.container_name("core"), w.container_name("core_tor")})
+            conf = w.home / w.config_name / "core/dash.conf"
+            self.assertNotIn("masternodeblsprivkey", conf.read_text())
+            before = {k: v["Id"] for k, v in w.containers.items()}
+            inode = conf.stat().st_ino
+            w.ensure_core(False)
+            self.assertEqual({k: v["Id"] for k, v in w.containers.items()}, before, "an identical render restarts nothing")
+            self.assertEqual(conf.stat().st_ino, inode, "rendered files are rewritten in place")
+            w.q["sporkAddress"] = SPORK
+            w.ensure_core(True)
+            self.assertIn("masternodeblsprivkey=" + "11" * 32, conf.read_text())
+            after = {k: v["Id"] for k, v in w.containers.items()}
+            self.assertTrue(all(after[k] != before[k] for k in before), "Core and its Tor namespace are recreated")
+            self.assertEqual(w.read("core/state.json"), dict(final=True, sporkAddress=SPORK))
+            # A resume never reverts finalization, and never changes the spork.
+            w.q.pop("sporkAddress")
+            w.ensure_core(False)
+            self.assertEqual({k: v["Id"] for k, v in w.containers.items()}, after)
+            w.q["sporkAddress"] = "yOther1111111111111111111111111111"
+            with self.assertRaisesRegex(worker.Failure, "spork-address-changed"):
+                w.ensure_core(True)
+            client = (w.home / ".client/dash.conf").read_text()
+            self.assertIn("rpcuser=dashnet\n", client)
+            core = w.service_container("core")["definition"]
+            self.assertIn(dict(type="bind", source=str(w.home / ".client/dash.conf"), target="/etc/dash/dash.conf", read_only=True),
+                          core["volumes"], "dash-cli in Core authenticates as before")
+
+    def test_dashmate_runs_only_for_a_new_config_or_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            runs = lambda: [c[1] for c in w.commands if c[0] == "helper"]
+            w.render_info()
+            w.ensure_core(False)
+            self.assertEqual(runs(), ["create", "render"], "Core starts from the render stage's output")
+            w.commands = []
+            w.ensure_core(False)
+            self.assertEqual(runs(), [], "a resume renders nothing")
+            w.q["sporkAddress"] = SPORK
+            w.ensure_core(True)
+            self.assertEqual(runs(), ["render"], "a new config renders; the release needs no migration")
+            w.commands = []
+            w.images["helper"] = pin("helper-2")
+            w.version = "4.2.0-beta.6"
+            w.ensure_core(True)
+            self.assertEqual(runs(), ["migrate", "render"], "a new release migrates, as dashmate update does")
+            self.assertEqual(json.loads((w.home / worker.RENDERED).read_text())["helper"], pin("helper-2"))
+            w.commands = []
+            w.ensure_core(True)
+            self.assertEqual(runs(), [])
+
+    def test_platform_start_keeps_core_and_platform_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            platform_request(w)
+            w.ensure_core(True)
+            core = w.service_container("core")["Id"]
+            w.platform_start()
+            self.assertEqual(w.service_container("core")["Id"], core, "Platform never restarts Core")
+            for name in ["drive_abci", "drive_tenderdash", "rs_dapi", "gateway", "gateway_rate_limiter", "gateway_rate_limiter_redis"]:
+                self.assertTrue(w.service_container(name)["State"]["Running"], name)
+            self.assertEqual(w.service_container("gateway_rate_limiter_redis")["Image"], "image-" + pin("gateway_rate_limiter_redis"))
+            ssl = w.home / w.config_name / "platform/gateway/ssl"
+            self.assertEqual((ssl / "bundle.crt").read_text(), "SELF-SIGNED")
+            self.assertEqual(oct((ssl / "private.key").stat().st_mode & 0o777), "0o600")
+            genesis = json.loads((w.home / w.config_name / "platform/drive/tenderdash/genesis.json").read_text())
+            self.assertEqual(genesis["initial_core_chain_locked_height"], 4500)
+            # A certificate issued since is kept; a second start changes nothing.
+            (ssl / "bundle.crt").write_text("TRUSTED")
+            ids = {k: v["Id"] for k, v in w.containers.items()}
+            w.platform_start()
+            self.assertEqual((ssl / "bundle.crt").read_text(), "TRUSTED")
+            self.assertEqual({k: v["Id"] for k, v in w.containers.items()}, ids)
+            # Genesis never changes once Platform started.
+            w.q["genesisCoreHeight"] = 4501
+            with self.assertRaisesRegex(worker.Failure, "immutable-platform-config-changed"):
+                w.platform_start()
+            w.q["genesisCoreHeight"] = 4500
+            w.c["genesisTime"] = "2026-09-25T00:00:00Z"
+            with self.assertRaisesRegex(worker.Failure, "immutable-platform-config-changed"):
+                w.platform_start()
+            w.c["genesisTime"] = "2026-09-24T00:00:00Z"
+            w.service_container("core")["Config"]["Labels"][worker.FINGERPRINT] = "other"
+            with self.assertRaisesRegex(worker.Failure, "core-config-changed"):
+                w.platform_start()
+
+    def test_dashmate_selects_services_and_the_tool_pins_their_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp, "wallet", pins=False)
+            info = w.render_info()["render"]
+            fixture = json.loads(fakehost.FIXTURE.read_text())["configs"]["node"]
+            self.assertEqual(info, dict(version="4.2.0-beta.3", sidecars={"core_tor": fixture["core"]["tor"]["docker"]["image"]}))
+            self.assertEqual(w.containers, {}, "a render starts nothing")
+            with self.assertRaisesRegex(worker.Failure, "sidecar-image-not-pinned"):
+                w.ensure_core(False)
+            w.c["sidecarImages"] = {"core_tor": pin("core_tor")}
+            self.assertEqual(w.render_info()["render"]["sidecars"]["core_tor"], fixture["core"]["tor"]["docker"]["image"],
+                             "requested images are dashmate's own, whatever the pins")
+            w.ensure_core(False)
+            self.assertEqual(w.service_container("core_tor")["Image"], "image-" + pin("core_tor"))
+            self.assertNotIn("dashmate_helper", str(w.containers), "dashmate's helper never runs")
+        for change, code in [
+            (lambda m: m.update(quorum_list=dict(image="x", labels={}, volumes=[])), "unsupported-dashmate-service"),
+            (lambda m: m["core"].update(image="dashpay/dashd:23"), "dashmate-image-not-pinned"),
+        ]:
+            with tempfile.TemporaryDirectory() as tmp:
+                w = host(tmp, "wallet")
+                model = w.compose_model
+                w.compose_model = lambda args, env: (lambda m: (change(m), m)[1])(model(args, env))
+                with self.assertRaisesRegex(worker.Failure, code):
+                    w.render()
+
+    def test_stop_withdraws_this_tools_services_then_dashmates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            platform_request(w)
+            w.ensure_core(True)
+            w.platform_start()
+            w.q["payoutAddress"] = "y" + "1" * 33
+            w.mine_start = worker.Worker.mine_start.__get__(w)
+            w.stop()
+            self.assertTrue(all(not c["State"]["Running"] for c in w.containers.values()))
+            stops = [c for c in w.commands if c[0] == "stop" or (c[0] == "compose" and "stop" in c)]
+            self.assertEqual(len(stops), 1, "dashmate's own stop, one Compose call")
+            self.assertEqual(set(stops[0][stops[0].index("stop") + 1:]), set(w.selection()))
+
+    def test_only_owned_or_labelled_containers_share_the_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            w.containers = {w.container_name("drive_abci"): dict(Config=dict(Labels={})),
+                            "devnet-services-quorums-1": dict(Config=dict(Labels={"dashnet.auxiliary": "devnet-ci/validator-1"}))}
+            w.check_containers()
+            for name, labels in [("stray", {}), ("other", {"dashnet.auxiliary": "devnet-other/validator-1"}),
+                                 (w.container_name("drive") + "x", {"dashnet.auxiliary": "devnet-ci/validator-1"}),
+                                 (w.container_name("dashmate_helper"), {})]:
+                w.containers[name] = dict(Config=dict(Labels=labels))
+                with self.assertRaises(worker.Failure):
+                    w.check_containers()
+                del w.containers[name]
+
+    def test_trusted_certificates_install_in_place_and_reload_envoy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            w.t["peerAddress"] = "198.51.100.10"
+            w.c["gatewayTls"] = {"issuer": "letsencrypt", "email": "ops@example.org", "images": {"amd64": pin("lego")}}
             script = w.acme_script()
             self.assertIn("ip=198.51.100.10\n", script)
             self.assertIn("server=https://acme-v02.api.letsencrypt.org/directory\n", script)
-            self.assertIn("--profile shortlived", script)
-            self.assertNotIn("staging", script)
-            # Injection-shaped parameters are refused.
-            q["context"]["gatewayTls"]["email"] = "x@y.org; rm -rf /"
+            self.assertIn("--key-type rsa2048", script, "dashmate's key type")
+            self.assertIn('cat "$crt" >/ssl/bundle.crt', script, "in place: the gateway bind-mounts the files")
+            self.assertIn("date +%s >/acme/reload", script)
+            unit, units = w.reload_units()
+            self.assertIn("PathChanged=" + str(w.root / "acme/reload"), units[unit + ".path"])
+            self.assertIn("ExecStart=/usr/bin/docker kill --signal HUP " + w.container_name("gateway"), units[unit + ".service"])
+            w.acme_start()
+            self.assertEqual(w.units, units)
+            acme = w.service_container("acme")
+            self.assertEqual(acme["definition"]["image"], pin("lego"))
+            w.c["gatewayTls"]["email"] = "x@y.org; rm -rf /"
             with self.assertRaises(worker.Failure):
-                worker.Worker(q, Path(tmp), Path(tmp) / "lock").acme_script()
-
-    def test_stop_includes_the_acme_client(self):
-        class Stopping(worker.Worker):
-            stopped = []
-            running = {"acme", "gateway", "core"}
-
-            def inspect_container(self, name):
-                return {"State": {"Running": name in self.running}} if name in {"acme", "gateway", "core"} else None
-
-            def docker(self, *args, timeout=120):
-                assert args[0] == "stop"
-                self.stopped.append(args[-1])
-                self.running.discard(args[-1].rsplit("-", 1)[-1])
-                return b""
-
-        w = Stopping(request())
-        w.stop()
-        self.assertEqual([n.rsplit("-", 1)[-1] for n in w.stopped], ["acme", "gateway", "core"])
+                w.acme_script()
 
     def test_incomplete_dapi_status_is_a_named_failure(self):
         def field(n, value):
@@ -443,11 +705,8 @@ class Tests(unittest.TestCase):
         v0 = field(1, field(1, software)) + field(3, b"") + field(4, field(2, b"x"))
 
         class Starting(worker.Worker):
-            def inspect_container(self, name):
-                return {"Id": "i" * 64, "RestartCount": 0, "State": {"Running": True}}
-
-            def verify_image(self, value, pinned):
-                pass
+            def platform_containers(self):
+                return {}, {}
 
             def tenderdash(self, method):
                 return {"sync_info": {"latest_block_height": "3", "catching_up": False}}
@@ -459,93 +718,6 @@ class Tests(unittest.TestCase):
         q["target"]["role"] = "validator"
         with self.assertRaisesRegex(worker.Failure, "dapi-status-incomplete"):
             Starting(q).platform_status()
-
-    def test_only_labelled_auxiliary_containers_share_the_host(self):
-        class Listing(worker.Worker):
-            names = ""
-
-            def docker(self, *args, timeout=120):
-                assert args[:3] == ("container", "ls", "-a")
-                return self.names.encode()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            w = Listing(request(), Path(tmp), Path(tmp) / "lock")
-            core = w.container_name("core")
-            w.names = core + "\t\ndevnet-services-quorums-1\tdevnet-ci/wallet-1\n"
-            w.check_containers()
-            for names in [
-                core + "\t\nstray\t\n",
-                "other\tdevnet-other/wallet-1\n",
-                "other\tdevnet-ci/validator-1\n",
-                w.container_name("drive") + "x\tdevnet-ci/wallet-1\n",
-            ]:
-                w.names = names
-                with self.assertRaises(worker.Failure):
-                    w.check_containers()
-
-    def test_platform_genesis_never_replaced(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            q = request()
-            q["target"]["role"] = "validator"
-            q["target"]["name"] = "validator-1"
-            q["peers"] = [
-                dict(
-                    name="validator-1",
-                    address="10.0.0.1",
-                    nodeId="a" * 40,
-                    operatorPublicKey="b" * 96,
-                    proTxHash="e" * 64,
-                )
-            ]
-            q["genesisCoreHeight"] = 160
-            w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
-            w.atomic(
-                "secrets.json",
-                dict(
-                    rpcPassword="private-password",
-                    platformNodeID="a" * 40,
-                    operatorPublicKey="b" * 96,
-                    nodePrivateKey=base64.b64encode(bytes(64)).decode(),
-                    tlsCertificate="certificate",
-                    tlsPrivateKey="private-key",
-                ),
-            )
-            w.platform_files()
-            before = (
-                Path(tmp) / "platform/tenderdash/config/genesis.json"
-            ).read_bytes()
-            w.platform_files()
-            self.assertEqual(
-                before,
-                (Path(tmp) / "platform/tenderdash/config/genesis.json").read_bytes(),
-            )
-            q["genesisCoreHeight"] = 161
-            with self.assertRaises(worker.Failure):
-                w.platform_files()
-            self.assertEqual(
-                before,
-                (Path(tmp) / "platform/tenderdash/config/genesis.json").read_bytes(),
-            )
-            services = w.platform_services()
-            self.assertNotIn("core", services)
-            self.assertEqual(
-                services["drive"]["environment"]["VALIDATOR_SET_QUORUM_TYPE"], "107"
-            )
-            self.assertEqual(
-                services["dapi"]["environment"]["DAPI_BIND_ADDRESS"], "127.0.0.1"
-            )
-            # Plans without the option run one-hour epochs; the plan's value wins.
-            self.assertEqual(services["drive"]["environment"]["EPOCH_TIME_LENGTH_S"], "3600")
-            w.c["platformEpochSeconds"] = 600
-            self.assertEqual(
-                w.platform_services()["drive"]["environment"]["EPOCH_TIME_LENGTH_S"], "600"
-            )
-
-    def test_protobuf_malformed_and_missing_fields(self):
-        self.assertEqual(worker.protobuf(b"\x0a\x02hi\x20\x05"), {1: b"hi", 4: 5})
-        for raw in [b"\x0a\x04x", b"\x00", b"\x0f", b"\x80" * 12, b"\x08\x00\x08\x00"]:
-            with self.assertRaises(worker.Failure):
-                worker.protobuf(raw)
 
 
 if __name__ == "__main__":
