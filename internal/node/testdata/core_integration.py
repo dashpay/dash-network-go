@@ -59,9 +59,11 @@ def main():
             call("fund")
             assert w.rpc("getblockcount") >= 600
             pair = w.rpc("bls", ["generate"])
+            # dashmate's Core (allowprivatenet=0) refuses private service
+            # addresses, as on public devnets: register routable ones.
             q["registration"] = dict(
                 name="validator-1",
-                address="10.0.0.2",
+                address="1.2.3.4",
                 operatorPublicKey=pair["public"],
                 nodeId="a" * 40,
             )
@@ -110,7 +112,7 @@ def main():
             assert call("register")["proTxHash"] == registration["proTxHash"]
             q["registration"] = dict(
                 name="validator-2",
-                address="10.0.0.3",
+                address="1.2.3.5",
                 operatorPublicKey=w.rpc("bls", ["generate"])["public"],
                 nodeId="b" * 40,
             )

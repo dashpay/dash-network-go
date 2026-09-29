@@ -129,7 +129,7 @@ def main():
             print("dashmate's gateway serves gRPC, grpc-web and CORS.", flush=True)
             try:
                 w.platform_status()
-            except worker.Failure:
+            except Exception:  # Tenderdash restarts until Drive opens ABCI
                 pass
             else:
                 raise AssertionError("Platform without consensus reported healthy")

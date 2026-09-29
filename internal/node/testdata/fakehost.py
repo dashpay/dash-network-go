@@ -134,8 +134,9 @@ class FakeHost:
         if "platform" in profiles:
             # Compose reads env files while it evaluates the model.
             assert logger.is_file(), "env file not found"
-            service("drive_abci", d["platform"]["drive"]["abci"]["docker"]["image"], [], "platform",
-                    environment=dict(x.split("=", 1) for x in logger.read_text().split()))
+            environment = dict(x.split("=", 1) for x in logger.read_text().split())
+            environment["EPOCH_TIME_LENGTH_S"] = str(d["platform"]["drive"]["abci"]["epochTime"])
+            service("drive_abci", d["platform"]["drive"]["abci"]["docker"]["image"], [], "platform", environment=environment)
             service("drive_tenderdash", d["platform"]["drive"]["tenderdash"]["docker"]["image"], ["platform/drive/tenderdash"], "platform")
             service("rs_dapi", d["platform"]["dapi"]["rsDapi"]["docker"]["image"], [], "platform")
             if any(f.endswith("docker-compose.rate_limiter.yml") for f in files):

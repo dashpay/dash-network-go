@@ -200,15 +200,20 @@ class PlatformUpgradeTests(unittest.TestCase):
             for name in ['core', 'core_tor', 'drive_abci', 'rs_dapi']:
                 self.assertEqual(u.service_container(name)['Id'], ids[u.container_name(name)], name)
 
-    def test_replay_refuses_a_different_render(self):
+    def test_replay_reuses_the_render_and_refuses_changed_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             u = deployed(tmp)
             change(u, helper=pin('helper-2'))
             u.gateway_template = 'one: 1\n'
+            u.q['action'] = 'upgrade-stage'
+            u.execute()
+            u.q['action'] = 'upgrade-apply'
+            u.commands = []
             u.lose = 'gateway'
             with self.assertRaisesRegex(worker.Failure, 'lost-apply-response'):
                 u.execute()
-            u.gateway_template = 'two: 2\n'
+            self.assertFalse(any(c[0] == 'helper' for c in u.commands), 'the apply reuses the staged render')
+            u.c['platformEpochSeconds'] = 600
             with self.assertRaisesRegex(worker.Failure, 'upgrade-config-changed'):
                 u.execute()
 

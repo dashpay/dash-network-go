@@ -84,7 +84,7 @@ resolved again during a resumed operation.
 
 1. Claim the same network journal used by terminal/Actions deployment operations.
 2. Require fresh whole-fleet health and capture public preservation fingerprints.
-3. Stage/verify all needed image digests, at most four hosts concurrently. Cached
+3. Stage/verify all needed image digests, at most sixteen hosts concurrently. Cached
    exact artifacts are reused. A staging failure withdraws no services. For a
    Platform rollout every validator also renders the target release (nothing is
    installed): every validator must render with the same dashmate release; sidecar

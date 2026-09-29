@@ -218,9 +218,11 @@ type Core struct {
 	Quorums         map[string]int `json:"quorums"`
 }
 type Platform struct {
-	Protocol           uint32            `json:"protocol,omitempty"`
-	Validators         []string          `json:"validators,omitempty"`
-	Height             int64             `json:"height"`
+	Protocol   uint32   `json:"protocol,omitempty"`
+	Validators []string `json:"validators,omitempty"`
+	Height     int64    `json:"height"`
+	// BlockAge is the seconds since the latest Platform block, by the node's clock.
+	BlockAge           int64             `json:"blockAge"`
 	DAPIHeight         int64             `json:"dapiHeight"`
 	CatchingUp         bool              `json:"catchingUp"`
 	ChainID            string            `json:"chainId"`

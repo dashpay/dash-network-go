@@ -12,10 +12,9 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
-// PlatformObservationWindow outlasts dashmate's createEmptyBlocksInterval
-// (3m), so an idle but healthy Platform still advances between samples. The
-// CLI never observes for less.
-const PlatformObservationWindow = 3*time.Minute + 20*time.Second
+// PlatformIdleLimit bounds the age of an idle Platform chain's latest block:
+// dashmate's createEmptyBlocksInterval (3m) plus a minute for consensus.
+const PlatformIdleLimit = 4 * time.Minute
 
 type HealthNode struct {
 	Healthy        bool     `json:"healthy"`
@@ -176,8 +175,10 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 				if x.CatchingUp || x.Height < 1 || x.DAPIHeight < 1 || x.DAPIHeight < x.Height-3 || x.DriveVersion == "" || x.ChainID != p.PlatformChainID || x.NodeID != expected.PlatformNodeID || !strings.EqualFold(x.ProTxHash, expected.ProTxHash) {
 					n.Problems = append(n.Problems, "Platform/DAPI identity or sync mismatch")
 				}
-				if first.platform == nil || x.Height <= first.platform.Height {
-					n.Problems = append(n.Problems, "Platform did not advance")
+				// An idle chain makes a block only every three minutes: a
+				// recent block proves it live without waiting for the next.
+				if first.platform == nil || (x.Height <= first.platform.Height && (x.BlockAge < 0 || time.Duration(x.BlockAge)*time.Second > PlatformIdleLimit)) {
+					n.Problems = append(n.Problems, fmt.Sprintf("Platform did not advance and its last block is %ds old", x.BlockAge))
 				}
 				if len(x.ReferenceBlockHash) != 64 {
 					n.Problems = append(n.Problems, "missing common-height block hash")

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
@@ -222,6 +223,35 @@ func TestEveryCoreNodeCarriesTheDashmateHelper(t *testing.T) {
 		}
 		if !slices.Equal(components, want) {
 			t.Fatal("node renders without its release's dashmate", target.Name, components)
+		}
+	}
+}
+
+func TestIdlePlatformIsLiveWhileItsLastBlockIsRecent(t *testing.T) {
+	for _, tc := range []struct {
+		age     int64
+		healthy bool
+	}{{30, true}, {int64(PlatformIdleLimit / time.Second), true}, {int64(PlatformIdleLimit/time.Second) + 1, false}, {-1, false}} {
+		p, r, s, f := setup(t)
+		if _, err := execute(t, p, r); err != nil {
+			t.Fatal(err)
+		}
+		// dashmate's Tenderdash makes an empty block only every three minutes:
+		// between samples an idle chain does not advance.
+		f.after = func(q node.Request, o *node.Observation) error {
+			if o.Platform != nil {
+				o.Platform.Height, o.Platform.DAPIHeight, o.Platform.BlockAge = 700, 700, tc.age
+			}
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		health, err := r.Doctor(ctx, p, s.record)
+		cancel()
+		if err != nil || health.Healthy != tc.healthy {
+			t.Fatal("idle Platform liveness", tc.age, health.Problems, err)
+		}
+		if health.ObservationWindow != "15s" {
+			t.Fatal("observation window stretched", health.ObservationWindow)
 		}
 	}
 }

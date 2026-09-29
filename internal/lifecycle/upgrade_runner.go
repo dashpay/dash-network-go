@@ -173,7 +173,9 @@ func (e *execution) stageUpgrade(u UpgradePlan) (map[string]*node.Render, error)
 	var mu sync.Mutex
 	var failures []string
 	observed := map[string]*node.Render{}
-	limit := make(chan struct{}, 4)
+	// Staging renders the target release on every node: as many at once as
+	// a deploy's render-heavy steps.
+	limit := make(chan struct{}, concurrency("render"))
 	for _, t := range upgradeOrder(e.p, u.Scope) {
 		wg.Add(1)
 		go func(t node.Target) {
@@ -261,8 +263,7 @@ func (e *execution) stagePlatform(u UpgradePlan) error {
 }
 
 func (e *execution) verifyUpgrade() (Health, error) {
-	// A Doctor observation alone spans PlatformObservationWindow.
-	ctx, cancel := context.WithTimeout(e.ctx, 20*time.Minute)
+	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Minute)
 	defer cancel()
 	for {
 		h, err := e.runner.Doctor(ctx, e.p, e.r)

@@ -255,6 +255,17 @@ func (r Runner) Execute(ctx context.Context, p Plan, stop bool) (result provisio
 	return
 }
 
+// concurrency bounds hosts worked on at once. Renders (each runs the release's
+// dashmate) and pure inspections are independent per host and use bootstrap's
+// bound; other host work keeps a smaller one.
+func concurrency(action string) int {
+	switch action {
+	case "inspect", "render", "core-start", "core-finalize", "platform-start":
+		return 16
+	}
+	return 4
+}
+
 // Bound concurrency while checkpointing on one goroutine. Every scheduled target
 // reports a result; one failed host never silently drops the remainder.
 func (e *execution) each(targets []node.Target, action string, prepare func(*node.Request), accept func(node.Target, node.Observation) error) error {
@@ -282,7 +293,7 @@ func (e *execution) each(targets []node.Target, action string, prepare func(*nod
 	work := make(chan job)
 	results := make(chan reply, len(targets))
 	var wg sync.WaitGroup
-	for range 4 {
+	for range concurrency(action) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

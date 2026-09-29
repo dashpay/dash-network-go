@@ -13,6 +13,7 @@ dashmate compose files. dashmate never starts, stops or reconfigures a service.
 
 import base64
 import copy
+import datetime
 from decimal import Decimal
 import fcntl
 import hashlib
@@ -70,6 +71,8 @@ WALLET_INDEXES = ["address", "spent", "timestamp", "tx"]
 # Each service carries a digest of its Compose definition and rendered files, so
 # Compose recreates exactly the services whose configuration changed.
 FINGERPRINT = "dashnet.config"
+# The helper release (and config source) a render was made with.
+RENDERED = ".dashnet-render.json"
 
 # Runs dashmate's CLI inside the helper image. Nothing but config commands.
 RENDER = r"""set -eu
@@ -137,6 +140,17 @@ def tor_hash_matches(spec, password):
     data = salt + password.encode()
     whole, rest = divmod(count, len(data))
     return hmac.compare_digest(hashlib.sha1(data * whole + data[:rest]).digest(), digest)
+
+
+def block_age(stamp, now=None):
+    """Seconds since a Tenderdash block time (RFC 3339, nanoseconds), never negative."""
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)", stamp or "")
+    if not m:
+        raise Failure("tenderdash-block-time")
+    zone = "+00:00" if m[3] == "Z" else m[3]
+    when = datetime.datetime.fromisoformat(m[1] + (m[2] or "")[:7] + zone)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return max(0, int((now - when).total_seconds()))
 
 
 class Failure(Exception):
@@ -801,27 +815,57 @@ class Worker:
             out[name] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
         return out
 
-    def render(self):
-        """Renders this node with its release's dashmate into a fresh stage."""
-        self.stage = "dashmate-render"
-        spork, platform = self.inputs()
-        stage = self.root / "dashmate-stage"
-        self.require(not stage.is_symlink(), "symlink-refused")
+    def rendered(self, directory):
+        """The release and source a render records, and its config."""
+        meta, config = directory / RENDERED, directory / "config.json"
+        if not meta.is_file() or not config.is_file():
+            return None
+        return json.loads(meta.read_text()), config.read_bytes()
+
+    def fresh(self, stage):
         if stage.exists():
             shutil.rmtree(stage)
         stage.mkdir(mode=0o700)
         self.own(stage)
+
+    def render(self):
+        """Renders this node with its release's dashmate into the stage.
+
+        dashmate's output follows from its config and release alone, so the
+        last stage is reused when both are unchanged (a resume, a start after
+        the render stage, an apply after staging), and dashmate migrates the
+        config only for a new release."""
+        self.stage = "dashmate-render"
+        spork, platform = self.inputs()
+        helper = self.images["helper"]
+        stage = self.root / "dashmate-stage"
+        self.require(not stage.is_symlink(), "symlink-refused")
         live = self.home / "config.json"
-        if live.exists():
-            shutil.copyfile(live, stage / "config.json")
-            self.own(stage / "config.json")
-            self.helper(stage, "migrate")
+        source = hashlib.sha256(live.read_bytes()).hexdigest() if live.exists() else ""
+        saved, installed = self.rendered(stage), self.rendered(self.home)
+        fresh = False
+        if saved and saved[0] == dict(helper=helper, source=source):
+            config = json.loads(saved[1])  # already created or migrated
+        elif installed and installed[0]["helper"] == helper:
+            config = json.loads(installed[1])  # already this release's format
         else:
-            self.helper(stage, "create")
-        config = json.loads((stage / "config.json").read_text())
+            self.fresh(stage)
+            fresh = True
+            if live.exists():
+                shutil.copyfile(live, stage / "config.json")
+                self.own(stage / "config.json")
+                self.helper(stage, "migrate")
+            else:
+                self.helper(stage, "create")
+            config = json.loads((stage / "config.json").read_text())
         self.configure(config, spork)
-        self.write(stage / "config.json", json.dumps(config, indent=2).encode(), 0o600)
-        self.helper(stage, "render")
+        data = json.dumps(config, indent=2).encode()
+        if fresh or not (saved and saved[0]["helper"] == helper and saved[1] == data):
+            if not fresh:
+                self.fresh(stage)
+            self.write(stage / "config.json", data, 0o600)
+            self.helper(stage, "render")
+            self.write(stage / RENDERED, json.dumps(dict(helper=helper, source=source)).encode(), 0o600)
         version = (stage / ".version").read_text().strip()
         self.require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?", version), "dashmate-version")
         client = [
@@ -872,7 +916,7 @@ class Worker:
             self.home.mkdir(mode=0o700)
             self.own(self.home)
         paths = [p.relative_to(r.stage) for p in sorted(r.stage.rglob("*")) if not p.is_dir()]
-        for name in ["config.json", ".envs", ".version", ".dashnet-compose.json"]:
+        for name in ["config.json", ".envs", ".version", ".dashnet-compose.json", RENDERED]:
             self.require(Path(name) in paths, "dashmate-render-incomplete")
         for path in paths:
             source = r.stage / path
@@ -880,7 +924,7 @@ class Worker:
             scoped = len(path.parts) < 2 or path.parts[0] == ".compose" or path == Path(self.config_name) / "dynamic-compose.yml" \
                 or any(path.is_relative_to(tree) for tree in trees)
             if scoped or not (self.home / path).exists():
-                private = path.name in ["config.json", ".envs"] or path.parts[0] == ".client"
+                private = path.name in ["config.json", ".envs", RENDERED] or path.parts[0] == ".client"
                 self.write(self.home / path, source.read_bytes(), 0o600 if private else 0o644)
         # Parent directories created above belong to the service user too.
         for directory in sorted({(self.home / p).parent for p in paths}):
@@ -888,7 +932,7 @@ class Worker:
                 self.own(directory)
 
     def discard(self, r):
-        shutil.rmtree(r.stage, ignore_errors=True)
+        """The stage is kept for the next render to reuse."""
 
     def selection(self):
         """The services the live render runs."""
@@ -1604,6 +1648,8 @@ class Worker:
             )["block_id"]["hash"].lower()
         return dict(
             height=int(status["sync_info"]["latest_block_height"]),
+            # An idle chain makes a block only every createEmptyBlocksInterval.
+            blockAge=block_age(status["sync_info"].get("latest_block_time")),
             dapiHeight=chain.get(4, 0),
             catchingUp=status["sync_info"]["catching_up"] or bool(chain.get(1, 0)),
             chainId=network[1].decode(),

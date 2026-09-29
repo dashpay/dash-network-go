@@ -369,6 +369,16 @@ class Tests(unittest.TestCase):
             w.register()
             self.assertEqual((w.prepared, w.sent), (1, 2))
 
+    def test_platform_block_age_uses_tenderdash_block_time(self):
+        import datetime
+        now = datetime.datetime(2026, 9, 29, 12, 3, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(worker.block_age("2026-09-29T12:00:00.123456789Z", now), 179, "nanoseconds")
+        self.assertEqual(worker.block_age("2026-09-29T14:00:00+02:00", now), 180)
+        self.assertEqual(worker.block_age("2026-09-29T12:04:00Z", now), 0, "clock skew is not negative age")
+        for stamp in [None, "", "yesterday"]:
+            with self.assertRaisesRegex(worker.Failure, "tenderdash-block-time"):
+                worker.block_age(stamp, now)
+
     def test_protobuf_malformed_and_missing_fields(self):
         self.assertEqual(worker.protobuf(b"\x0a\x02hi\x20\x05"), {1: b"hi", 4: 5})
         for raw in [b"\x0a\x04x", b"\x00", b"\x0f", b"\x80" * 12, b"\x08\x00\x08\x00"]:
@@ -552,7 +562,29 @@ class DashmateTests(unittest.TestCase):
             core = w.service_container("core")["definition"]
             self.assertIn(dict(type="bind", source=str(w.home / ".client/dash.conf"), target="/etc/dash/dash.conf", read_only=True),
                           core["volumes"], "dash-cli in Core authenticates as before")
-            self.assertFalse((w.root / "dashmate-stage").exists(), "stages are discarded")
+
+    def test_dashmate_runs_only_for_a_new_config_or_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            runs = lambda: [c[1] for c in w.commands if c[0] == "helper"]
+            w.render_info()
+            w.ensure_core(False)
+            self.assertEqual(runs(), ["create", "render"], "Core starts from the render stage's output")
+            w.commands = []
+            w.ensure_core(False)
+            self.assertEqual(runs(), [], "a resume renders nothing")
+            w.q["sporkAddress"] = SPORK
+            w.ensure_core(True)
+            self.assertEqual(runs(), ["render"], "a new config renders; the release needs no migration")
+            w.commands = []
+            w.images["helper"] = pin("helper-2")
+            w.version = "4.2.0-beta.6"
+            w.ensure_core(True)
+            self.assertEqual(runs(), ["migrate", "render"], "a new release migrates, as dashmate update does")
+            self.assertEqual(json.loads((w.home / worker.RENDERED).read_text())["helper"], pin("helper-2"))
+            w.commands = []
+            w.ensure_core(True)
+            self.assertEqual(runs(), [])
 
     def test_platform_start_keeps_core_and_platform_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

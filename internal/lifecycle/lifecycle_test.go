@@ -66,7 +66,7 @@ func (f *fakeRemote) Call(ctx context.Context, q node.Request) (node.Observation
 		o.Confirmations = 1
 		f.registrations[q.Registration.Name] = o.ProTxHash
 	case "platform-status":
-		o.Platform = &node.Platform{Height: height, DAPIHeight: height, ChainID: q.Context.PlatformChainID, NodeID: id[:40], ProTxHash: digest("protx" + q.Target.Name), DriveVersion: "4.2.0", ReferenceBlockHash: digest("block"), Containers: map[string]string{"drive": digest("drive"), "tenderdash": digest("td"), "dapi": digest("dapi"), "gateway": digest("gateway")}}
+		o.Platform = &node.Platform{Height: height, BlockAge: 2, DAPIHeight: height, ChainID: q.Context.PlatformChainID, NodeID: id[:40], ProTxHash: digest("protx" + q.Target.Name), DriveVersion: "4.2.0", ReferenceBlockHash: digest("block"), Containers: map[string]string{"drive": digest("drive"), "tenderdash": digest("td"), "dapi": digest("dapi"), "gateway": digest("gateway")}}
 	}
 	if f.after != nil {
 		if err := f.after(q, &o); err != nil {
@@ -430,7 +430,8 @@ func TestDoctorNeverHidesUnreachableOrDivergentNode(t *testing.T) {
 					case "unreachable":
 						return errors.New("SSH lost")
 					case "stalled":
-						o.Platform.Height = 1
+						// Not advancing, and the last block is older than an idle chain's.
+						o.Platform.Height, o.Platform.BlockAge = 1, 300
 					case "fork":
 						o.Platform.ReferenceBlockHash = digest("fork")
 					case "wrong-identity":

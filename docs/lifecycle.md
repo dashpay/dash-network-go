@@ -70,7 +70,7 @@ dashnet deploy --plan out/deployment.json --confirm EXACT_DEPLOYMENT_ID \
 # Independent read-only health: nonzero exit for unhealthy/unknown targets.
 dashnet doctor --plan out/deployment.json \
   --ssh-key /secure/key --known-hosts /secure/known_hosts \
-  --profile YOUR_AWS_PROFILE --timeout 6m --out out/health-now.json
+  --profile YOUR_AWS_PROFILE --timeout 3m --out out/health-now.json
 
 # Inspect progress/errors from another authorized machine, even after runner loss.
 dashnet operation --plan out/ec2-plan.json --profile YOUR_AWS_PROFILE
@@ -79,10 +79,11 @@ dashnet operation --plan out/ec2-plan.json --profile YOUR_AWS_PROFILE
 `deployment-plan --block-time N` sets the Core block interval (8..600 seconds,
 default 10): Core's `powtargetspacing` and the miner's cadence. DKG, ChainLock
 and upgrade timing follow it; doctor stretches its observation window to at
-least two and a half blocks on chains slower than the default. The window is
-never shorter than 3m20s: an idle Platform chain makes an empty block only every
-three minutes (dashmate's `createEmptyBlocksInterval`), and both samples must
-see Core and Platform advance.
+least two and a half blocks on chains slower than the default. Core must
+advance between the samples. An idle Platform chain makes an empty block only
+every three minutes (dashmate's `createEmptyBlocksInterval`), so Platform is live
+when it advanced or its latest block, by Tenderdash's block time on the node, is
+at most four minutes old; nodes must still agree on the block hash.
 
 `deployment-plan --epoch-time N` sets the Platform epoch length (60 seconds to
 30 days, default 3600): Drive's `EPOCH_TIME_LENGTH_S` on every validator, kept
@@ -122,11 +123,15 @@ The controller runs named stages:
 7. Persist the initial chainlocked Core height once, render immutable Platform
    genesis/node identity, and start Drive, Tenderdash, rs-dapi, the gateway and
    its rate limiter on validators.
-8. Observe all nodes twice: advancing Core and Platform, common-height Platform
+8. Observe all nodes twice: advancing Core, live (advancing or recently
+   blocked) Platform, common-height Platform
    block-hash agreement, exact identities/images, no container replacement during
    observation, and successful TLS→HTTP/2→DAPI gRPC with responsive Drive/TD.
 
-Host work is bounded (four hosts concurrently); wallet transactions are serial.
+Host work is bounded: renders and service starts run on up to sixteen hosts at
+once, other host work on four; wallet transactions are serial. dashmate runs only
+when a node's config or release changed: a resume, or a start straight after the
+render stage, reuses the last render, and only a new release migrates the config.
 The wallet's signed registration bytes and collateral output are fsynced **before**
 broadcast. Retries reconcile/resend those same bytes, never fund a replacement
 registration. Collateral is persistently locked and restored before further

@@ -37,7 +37,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
-	fs.DurationVar(&observationWindow, "observation-window", 15*time.Second, "minimum interval between health samples; health checks stretch it past an idle Platform's 3-minute empty-block interval")
+	fs.DurationVar(&observationWindow, "observation-window", 15*time.Second, "minimum interval between health samples; allow for consensus round timeouts")
 	if args[0] == "deployment-plan" {
 		fs.StringVar(&bootstrapPath, "bootstrap-plan", "", "completed bootstrap plan")
 		fs.UintVar(&protocol, "protocol", 0, "explicit initial Platform protocol version, not software major version")
@@ -146,14 +146,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		if err := p.Validate(); err != nil {
 			return err
 		}
-		// Doctor stretches the window to 2.5 blocks on slower chains, and past
-		// an idle Platform's empty-block interval.
-		effective := max(observationWindow, lifecycle.PlatformObservationWindow)
-		if p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds {
-			effective = max(effective, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2)
-		}
-		if effective >= timeout && args[0] != "stop" {
-			return fmt.Errorf("--timeout must exceed the %s health observation window", effective)
+		// Doctor stretches the window to 2.5 blocks on slower chains.
+		if effective := max(observationWindow, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2); p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds && effective >= timeout && args[0] != "stop" {
+			return fmt.Errorf("--timeout must exceed the %s observation window this %ds-block chain needs", effective, p.MiningIntervalSeconds)
 		}
 		b = p.Bootstrap
 		expectedID := p.ID
@@ -241,9 +236,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		return err
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
-	// Both samples must also see a Platform block, which an idle chain makes
-	// only every dashmate createEmptyBlocksInterval.
-	runner.ObservationWindow = max(observationWindow, lifecycle.PlatformObservationWindow)
+	runner.ObservationWindow = observationWindow
 	runner.CoreOnly = coreOnly
 	// Anonymous: pins the sidecar images each release's dashmate requests.
 	runner.Registry = release.Registry{}
