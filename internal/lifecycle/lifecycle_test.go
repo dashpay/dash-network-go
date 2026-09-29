@@ -652,3 +652,65 @@ func privateTargets(in []node.Target) []node.Target {
 	}
 	return out
 }
+
+func TestCoreOnlyDeployStopsBeforePlatformAndResumes(t *testing.T) {
+	p, r, _, f := setup(t)
+	r.CoreOnly = true
+	a, err := execute(t, p, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Deployment.Phase != "deploying" || a.Deployment.Stage != "quorums" {
+		t.Fatal("core-only deploy did not stop at the quorum wait", a.Deployment.Phase, a.Deployment.Stage)
+	}
+	mining := false
+	for _, q := range f.calls {
+		mining = mining || q.Action == "mine-start"
+		if q.Action == "platform-start" {
+			t.Fatal("Platform started by a core-only deploy")
+		}
+	}
+	if !mining {
+		t.Fatal("core-only deploy left Core without a miner")
+	}
+	r.CoreOnly = false
+	b, err := execute(t, p, r)
+	if err != nil || b.Deployment.Phase != "network-ready" {
+		t.Fatal("deploy did not resume to Platform", err)
+	}
+}
+
+func TestBlockTimeIsAPlanParameter(t *testing.T) {
+	p, r, s, _ := setup(t)
+	if p.MiningIntervalSeconds != DefaultBlockSeconds {
+		t.Fatal("default block time changed", p.MiningIntervalSeconds)
+	}
+	rehash := func(q Plan) Plan { q.ID = ""; q.ID = hash(q); return q }
+	for _, seconds := range []int{MinBlockSeconds - 1, MaxBlockSeconds + 1} {
+		q := p
+		q.MiningIntervalSeconds = seconds
+		if rehash(q).Validate() == nil {
+			t.Fatal("unsupported block time accepted", seconds)
+		}
+	}
+	slow := p
+	slow.MiningIntervalSeconds = 150
+	slow = rehash(slow)
+	if err := slow.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if q := slow.Request(slow.Targets[0], "core-status"); q.Context.MiningIntervalSeconds != 150 {
+		t.Fatal("block time not sent to nodes")
+	}
+	if _, err := execute(t, slow, r); err != nil {
+		t.Fatal(err)
+	}
+	// Two samples 20ms apart cannot both see a new 150-second block.
+	r.ObservationWindow = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	health, _ := r.Doctor(ctx, slow, s.record)
+	if health.ObservationWindow != "6m15s" {
+		t.Fatal("observation window not stretched for a slow chain", health.ObservationWindow)
+	}
+}

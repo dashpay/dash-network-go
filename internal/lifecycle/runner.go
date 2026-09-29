@@ -27,6 +27,10 @@ type Runner struct {
 	ObservationWindow time.Duration
 	// Tests inject a clock wait; production uses context-aware timers.
 	Wait func(context.Context) error
+	// CoreOnly ends a deploy once Core is mining with DKG enabled. Quorums then
+	// form without further action; a later deploy of the same plan resumes at
+	// the quorum wait and starts Platform.
+	CoreOnly bool
 }
 
 type execution struct {
@@ -469,6 +473,10 @@ func (e *execution) deploy() error {
 	}
 	if err = e.stage("quorums"); err != nil {
 		return err
+	}
+	if e.runner.CoreOnly {
+		e.report("Core is mining with DKG enabled; quorums form on their own. Deploy again with the same plan to start Platform after them.")
+		return nil
 	}
 	for {
 		ready := true

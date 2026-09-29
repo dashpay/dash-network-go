@@ -88,6 +88,11 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	if window < 0 {
 		return h, errors.New("health observation window must be positive")
 	}
+	// Both samples must see a new Core block: on chains slower than the
+	// default, stretch the window to two and a half block intervals.
+	if blocks := time.Duration(p.MiningIntervalSeconds) * 5 * time.Second / 2; p.MiningIntervalSeconds > DefaultBlockSeconds && window < blocks {
+		window = blocks
+	}
 	h.ObservationWindow = window.String()
 	if err := p.Validate(); err != nil {
 		return h, err

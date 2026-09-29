@@ -61,7 +61,18 @@ type Options struct {
 	// ACMEIssuer and ACMEEmail request trusted gateway certificates from the
 	// release lock's acme image; requires public addresses.
 	ACMEIssuer, ACMEEmail string
+	// BlockSeconds is the Core block interval: Core's powtargetspacing and the
+	// miner's cadence. Zero keeps the default.
+	BlockSeconds int
 }
+
+// DefaultBlockSeconds and the supported range of Core block intervals. DKG,
+// ChainLock and upgrade timing follow powtargetspacing.
+const (
+	DefaultBlockSeconds = 10
+	MinBlockSeconds     = 5
+	MaxBlockSeconds     = 600
+)
 
 // DefaultPremineHeight matches the legacy devnet tooling.
 const DefaultPremineHeight = 4032
@@ -88,7 +99,10 @@ func BuildWith(b bootstrap.Plan, live map[string]types.Instance, o Options, prot
 	if err := b.Validate(); err != nil {
 		return Plan{}, err
 	}
-	p := Plan{APIVersion: spec.Version, Kind: "DevnetDeploymentPlan", Bootstrap: b, Profile: Profile, RecipeSHA256: node.RecipeDigest(), InitialProtocolVersion: protocol, MiningIntervalSeconds: 10, PremineHeight: DefaultPremineHeight, GenesisTime: now.UTC()}
+	p := Plan{APIVersion: spec.Version, Kind: "DevnetDeploymentPlan", Bootstrap: b, Profile: Profile, RecipeSHA256: node.RecipeDigest(), InitialProtocolVersion: protocol, MiningIntervalSeconds: DefaultBlockSeconds, PremineHeight: DefaultPremineHeight, GenesisTime: now.UTC()}
+	if o.BlockSeconds != 0 {
+		p.MiningIntervalSeconds = o.BlockSeconds
+	}
 	p.CoreNetwork = fmt.Sprintf("%s-g%d", strings.TrimPrefix(b.Compute.Network.Metadata.Name, "devnet-"), b.Compute.Network.Chain.Generation)
 	p.PlatformChainID = "dash-devnet-" + p.CoreNetwork
 	if public != nil {
@@ -137,7 +151,7 @@ func (p Plan) Validate() error {
 	if p.ID != hash(copy) || p.APIVersion != spec.Version || p.Kind != "DevnetDeploymentPlan" || p.Profile != Profile || p.RecipeSHA256 != node.RecipeDigest() {
 		return errors.New("deployment plan altered or node recipe changed; retain exact plan/binary")
 	}
-	if p.InitialProtocolVersion < 1 || p.InitialProtocolVersion > 100 || p.GenesisTime.IsZero() || p.MiningIntervalSeconds != 10 || p.PremineHeight < 0 || p.PremineHeight > 20000 {
+	if p.InitialProtocolVersion < 1 || p.InitialProtocolVersion > 100 || p.GenesisTime.IsZero() || p.MiningIntervalSeconds < MinBlockSeconds || p.MiningIntervalSeconds > MaxBlockSeconds || p.PremineHeight < 0 || p.PremineHeight > 20000 {
 		return errors.New("explicit protocol version (1..100), genesis time and supported mining policy required")
 	}
 	coreNetwork := fmt.Sprintf("%s-g%d", strings.TrimPrefix(p.Bootstrap.Compute.Network.Metadata.Name, "devnet-"), p.Bootstrap.Compute.Network.Chain.Generation)

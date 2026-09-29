@@ -421,14 +421,23 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	return
 }
 
-func quietDKG(height int64) bool { return height%24 >= 13 && height%24 <= 14 }
+// quietDKG is the part of the 24-block DKG cycle with no session running:
+// every devnet session (including both rotation indexes) has finalized by
+// block 13, and the next starts at 24. Mining stays paused while a validator
+// is replaced, so no block (and no session) follows until it is back.
+func quietDKG(height int64) bool { return height%24 >= 13 && height%24 <= 23 }
 
-// pauseMiningQuietly waits for the quiet part of the 24-block DKG cycle
-// (sessions end by block 12; the next starts at 24), then pauses the miner.
-// A block mined between the observation and the pause is caught by checking
-// the stopped height; mining then resumes until the next window.
+// cycleWait bounds a wait for a given part of the DKG cycle: a whole cycle at
+// this network's block interval, and never less than ten minutes.
+func (e *execution) cycleWait() time.Duration {
+	return max(10*time.Minute, time.Duration(26*e.p.MiningIntervalSeconds)*time.Second)
+}
+
+// pauseMiningQuietly waits for the quiet part of the DKG cycle, then pauses
+// the miner. A block mined between the observation and the pause is caught by
+// checking the stopped height; mining then resumes until the next window.
 func (e *execution) pauseMiningQuietly() error {
-	deadline := time.Now().Add(10 * time.Minute)
+	deadline := time.Now().Add(e.cycleWait())
 	for {
 		o, err := e.call(e.p.Miner(), "core-status", nil)
 		if err == nil && o.Core != nil && quietDKG(o.Core.Height) {

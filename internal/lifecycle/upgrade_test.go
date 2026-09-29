@@ -527,7 +527,13 @@ func TestCoreUpgradePausesMiningAroundEachValidatorAtAQuietHeight(t *testing.T) 
 		want = append(want, "mine-pause", "upgrade-apply:validator", "mine-start")
 	}
 	want = append(want, "upgrade-apply:wallet")
-	if strings.Join(seq, ",") != strings.Join(want, ",") {
+	// A pause that lands past the quiet window resumes and retries: drop
+	// those pairs, which bracket no replacement.
+	joined := strings.Join(seq, ",")
+	for strings.Contains(joined, "mine-pause,mine-start,") {
+		joined = strings.Replace(joined, "mine-pause,mine-start,", "", 1)
+	}
+	if joined != strings.Join(want, ",") {
 		t.Fatal("mining not paused around validator Core replacements:", seq)
 	}
 	for _, q := range f.remote.calls {
