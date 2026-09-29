@@ -21,7 +21,8 @@ The current profiles are:
   a ban). Once synced it therefore disconnects its peers once and waits (up to 5
   minutes) for an MNAUTH-verified link to every valid member of its quorums. Because DKG sessions advance only with blocks and the devnet's miner is
   dash-network-go's own, the runner waits for the quiet part of the 24-block DKG
-  cycle (height mod 24 in 13..14), **pauses mining** while that validator's Core
+  cycle (height mod 24 in 13..23: every devnet session has finalized by block 13
+  and the next starts at 24), **pauses mining** while that validator's Core
   is replaced, waits until it is READY and connected (at least 30 seconds), then resumes mining: no DKG
   session can start while it is away, so it is not PoSe-punished. (A restart
   timed only by height was observed to miss a session.) A Platform quorum that

@@ -214,6 +214,38 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
             w.activate()
 
+    def test_block_time_sets_core_spacing_and_miner_cadence(self):
+        class Miner(worker.Worker):
+            def __init__(self, q, root):
+                super().__init__(q, root, root / "lock")
+                self.services = None
+
+            def read(self, path, default=None):
+                return dict(rpcPassword="p") if path == "secrets.json" else default
+
+            def atomic(self, relative, value, private=True):
+                pass
+
+            def compose(self, component, services):
+                self.services = services
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for seconds in [10, 150]:
+                q = request()
+                q["target"].update(role="wallet", name="wallet-1")
+                q["context"]["miningIntervalSeconds"] = seconds
+                q["payoutAddress"] = "y" + "1" * 33
+                w = Miner(q, Path(tmp))
+                w.mine_start()
+                command = w.services["miner"]["command"][0]
+                self.assertIn("sleep %d & wait $!" % seconds, command)
+                self.assertTrue(command.startswith("trap 'exit 0' TERM INT;"))
+                self.assertEqual(w.block_seconds(), seconds)
+            for seconds in [4, 601, "10"]:
+                w.c["miningIntervalSeconds"] = seconds
+                with self.assertRaisesRegex(worker.Failure, "mining-interval"):
+                    w.block_seconds()
+
     def test_fast_forward_mines_rotation_cycles_only_before_dkg(self):
         class Chain(worker.Worker):
             height, dkg, batches = 4050, False, []
@@ -290,6 +322,15 @@ class Tests(unittest.TestCase):
             w.calls = []
             w.fund()
             self.assertEqual(w.calls, [])
+            # Short of funds once DKG runs: refuse rather than burst-mine.
+            w.q["requiredBalance"] = 4001
+            nearly_empty = [dict(txid="t", vout=0, amount=500, spendable=True, safe=True)]
+            w.rpc = lambda method, params=None, wallet=False: (
+                {"SPORK_17_QUORUM_DKG_ENABLED": True} if method == "spork" else
+                nearly_empty if method == "listunspent" else Chain.rpc(w, method, params, wallet))
+            with self.assertRaisesRegex(worker.Failure, "funding-needs-mining-after-dkg"):
+                w.fund()
+            self.assertEqual(w.calls, [])
 
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -334,6 +375,10 @@ class Tests(unittest.TestCase):
             q["context"]["corePeers"] = ["198.51.100.10:20001", "198.51.100.11:20001"]
             w = worker.Worker(q, Path(tmp), Path(tmp) / "lock")
             self.assertIn("allowprivatenet=1\n", w.core_config())
+            self.assertIn("powtargetspacing=10\n", w.core_config(), "default config unchanged")
+            w.c["miningIntervalSeconds"] = 150
+            self.assertIn("powtargetspacing=150\n", w.core_config())
+            w.c["miningIntervalSeconds"] = 10
             q["context"]["advertise"] = "public"
             config = worker.Worker(q, Path(tmp), Path(tmp) / "lock").core_config()
             self.assertIn("allowprivatenet=0\n", config)

@@ -97,14 +97,15 @@ class UpgradeWorker(Worker):
             time.sleep(3)
 
     def wait_dkg_quiet(self, pin):
-        """Restart a validator's Core only early in the quiet part of the
-        24-block DKG cycle (sessions end by block 12; the next starts at 24), so
-        the node is back before its quorums' next contribution phase (PoSe)."""
-        deadline = time.monotonic() + 600
+        """Restart a validator's Core only in the quiet part of the 24-block DKG
+        cycle: every session has finalized by block 13 and the next starts at
+        24. The runner pauses mining first, so no block follows until the
+        replaced node is back and connected (a session it missed means PoSe)."""
+        deadline = time.monotonic() + max(600, 26 * self.block_seconds())
         while True:
             try:
                 height = self.core_observe(pin)["height"]
-                if 13 <= height % 24 <= 14:
+                if 13 <= height % 24 <= 23:
                     return height
             except Failure as error:
                 if str(error) in PERMANENT:

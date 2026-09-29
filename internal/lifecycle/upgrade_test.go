@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
@@ -527,7 +528,13 @@ func TestCoreUpgradePausesMiningAroundEachValidatorAtAQuietHeight(t *testing.T) 
 		want = append(want, "mine-pause", "upgrade-apply:validator", "mine-start")
 	}
 	want = append(want, "upgrade-apply:wallet")
-	if strings.Join(seq, ",") != strings.Join(want, ",") {
+	// A pause that lands past the quiet window resumes and retries: drop
+	// those pairs, which bracket no replacement.
+	joined := strings.Join(seq, ",")
+	for strings.Contains(joined, "mine-pause,mine-start,") {
+		joined = strings.Replace(joined, "mine-pause,mine-start,", "", 1)
+	}
+	if joined != strings.Join(want, ",") {
 		t.Fatal("mining not paused around validator Core replacements:", seq)
 	}
 	for _, q := range f.remote.calls {
@@ -548,5 +555,20 @@ func TestUpgradeAcceptsAPlatformQuorumAboveTheMinimum(t *testing.T) {
 	}
 	if _, err := f.run(t, u); err != nil {
 		t.Fatal("an 11-member Platform quorum stopped the upgrade:", err)
+	}
+}
+
+func TestCoreUpgradeRefusesFleetsWithLargerQuorumTypes(t *testing.T) {
+	f := upgradeSetup(t)
+	big := f.plan
+	big.Targets = nil
+	for i := range coreScopeValidatorLimit {
+		v := f.plan.Validators()[0]
+		v.Name = fmt.Sprintf("validators-%03d", i+1)
+		big.Targets = append(big.Targets, v)
+	}
+	candidate := f.plan.Bootstrap.Compute.Network
+	if _, err := upgradeTargets(big, candidate, testutil.Lock(t, candidate), nil, "core"); err == nil || !strings.Contains(err.Error(), "under 40 validators") {
+		t.Fatal("core scope accepted for a fleet that forms llmq_50_60 and larger", err)
 	}
 }

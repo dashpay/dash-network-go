@@ -393,7 +393,7 @@ class Worker:
             "minimumdifficultyblocks=1000000",
             "highsubsidyblocks=500",
             "highsubsidyfactor=100",
-            "powtargetspacing=10",
+            "powtargetspacing=" + str(self.block_seconds()),
         ]
         for name in [
             "rawtx",
@@ -630,6 +630,9 @@ class Worker:
             if balance >= target:
                 return dict(balance=balance)
             self.require(self.rpc("getblockcount") < limit, "bootstrap-mining-limit")
+            # Never burst-mine once DKG runs (a resumed deploy): members would
+            # be PoSe-punished for sessions they had no time to complete.
+            self.require(self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is False, "funding-needs-mining-after-dkg")
             self.rpc("generatetoaddress", [1, address, 1000000])
         raise Failure("funding-not-reached")
 
@@ -736,6 +739,11 @@ class Worker:
         self.require(all(observed.get(key) is True for key in required), "spork-not-active")
         return {}
 
+    def block_seconds(self):
+        interval = self.c["miningIntervalSeconds"]
+        self.require(isinstance(interval, int) and 8 <= interval <= 600, "mining-interval")
+        return interval
+
     def fast_forward(self):
         """Mine the cycles a rotated quorum waits for at minimum difficulty.
 
@@ -746,7 +754,7 @@ class Worker:
         EvoNodes registered. Block processing records those picks whether or not
         DKG runs. Before activation SPORK_17 is off: no DKG session exists and no
         member can be PoSe-punished, so those cycles need not take ten seconds
-        per block. Stop 6 blocks short of the forming cycle, which DKG then runs
+        per block. Stop about a minute short of the forming cycle, which DKG then runs
         at the normal pace (with every quorum type). Idempotent: the target
         follows from registration heights, and nothing is mined once DKG is on."""
         self.require(self.t["role"] == "wallet", "wallet-only")
@@ -754,7 +762,8 @@ class Worker:
         # own masternodes), never mine and never judge later registrations.
         if self.rpc("spork", ["active"]).get("SPORK_17_QUORUM_DKG_ENABLED", True) is not False:
             return self.core_status()
-        cycle, depth, quarters, lead = 48, 8 + 2, 3, 6
+        # Leave about a minute of normal blocks for sporks and mnsync.
+        cycle, depth, quarters, lead = 48, 8 + 2, 3, max(2, -(-60 // self.block_seconds()))
         registered = max(m["state"]["registeredHeight"] for m in self.rpc("protx", ["list", "registered", True]))
         forming = -(-(registered + depth + quarters * cycle) // cycle) * cycle
         target = forming - lead
@@ -780,8 +789,7 @@ class Worker:
         self.require(self.t["role"] in ["miner", "wallet"], "miner-only")
         address = self.q["payoutAddress"]
         self.require(address.isalnum() and 26 <= len(address) <= 40, "mining-payout")
-        interval = self.c["miningIntervalSeconds"]
-        self.require(interval == 10, "mining-interval")
+        interval = self.block_seconds()
         secret = self.read("secrets.json")
         rpc_config = (
             "\n".join(
@@ -805,7 +813,7 @@ class Worker:
             command=[
                 "trap 'exit 0' TERM INT; while true; do dash-cli -datadir=/tmp -conf=/etc/dash/dash.conf generatetoaddress 1 "
                 + address
-                + " 1000000 >/dev/null 2>&1; sleep 10 & wait $!; done"
+                + " 1000000 >/dev/null 2>&1; sleep " + str(interval) + " & wait $!; done"
             ],
             volumes=[str(self.root / "miner/rpc.conf") + ":/etc/dash/dash.conf:ro"],
         )

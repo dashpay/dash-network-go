@@ -27,6 +27,10 @@ type Runner struct {
 	ObservationWindow time.Duration
 	// Tests inject a clock wait; production uses context-aware timers.
 	Wait func(context.Context) error
+	// CoreOnly ends a deploy once Core is mining with DKG enabled. Quorums then
+	// form without further action; a later deploy of the same plan resumes at
+	// the quorum wait and starts Platform.
+	CoreOnly bool
 }
 
 type execution struct {
@@ -394,11 +398,14 @@ func (e *execution) deploy() error {
 	}
 	for _, t := range p.Validators() {
 		// Funding/registration is deliberately serial on one wallet. Each signed
-		// transaction is durable on that wallet before sendrawtransaction.
-		if _, err = e.call(p.Wallet(), "fund", func(q *node.Request) { q.RequiredBalance = 4001 }); err != nil {
-			return err
-		}
+		// transaction is durable on that wallet before sendrawtransaction. A
+		// registered validator needs no funds: its registration is read back.
 		n := d.Nodes[t.Name]
+		if n.ProTxHash == "" {
+			if _, err = e.call(p.Wallet(), "fund", func(q *node.Request) { q.RequiredBalance = 4001 }); err != nil {
+				return err
+			}
+		}
 		peer := node.Peer{Name: t.Name, Address: t.PeerAddress, NodeID: n.PlatformNodeID, OperatorPublicKey: n.OperatorPublicKey}
 		var o node.Observation
 		o, err = e.call(p.Wallet(), "register", func(q *node.Request) { q.Registration = &peer; q.RequiredConfirmations = 1 })
@@ -469,6 +476,10 @@ func (e *execution) deploy() error {
 	}
 	if err = e.stage("quorums"); err != nil {
 		return err
+	}
+	if e.runner.CoreOnly {
+		e.report("Core is mining with DKG enabled; quorums form on their own. Deploy again with the same plan to start Platform after them.")
+		return nil
 	}
 	for {
 		ready := true

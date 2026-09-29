@@ -349,12 +349,12 @@ class CoreUpgradeReviewTests(unittest.TestCase):
     def test_validator_core_stops_only_in_the_quiet_dkg_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             w = CoreFixture(Path(tmp))
-            w.heights = [13, 20, 23, 0, 5, 12, 14]
+            w.heights = [24, 29, 36, 44]  # 0, 5, 12 are session blocks; 20 is quiet
             with mock.patch.object(scope['time'], 'sleep', lambda s: None):
                 w.execute()
             stop = next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('core') in c)
             last_height = max(i for i, c in enumerate(w.commands[:stop]) if c[0] == 'height')
-            self.assertIn(w.commands[last_height][1] % 24, range(13, 15), 'Core stopped outside the quiet window')
+            self.assertEqual(w.commands[last_height][1], 44, 'Core stopped outside the quiet window')
             self.assertLess(next(i for i, c in enumerate(w.commands) if c[0] == 'stop' and w.container_name('tenderdash') in c), stop, 'Platform withdrawn first')
 
     def test_validator_reconnects_once_synced_and_waits_for_every_quorum_link(self):

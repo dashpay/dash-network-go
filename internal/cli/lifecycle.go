@@ -32,7 +32,8 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	var path, bootstrapPath, profile, output, confirm, keyPath, hostsPath string
 	var candidatePath, lockPath, scope, advertise, gatewayTLS, acmeEmail string
 	var timeout, observationWindow time.Duration
-	var protocol uint
+	var protocol, blockSeconds uint
+	var coreOnly bool
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
@@ -43,6 +44,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&advertise, "advertise", "auto", "service addresses to register: public (IPAM Elastic IPs), private (VPC), or auto (public when every host has an IPAM address)")
 		fs.StringVar(&gatewayTLS, "gateway-tls", "auto", "gateway certificates: letsencrypt, letsencrypt-staging, self-signed, or auto (letsencrypt with public addresses, an acme image and --acme-email)")
 		fs.StringVar(&acmeEmail, "acme-email", "", "ACME account contact for trusted gateway certificates")
+		fs.UintVar(&blockSeconds, "block-time", lifecycle.DefaultBlockSeconds, fmt.Sprintf("Core block interval in seconds (%d..%d): powtargetspacing and the miner's cadence", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds))
 	} else if args[0] == "upgrade-plan" {
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
@@ -54,6 +56,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&hostsPath, "known-hosts", "", "verified instance-scoped SSH host keys")
 		if args[0] != "doctor" {
 			fs.StringVar(&confirm, "confirm", "", "exact operation plan ID authorizing this action")
+		}
+		if args[0] == "deploy" {
+			fs.BoolVar(&coreOnly, "core-only", false, "stop once Core is mining with DKG enabled; quorums then form on their own, and deploy again (same plan) starts Platform after them")
 		}
 	}
 	if err := fs.Parse(args[1:]); err != nil {
@@ -82,6 +87,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		}
 		if gatewayTLS != "auto" && gatewayTLS != "self-signed" && node.ACMEIssuers[gatewayTLS] == "" {
 			return errors.New("--gateway-tls must be auto, self-signed, letsencrypt or letsencrypt-staging")
+		}
+		if blockSeconds < lifecycle.MinBlockSeconds || blockSeconds > lifecycle.MaxBlockSeconds {
+			return fmt.Errorf("--block-time must be %d..%d seconds", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds)
 		}
 		if err := files.ReadJSON(bootstrapPath, &b); err != nil {
 			return err
@@ -130,6 +138,10 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		}
 		if err := p.Validate(); err != nil {
 			return err
+		}
+		// Doctor stretches the window to 2.5 blocks on slower chains.
+		if effective := max(observationWindow, time.Duration(p.MiningIntervalSeconds)*5*time.Second/2); p.MiningIntervalSeconds > lifecycle.DefaultBlockSeconds && effective >= timeout && args[0] != "stop" {
+			return fmt.Errorf("--timeout must exceed the %s observation window this %ds-block chain needs", effective, p.MiningIntervalSeconds)
 		}
 		b = p.Bootstrap
 		expectedID := p.ID
@@ -195,7 +207,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		} else if public == nil {
 			return errors.New("--advertise public requires an IPAM Elastic IP on every host")
 		}
-		opts := lifecycle.Options{Public: public}
+		opts := lifecycle.Options{Public: public, BlockSeconds: int(blockSeconds)}
 		if gatewayTLS == "auto" && public != nil && acmeEmail != "" && hasImage(b, "acme") {
 			gatewayTLS = "letsencrypt"
 		}
@@ -223,6 +235,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
 	runner.ObservationWindow = observationWindow
+	runner.CoreOnly = coreOnly
 	if args[0] == "upgrade-plan" {
 		if owner != "" {
 			return errors.New("network has an active runner; finish or recover it before upgrade planning")
