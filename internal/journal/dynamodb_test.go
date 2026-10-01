@@ -21,6 +21,7 @@ type database struct {
 	losePutResponse bool
 	saves           int
 	reads           int
+	claimResponse   func(*dynamodb.UpdateItemOutput) (*dynamodb.UpdateItemOutput, error)
 }
 
 func clone(in map[string]types.AttributeValue) map[string]types.AttributeValue {
@@ -104,7 +105,11 @@ func (d *database) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _
 	default:
 		return nil, errors.New("unexpected update")
 	}
-	return &dynamodb.UpdateItemOutput{Attributes: clone(d.item)}, nil
+	out := &dynamodb.UpdateItemOutput{Attributes: clone(d.item)}
+	if aws.ToString(in.UpdateExpression) == "SET #owner = :owner" && d.claimResponse != nil {
+		return d.claimResponse(out)
+	}
+	return out, nil
 }
 func setup(t *testing.T) (Dynamo, *database, provision.Plan) {
 	t.Helper()

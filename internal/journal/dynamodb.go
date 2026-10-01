@@ -88,6 +88,10 @@ func encode(r provision.Record) (string, error) {
 	return string(b), nil
 }
 func decode(item map[string]types.AttributeValue, p provision.Plan) (provision.Record, error) {
+	return decodeRecord(item, p, provision.Record.Validate)
+}
+
+func decodeRecord(item map[string]types.AttributeValue, p provision.Plan, validate func(provision.Record, provision.Plan) error) (provision.Record, error) {
 	if value(item, "Network") != p.Key() || value(item, "PlanID") != p.ID {
 		return provision.Record{}, errors.New("network is already bound to a different plan; no automatic reset, replacement, or state deletion")
 	}
@@ -109,21 +113,29 @@ func decode(item map[string]types.AttributeValue, p provision.Plan) (provision.R
 	if !ok || revision.Value != strconv.FormatInt(r.Revision, 10) {
 		return r, errors.New("journal revision mismatch")
 	}
-	return r, r.Validate(p)
+	return r, validate(r, p)
 }
 
 // Read is strongly consistent so a resume never relies on an eventually
 // consistent lock read. Conditional writes remain the actual exclusion gate.
 func (d Dynamo) Read(ctx context.Context, p provision.Plan) (provision.Record, string, error) {
-	out, err := d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: key(p), ConsistentRead: aws.Bool(true)})
+	item, err := d.readItem(ctx, p)
 	if err != nil {
 		return provision.Record{}, "", err
 	}
-	if out == nil || len(out.Item) == 0 {
-		return provision.Record{}, "", ErrNotFound
+	r, err := decode(item, p)
+	return r, value(item, "Owner"), err
+}
+
+func (d Dynamo) readItem(ctx context.Context, p provision.Plan) (map[string]types.AttributeValue, error) {
+	out, err := d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: key(p), ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return nil, err
 	}
-	r, err := decode(out.Item, p)
-	return r, value(out.Item, "Owner"), err
+	if out == nil || len(out.Item) == 0 {
+		return nil, ErrNotFound
+	}
+	return out.Item, nil
 }
 func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (provision.Record, error) {
 	if owner == "" {
@@ -150,20 +162,33 @@ func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (pr
 	if _, _, err = d.Read(ctx, p); err != nil {
 		return r, err
 	}
+	claimed, err := d.claim(ctx, p, owner)
+	if err != nil {
+		return r, err
+	}
+	return decode(claimed, p)
+}
+
+// claim is the same non-expiring conditional gate for active execution and
+// address retirement; neither path can steal or refresh another runner's claim.
+func (d Dynamo) claim(ctx context.Context, p provision.Plan, owner string) (map[string]types.AttributeValue, error) {
 	out, err := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(d.Table), Key: key(p), UpdateExpression: aws.String("SET #owner = :owner"), ConditionExpression: aws.String("#plan = :plan AND attribute_not_exists(#owner)"),
 		ExpressionAttributeNames: map[string]string{"#owner": "Owner", "#plan": "PlanID"}, ExpressionAttributeValues: map[string]types.AttributeValue{":owner": str(owner), ":plan": str(p.ID)}, ReturnValues: types.ReturnValueAllNew,
 	})
 	if conditional(err) {
-		return r, errors.New("network already has an active runner claim; inspect operation; claims never expire automatically")
+		return nil, errors.New("network already has an active runner claim; inspect operation; claims never expire automatically")
 	}
 	if err != nil {
-		return r, err
+		return nil, err
 	}
 	if out == nil {
-		return r, errors.New("empty claim response; inspect operation before retrying")
+		return nil, errors.New("empty claim response; inspect operation before retrying")
 	}
-	return decode(out.Attributes, p)
+	if value(out.Attributes, "Owner") != owner {
+		return nil, errors.New("claim response owner mismatch; inspect operation before retrying")
+	}
+	return out.Attributes, nil
 }
 func (d Dynamo) Save(ctx context.Context, r provision.Record, owner string) error {
 	if owner == "" {
@@ -176,10 +201,14 @@ func (d Dynamo) Save(ctx context.Context, r provision.Record, owner string) erro
 	if err != nil {
 		return err
 	}
+	return d.save(ctx, r, owner, data)
+}
+
+func (d Dynamo) save(ctx context.Context, r provision.Record, owner, data string) error {
 	// AWS may commit a write before its acknowledgement is lost. An SDK retry
 	// of the exact accepted payload is a no-op, not a conflicting checkpoint.
 	// A later revision, different data, different plan or new owner still fails.
-	_, err = d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner AND (#revision = :previous OR (#revision = :next AND #data = :data))"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner", "#revision": "Revision"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner), ":next": number(r.Revision), ":previous": number(r.Revision - 1)}})
+	_, err := d.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(d.Table), Key: key(r.Plan), UpdateExpression: aws.String("SET #data = :data, #revision = :next"), ConditionExpression: aws.String("#plan = :plan AND #owner = :owner AND (#revision = :previous OR (#revision = :next AND #data = :data))"), ExpressionAttributeNames: map[string]string{"#data": "Data", "#plan": "PlanID", "#owner": "Owner", "#revision": "Revision"}, ExpressionAttributeValues: map[string]types.AttributeValue{":data": str(data), ":plan": str(r.Plan.ID), ":owner": str(owner), ":next": number(r.Revision), ":previous": number(r.Revision - 1)}})
 	if conditional(err) {
 		return errors.New("runner ownership or journal revision changed; stale write refused")
 	}
