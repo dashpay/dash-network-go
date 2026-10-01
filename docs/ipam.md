@@ -70,6 +70,19 @@ never reused); a failed read or any other answer fails closed. A cleanup that
 stopped before releasing therefore stays resumable. Stopped instances do not
 qualify. It will never release an address from a still-running server.
 
+Address retirement uses an existing-journal-only store and validates the immutable
+compute plan, journal schema/revision/timestamps, target identities and address
+checkpoints separately from application execution. Historical bootstrap,
+deployment, join, runtime and upgrade fields are retained byte-for-byte as JSON
+values on every cleanup checkpoint; cleanup cannot edit them. For example, a
+wallet recorded by an older release with only a Core runtime image can be retired
+without fabricating a helper digest or migrating its interrupted upgrade history.
+Normal provisioning, bootstrap, deployment, join and upgrade journal validation
+remains strict against current component requirements. Cleanup also verifies the
+configured IPAM pool's account, region and public BYOIP ownership before proceeding.
+Unknown fields, malformed JSON, changed plans, foreign ownership, stale revisions
+and competing runner claims remain errors. This is not a generic validation bypass.
+
 EC2 also detaches an instance's Elastic IP a little after the instance reports
 `terminated`; run the command once the addresses show no association.
 

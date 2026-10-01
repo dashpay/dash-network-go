@@ -150,7 +150,7 @@ func runProvision(ctx context.Context, args []string, out, stderr io.Writer, ver
 		owner := hex.EncodeToString(random[:])
 		if command == "release-addresses" {
 			fmt.Fprintln(stderr, "runner:", owner)
-			r, err := provision.ReleaseAddresses(ctx, p, identity, cloud, store, owner)
+			r, err := provision.ReleaseAddresses(ctx, p, identity, cloud, store.AddressCleanup(), owner)
 			if err != nil {
 				return err
 			}

@@ -13,6 +13,32 @@ import (
 	"github.com/dashpay/dash-network-go/internal/inventory"
 )
 
+// ValidateAddressCleanup validates only the allocation evidence used for detached
+// address retirement. Historical application metadata is not execution authority
+// here: newer component requirements must not block cleanup of a terminated fleet.
+// The cleanup store must preserve that metadata rather than migrate or erase it.
+func (r Record) ValidateAddressCleanup(p Plan) error {
+	if err := r.validateCompute(p); err != nil {
+		return err
+	}
+	instances, addresses := map[string]bool{}, map[string]bool{}
+	for _, n := range r.Nodes {
+		if n.InstanceID != "" {
+			if instances[n.InstanceID] {
+				return errors.New("duplicate cleanup journal instance")
+			}
+			instances[n.InstanceID] = true
+		}
+		if n.Address != nil && n.Address.AllocationID != "" {
+			if addresses[n.Address.AllocationID] {
+				return errors.New("duplicate cleanup journal allocation")
+			}
+			addresses[n.Address.AllocationID] = true
+		}
+	}
+	return nil
+}
+
 type addressReleaser interface {
 	IPAM
 	ReleaseAddress(context.Context, *ec2.ReleaseAddressInput, ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error)
@@ -75,6 +101,9 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 	if err = VerifyAccount(ctx, p.Network.AWS.AccountID, identity); err != nil {
 		return
 	}
+	if err = verifyPool(ctx, p.Network, c); err != nil {
+		return
+	}
 	r, err := store.Acquire(ctx, p, owner)
 	if err != nil {
 		return result, err
@@ -82,7 +111,7 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err != nil && r.Validate(p) == nil && r.Phase != "addresses-released" {
+		if err != nil && r.ValidateAddressCleanup(p) == nil && r.Phase != "addresses-released" {
 			r.Phase = "interrupted"
 			r.LastError = err.Error()
 			r.UpdatedAt = time.Now().UTC()
@@ -96,7 +125,7 @@ func ReleaseAddresses(ctx context.Context, p Plan, identity inventory.STS, cloud
 		}
 		result = r
 	}()
-	if err = r.Validate(p); err != nil {
+	if err = r.ValidateAddressCleanup(p); err != nil {
 		return
 	}
 	if r.Phase == "addresses-released" {

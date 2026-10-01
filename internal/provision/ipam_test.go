@@ -504,3 +504,35 @@ func TestIPAMStaleUnknownAllocationIsRetriedOnlyWhenNoTaggedAddressExists(t *tes
 		t.Fatal("stale intent not reconciled to exactly one address per target", len(c.addresses))
 	}
 }
+
+func TestIPAMReleaseVerifiesPoolOwnershipBeforeClaim(t *testing.T) {
+	for _, fault := range []string{"owner", "region", "source", "state", "family", "scope"} {
+		t.Run(fault, func(t *testing.T) {
+			p, c, s := ipamSetup(t)
+			if _, err := ipamRun(p, c, s); err != nil {
+				t.Fatal(err)
+			}
+			terminateFixture(c)
+			before := s.record.Revision
+			c.poolHook = func(pool *types.IpamPool) {
+				switch fault {
+				case "owner":
+					pool.OwnerId = aws.String("000000000000")
+				case "region":
+					pool.Locale = aws.String("us-east-1")
+				case "source":
+					pool.PublicIpSource = "amazon"
+				case "state":
+					pool.State = "delete-in-progress"
+				case "family":
+					pool.AddressFamily = "ipv6"
+				case "scope":
+					pool.IpamScopeType = "private"
+				}
+			}
+			if _, err := ipamRelease(p, c, s); err == nil || c.releases != 0 || s.owner != "" || s.record.Revision != before {
+				t.Fatal("pool validation did not fail before claim/mutation", err)
+			}
+		})
+	}
+}

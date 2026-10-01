@@ -49,6 +49,24 @@ func NewRecord(p Plan) Record {
 }
 
 func (r Record) Validate(p Plan) error {
+	if err := r.validateCompute(p); err != nil {
+		return err
+	}
+	if err := r.validateBootstrap(p); err != nil {
+		return err
+	}
+	if err := r.validateDeployment(p); err != nil {
+		return err
+	}
+	if err := r.validateJoin(p); err != nil {
+		return err
+	}
+	return r.validateUpgrade(p)
+}
+
+// validateCompute is the shared immutable allocation/journal boundary. Application
+// validators are layered on it by Validate, never weakened for active execution.
+func (r Record) validateCompute(p Plan) error {
 	if err := r.Plan.Validate(); err != nil {
 		return err
 	}
@@ -88,16 +106,7 @@ func (r Record) Validate(p Plan) error {
 			return errors.New("retired allocation retains unfinished address state")
 		}
 	}
-	if err := r.validateBootstrap(p); err != nil {
-		return err
-	}
-	if err := r.validateDeployment(p); err != nil {
-		return err
-	}
-	if err := r.validateJoin(p); err != nil {
-		return err
-	}
-	return r.validateUpgrade(p)
+	return nil
 }
 
 // Store serializes CLI and Actions through a non-expiring owner claim. The same
