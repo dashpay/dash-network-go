@@ -27,6 +27,8 @@ type Runner struct {
 	ReadyTimeout time.Duration
 	Progress     func(string)
 	Wait         func(context.Context, time.Duration) error
+	// Set only by the fleet controller while verified owned leases are held.
+	fleetPaused bool
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -208,7 +210,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 	}()
 	// Recover an owned pause after controller loss, never a foreign pause.
-	if len(miningTargets(p)) > 0 {
+	if len(miningTargets(p)) > 0 && !fleetPause(p) {
 		if err = r.resumeMining(p); err != nil {
 			return
 		}
@@ -258,6 +260,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			record.Completed[t.Name] = len(p.Images[t.Name]) == 0
 		}
 		mutated = true
+		record.MiningPhase = ""
 		if err = save(); err != nil {
 			return
 		}
@@ -279,6 +282,9 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if len(p.Images[t.Name]) == 0 {
 			continue
 		}
+		if fleetPause(p) && record.MiningPhase != "" {
+			continue
+		} // Staged before pause intent was saved.
 		q := request(f, t, "stage")
 		v := p.Snapshot.Nodes[t.Name]
 		q.Expected = &v
@@ -289,6 +295,10 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if _, err = r.Remote.Call(ctx, q); err != nil {
 			return
 		}
+	}
+	if fleetPause(p) {
+		err = r.executeFleet(ctx, p, &record, save)
+		return
 	}
 	targets := slices.Clone(f.Targets)
 	if current := record.Current; current != "" {

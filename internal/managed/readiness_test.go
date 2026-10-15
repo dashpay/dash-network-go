@@ -115,7 +115,7 @@ func (b *miningBackend) Call(ctx context.Context, q Request) (Observation, error
 		return Observation{}, errors.New("failed restart")
 	}
 	if q.Action == "mining_pause" || q.Action == "mining_status" || q.Action == "mining_resume" {
-		return Observation{Mining: &MiningReceipt{OperationID: q.OperationID, Paused: b.paused, ExpiresAt: time.Now().Add(15 * time.Minute).Unix()}, Chain: Chain{CoreHeight: 100, CoreHash: h64("tip")}}, nil
+		return Observation{Mining: &MiningReceipt{OperationID: q.OperationID, Active: !b.paused, Paused: b.paused, ExpiresAt: time.Now().Add(15 * time.Minute).Unix()}, Chain: Chain{CoreHeight: 100, CoreHash: h64("tip")}}, nil
 	}
 	o, e := b.base.Call(ctx, q)
 	if q.CoreCheckpointHeight > 0 {

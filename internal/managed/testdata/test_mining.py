@@ -74,3 +74,48 @@ class MiningTest(unittest.TestCase):
    with self.assertRaisesRegex(w.Failure,'migration-dkg-active'):worker.migration_window({})
    worker.rpc=lambda selected,method,*args:24*100+13 if method=='getblockcount' else {'session':[{'status':{'phase':6}}]}
    worker.migration_window({})
+ def test_fleet_renew_arms_before_commit_and_old_timer_is_cancelled(self):
+  with tempfile.TemporaryDirectory() as root:
+   worker,state,run=self.fixture(root);worker.q['migration']['fleetMiningPause']=True
+   with patch.object(w,'run',run),patch.object(w.time,'sleep'):worker.mining_pause()
+   old=worker.read('mining-pause.json');state['calls']=[]
+   def renewed(args,**kwargs):
+    if args[0]=='systemd-run':
+     self.assertEqual(old,worker.read('mining-pause.json'))
+     compile(args[args.index('-c')+1],'<recovery>','exec')
+    state['calls'].append(args);return b''
+   with patch.object(w,'run',renewed):worker.mining_renew()
+   new=worker.read('mining-pause.json')
+   self.assertNotEqual(old['token'],new['token']);self.assertFalse(state['active'])
+   self.assertEqual(state['calls'][1],['systemctl','stop','dashnet-mining-'+old['token']+'.timer'])
+ def test_failed_renew_keeps_old_recovery_authoritative(self):
+  with tempfile.TemporaryDirectory() as root:
+   worker,state,run=self.fixture(root);worker.q['migration']['fleetMiningPause']=True
+   with patch.object(w,'run',run),patch.object(w.time,'sleep'):worker.mining_pause()
+   old=worker.read('mining-pause.json')
+   with patch.object(w,'run',side_effect=w.Failure('arm-failed')),self.assertRaisesRegex(w.Failure,'arm-failed'):worker.mining_renew()
+   self.assertEqual(old,worker.read('mining-pause.json'))
+ def test_expired_or_foreign_renew_cannot_reacquire(self):
+  for change in [{'expiresAt':0},{'operationId':'b'*64},{'serviceHash':'foreign'}]:
+   with tempfile.TemporaryDirectory() as root:
+    worker,state,run=self.fixture(root);worker.q['migration']['fleetMiningPause']=True
+    with patch.object(w,'run',run),patch.object(w.time,'sleep'):worker.mining_pause()
+    marker=worker.read('mining-pause.json');marker.update(change);worker.atomic('mining-pause.json',marker)
+    with patch.object(w,'run') as commands,self.assertRaisesRegex(w.Failure,'mining-lease-lost'):worker.mining_renew()
+    commands.assert_not_called()
+ def test_worker_dispatches_real_mining_lifecycle(self):
+  # Exercise execute(), not just direct method calls: the old dispatcher
+  # rejected every mining action although its methods passed unit tests.
+  with tempfile.TemporaryDirectory() as root:
+   worker,state,run=self.fixture(root);worker.q['migration']['fleetMiningPause']=True
+   worker.identity=lambda:None;worker.engine=object()
+   def local_open(path,*args,**kwargs):return open(Path(root)/'lock' if path=='/run/dashnet-managed.lock' else path,*args,**kwargs)
+   def commands(args,**kwargs):
+    if args[:2]==['systemctl','stop'] and args[-1].endswith('.timer'):return b''
+    return run(args,**kwargs)
+   with patch.object(w,'open',local_open,create=True),patch.object(w,'run',commands),patch.object(w.time,'sleep'):
+    for action in ['mining_pause','mining_status','mining_renew','mining_resume']:
+     worker.q['action']=action;worker.execute()
+   self.assertTrue(state['active']);self.assertFalse(worker.read('mining-pause.json')['paused'])
+   worker.q['action']='admit';worker.migration_window=lambda selected:None
+   with patch.object(w,'open',local_open,create=True):worker.execute()

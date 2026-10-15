@@ -46,7 +46,7 @@ func (r Runner) resumeMining(p Plan) error {
 	var result error
 	for _, t := range miningTargets(p) {
 		o, e := r.miningCall(ctx, p, t, "mining_resume")
-		if e == nil && (o.Mining == nil || o.Mining.Paused) {
+		if e == nil && (o.Mining == nil || o.Mining.Paused || !o.Mining.Active) {
 			e = errors.New("mining resume unverified")
 		}
 		if e != nil {

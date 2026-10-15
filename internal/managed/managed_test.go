@@ -77,7 +77,11 @@ func (c *cloud) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesIn
 		if c.foreign {
 			tag = "other"
 		}
-		r.Instances = append(r.Instances, ec2types.Instance{InstanceId: aws.String(t.InstanceID), PublicIpAddress: aws.String(t.Address), Architecture: ec2types.ArchitectureValuesX8664, State: &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning}, Tags: []ec2types.Tag{{Key: aws.String(c.f.NetworkTagKey), Value: aws.String(tag)}}})
+		arch := ec2types.ArchitectureValuesX8664
+		if t.Architecture == "arm64" {
+			arch = ec2types.ArchitectureValuesArm64
+		}
+		r.Instances = append(r.Instances, ec2types.Instance{InstanceId: aws.String(t.InstanceID), PublicIpAddress: aws.String(t.Address), Architecture: arch, State: &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning}, Tags: []ec2types.Tag{{Key: aws.String(c.f.NetworkTagKey), Value: aws.String(tag)}}})
 	}
 	o.Reservations = []ec2types.Reservation{r}
 	return clone(o), nil

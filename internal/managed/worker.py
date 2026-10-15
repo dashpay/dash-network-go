@@ -430,22 +430,8 @@ class Worker:
                 'mining-policy')
         return self.mining_service()
 
-    def mining_pause(self):
-        digest,active=self.mining_guard()
-        expected=self.q['expected'].get('mining') or {}
-        require(digest==expected.get('serviceHash') and expected.get('active'),'mining-service-drift')
-        self.assert_baseline(self.observe(),self.q['expected'])
-        marker=self.read('mining-pause.json')
-        if marker and marker.get('paused'):
-            require(marker['operationId']==self.q['operationId'] and not active and marker['expiresAt']>time.time()+660,'mining-existing-pause')
-        else:
-            require(active,'mining-not-originally-active')
-            marker=dict(operationId=self.q['operationId'],paused=True,expiresAt=int(time.time())+900,
-                        serviceHash=digest,token=os.urandom(16).hex())
-            self.atomic('mining-pause.json',marker)
-            # Arm independent recovery BEFORE stopping anything. Unique token
-            # and host lock prevent an old timer from resuming a later pause.
-            recovery = '''import fcntl,hashlib,json,os,subprocess,sys,tempfile
+    def arm_mining_recovery(self, marker):
+        recovery = '''import fcntl,hashlib,json,os,subprocess,sys,tempfile
 from pathlib import Path
 root=Path(sys.argv[1]);token=sys.argv[2]
 with open('/run/dashnet-managed.lock','a') as lock:
@@ -464,8 +450,28 @@ with open('/run/dashnet-managed.lock','a') as lock:
  with os.fdopen(fd,'w') as f:json.dump(m,f);f.flush();os.fsync(f.fileno())
  os.replace(tmp,path)
 '''
-            run(['systemd-run','--quiet','--unit=dashnet-mining-'+marker['token'], '--on-active=900s','--collect',
-                 '--timer-property=AccuracySec=1s','/usr/bin/python3','-c',recovery,str(self.root),marker['token']])
+        run(['systemd-run','--quiet','--unit=dashnet-mining-'+marker['token'], '--on-active=900s','--collect',
+             '--timer-property=AccuracySec=1s','/usr/bin/python3','-c',recovery,str(self.root),marker['token']])
+
+    def mining_pause(self):
+        digest,active=self.mining_guard()
+        expected=self.q['expected'].get('mining') or {}
+        require(digest==expected.get('serviceHash') and expected.get('active'),'mining-service-drift')
+        self.assert_baseline(self.observe(),self.q['expected'])
+        marker=self.read('mining-pause.json')
+        if marker and marker.get('paused'):
+            require(marker['operationId']==self.q['operationId'] and marker['serviceHash']==digest and not active and marker['expiresAt']>time.time(),'mining-existing-pause')
+            if self.q['migration'].get('fleetMiningPause'):
+                self.mining_renew()
+            else:require(marker['expiresAt']>time.time()+660,'mining-existing-pause')
+        else:
+            require(active,'mining-not-originally-active')
+            marker=dict(operationId=self.q['operationId'],paused=True,expiresAt=int(time.time())+900,
+                        serviceHash=digest,token=os.urandom(16).hex())
+            self.atomic('mining-pause.json',marker)
+            # Arm independent recovery BEFORE stopping anything. Unique token
+            # and host lock prevent an old timer from resuming a later pause.
+            self.arm_mining_recovery(marker)
             run(['systemctl','stop',self.t['miningService']],timeout=90)
         selected,_=self.containers()
         # Killing a CLI does not necessarily cancel its in-flight mining RPC.
@@ -480,6 +486,23 @@ with open('/run/dashnet-managed.lock','a') as lock:
         o=self.observe()
         require(o['mining']['paused'] and not o['mining']['active'],'mining-not-paused')
         return o
+
+    def mining_renew(self):
+        digest,active=self.mining_guard()
+        require(self.q['migration'].get('fleetMiningPause'),'mining-fleet-policy')
+        marker=self.read('mining-pause.json')
+        require(marker and marker.get('paused') and not active and marker['operationId']==self.q['operationId']
+                and marker['serviceHash']==digest and marker['expiresAt']>time.time(),'mining-lease-lost')
+        require(digest==self.q['expected']['mining']['serviceHash'],'mining-service-drift')
+        # Arm the replacement BEFORE superseding the old receipt/token. A crash
+        # or failed arm leaves the existing watchdog authoritative, never a gap.
+        old_token=marker['token']
+        renewed=dict(marker,token=os.urandom(16).hex(),expiresAt=int(time.time())+900)
+        self.arm_mining_recovery(renewed)
+        self.atomic('mining-pause.json',renewed)
+        try:run(['systemctl','stop','dashnet-mining-'+old_token+'.timer'],timeout=30)
+        except Exception:pass  # Old tokens cannot start mining after renewal.
+        return self.observe()
 
     def mining_status(self):
         digest,active=self.mining_guard()
@@ -925,7 +948,7 @@ with open('/run/dashnet-managed.lock','a') as lock:
         return dict(instanceId=self.t['instanceId'],join=j)
 
     def execute(self):
-        require(self.q['action'] in ['observe','join-profile','enroll','stage','apply'],'action-refused')
+        require(self.q['action'] in ['observe','join-profile','enroll','stage','apply','admit','mining_pause','mining_status','mining_renew','mining_resume'],'action-refused')
         self.identity()
         if self.engine is None:self.engine=Engine()
         if self.q['action']=='observe':return self.observe()

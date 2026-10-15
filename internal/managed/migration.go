@@ -23,6 +23,24 @@ func (p Plan) validateMigration() error {
 		return nil
 	}
 	m := p.Migration
+	if m.FleetMiningPause {
+		if !m.ReadinessDriven || len(m.Miners) == 0 || len(m.Canaries) != 2 || m.Canaries[0] == m.Canaries[1] {
+			return errors.New("fleet pause requires explicit miners, readiness and two architecture canaries")
+		}
+		arches := map[string]bool{}
+		for _, name := range m.Canaries {
+			for _, t := range p.Snapshot.Fleet.Targets {
+				if t.Name == name && p.Selects(t) {
+					arches[t.Architecture] = true
+				}
+			}
+		}
+		if !arches["amd64"] || !arches["arm64"] {
+			return errors.New("select one amd64 and one arm64 canary")
+		}
+	} else if len(m.Canaries) > 0 {
+		return errors.New("canaries require fleet pause policy")
+	}
 	if m.Kind != LegacyTestnetV5 || m.EpochStart.IsZero() || m.EpochStart.After(p.CreatedAt) || p.CreatedAt.Sub(m.EpochStart) > 24*time.Hour || p.Operation != "upgrade" || p.Snapshot.Fleet.ChainType != "testnet" {
 		return errors.New("legacy-testnet-v5 requires a testnet upgrade and a recent chain-verified epoch start")
 	}

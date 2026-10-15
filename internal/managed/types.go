@@ -266,10 +266,12 @@ func validPin(pin string) bool {
 }
 
 type Migration struct {
-	Kind            string    `json:"kind"`
-	EpochStart      time.Time `json:"epochStart"`
-	ReadinessDriven bool      `json:"readinessDriven,omitempty"`
-	Miners          []string  `json:"miners,omitempty"`
+	Kind             string    `json:"kind"`
+	EpochStart       time.Time `json:"epochStart"`
+	ReadinessDriven  bool      `json:"readinessDriven,omitempty"`
+	Miners           []string  `json:"miners,omitempty"`
+	FleetMiningPause bool      `json:"fleetMiningPause,omitempty"`
+	Canaries         []string  `json:"canaries,omitempty"`
 }
 
 type Plan struct {

@@ -40,7 +40,7 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 				return continuity, errors.New("readiness continuity failed: " + problem)
 			}
 		}
-		h := assessHealth(p.Snapshot, first, second, &p, "readiness", true)
+		h := assessHealthProgress(p.Snapshot, first, second, &p, "readiness", true, !r.fleetPaused)
 		if healthSelected(h, p) {
 			return h, nil
 		}

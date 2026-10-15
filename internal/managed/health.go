@@ -173,6 +173,10 @@ func doctorWithPlan(ctx context.Context, s Snapshot, remote Backend, window time
 }
 
 func assessHealth(s, first, second Snapshot, plan *Plan, label string, progress bool) Health {
+	return assessHealthProgress(s, first, second, plan, label, progress, progress)
+}
+
+func assessHealthProgress(s, first, second Snapshot, plan *Plan, label string, progress, coreProgress bool) Health {
 	h := Health{Window: label, Problems: []string{}, Nodes: map[string]NodeHealth{}}
 	h.Snapshot = second
 	block := ""
@@ -193,10 +197,10 @@ func assessHealth(s, first, second Snapshot, plan *Plan, label string, progress 
 		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !samePlannedIdentity(baseline, a, b, t, plan) {
 			h.Problems = append(h.Problems, t.Name+": identity/configuration/protocol changed")
 		}
-		if t.Containers["core"] != "" && (b.Chain.CoreHeight < a.Chain.CoreHeight || (progress && b.Chain.CoreHeight == a.Chain.CoreHeight) || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {
+		if t.Containers["core"] != "" && (b.Chain.CoreHeight < a.Chain.CoreHeight || (coreProgress && b.Chain.CoreHeight == a.Chain.CoreHeight) || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {
 			h.Problems = append(h.Problems, t.Name+": Core not advancing")
 		}
-		if progress && plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && t.Containers["core"] != "" && b.Chain.ChainLockHeight <= a.Chain.ChainLockHeight {
+		if coreProgress && plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && t.Containers["core"] != "" && b.Chain.ChainLockHeight <= a.Chain.ChainLockHeight {
 			h.Problems = append(h.Problems, t.Name+": ChainLock not advancing")
 		}
 		if t.Role == "validator" {

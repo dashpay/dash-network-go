@@ -2,7 +2,7 @@
 
 The ordinary managed image replacement is **not sufficient** for this transition.
 `managed-plan --migration policy.json` opts into a fixed `legacy-testnet-v5`
-adapter. No wipe, reset, bootstrap, mining, vote, key export, database replacement,
+adapter. No wipe, reset, bootstrap, vote, key export, database replacement,
 volume deletion or automatic downgrade is part of this operation.
 
 ## Supported boundary
@@ -125,70 +125,86 @@ the actual candidate images and captured legacy layout on a separately authorize
 disposable clone, including stop/restart, consensus RPC authorization, existing
 database open/migration, protocol activation and interrupted-run recovery.
 
-## Readiness-driven, owned-miner-coordinated execution
+## Readiness-driven fleet-wide mining pause
 
-Opt in through the reviewed migration policy (the fields are hashed into the
-plan, not an ambient environment variable):
+The reviewed policy below binds **one fleet operation** to both owned miners,
+all selected validators, and explicit architecture canaries. Stage every image
+before pausing. Do not split the canaries and batches into separate plans.
 
 ```json
 {
   "kind": "legacy-testnet-v5",
   "epochStart": "2026-10-15T14:40:09Z",
   "readinessDriven": true,
-  "miners": ["miner-1", "miner-2"]
+  "miners": ["miner-1", "miner-2"],
+  "fleetMiningPause": true,
+  "canaries": ["hp-masternode-2", "hp-masternode-4"]
 }
 ```
 
-Again, the epoch timestamp is illustrative, not operational authority. Explicitly
-list the validators in `--nodes`. Add each owned miner as an **unselected**
-Core-only fleet target, with `miningService: "dashd-generate-miner.service"`, its
-verified EC2 identity/address/architecture and actual Core container name. Import
-and explicitly enroll those miners too. Their service and script fingerprint and
-original active state must be captured in the snapshot. The plan never replaces
-a miner's Core container, image, configuration, wallets or chain data.
+The names and timestamp are examples, not operational authority. Verify one
+amd64 and one arm64 canary, a chain-derived epoch anchor, and explicitly select
+**all intended validators** in `--nodes`. Add each owned miner as an unselected,
+enrolled Core-only fleet target with `miningService:
+"dashd-generate-miner.service"`, verified EC2 identity/address/architecture and
+actual Core container name. Import its stable service/script fingerprint and
+original active state. Miners' Core containers, wallets and data are never
+stopped or replaced by mining control.
 
-Readiness mode replaces the fixed four-minute health gap with immediate checks,
-then 15-second polling when evidence is missing, bounded to ten minutes. Each
-poll compares against the original progression baseline, so a slow block does
-not cause false failure after four short samples. It rejects identity/protocol
-regression, conflicting common Platform history, increased PoSe penalty, and
-banned/removed nodes. Core, ChainLock and Platform advancement are still required
-before staging and after each restarted validator. Fresh pre-withdrawal samples
-check health and available quorum without waiting for another block merely to
-repeat a just-completed progression check. The ordinary non-opted-in workflow
-retains its former behavior.
+Successful execution:
 
-For each new withdrawal:
+1. Verify initial Core/ChainLock/Platform progress and stage all images while
+   mining runs. Wait for fresh healthy quorum, epoch and quiet-DKG admission.
+2. Journal pause intent; arm independent recovery on each miner **before**
+   stopping generation. Drain in-flight generation RPCs inside Core and confirm
+   both miners agree on a valid Core checkpoint.
+3. Upgrade the two explicit architecture canaries sequentially; verify and report
+   both. Mining remains paused. Continue the rest sequentially with progress
+   reports after each three-node review batch. Each node gets the same immediate
+   health, available >2/3 voting-power and runtime-preservation gates.
+4. Keep mining paused across epoch/DKG admission holds. Renew each host-local
+   fifteen-minute recovery lease every minute, including during validator
+   recovery. Arm the replacement timer before committing its new token; failed
+   renewal cancels the rollout. Expired/foreign leases cannot authorize another
+   withdrawal. An old timer cannot resume a newer lease.
+5. While paused, check Core sync, unchanged identity/data/image/configuration,
+   checkpoint retention, PoSe, DAPI and actual **Platform advancement**. Do not
+   require new Core or ChainLock blocks between validators. External miners can
+   still produce blocks: recheck live DKG and the checkpoint before withdrawal.
+6. Verify the full selected fleet, actual artifacts and a common retained Core
+   checkpoint. Journal final resumption, start both miners once, then require
+   new Core, ChainLock and Platform progress before marking complete.
 
-1. Verify epoch/DKG admission, then pause only the explicit mining services.
-   Each miner receives an operation-bound, tokenized fifteen-minute systemd
-   recovery timer **before** generation stops. A private write-ahead receipt
-   survives a lost SSH response. No timer extends implicitly on retries.
-2. Wait for Core's `getrpcinfo` to show no active generation RPC; stopping a
-   client alone is not sufficient. Confirm miners are inactive and agree on a
-   valid Core tip. Recheck fleet health and available quorum after this drain.
-3. Recheck epoch/DKG and the paused Core checkpoint on the target, perform the
-   same backed-up no-wipe migration, then poll target readiness. Controller work
-   for apply/readiness is bounded to ten minutes, below the independent lease.
-4. Require the recovered validator to retain the paused checkpoint, and verify
-   the mining leases did not expire. Resume mining and verify active services,
-   then require Core/ChainLock and Platform progression before the next node.
+No mandatory four-minute sleep is used: evidence is checked immediately, with
+15-second polls while waiting and ten-minute progress deadlines. Validator
+apply/readiness is separately bounded to ten minutes. The operation's overall
+deadline also bounds epoch holds and lease renewal; allow enough time for the
+whole fleet and admission holds. This does not introduce simultaneous validator
+withdrawal, automatic protocol activation, or a Dashmate CLI/helper upgrade.
 
-Any error attempts mining restoration using an independent cleanup deadline.
-The watchdog also restores an originally active service after controller death,
-provided its configuration fingerprint still matches. Foreign pauses and
-originally inactive services are never claimed. Old timer tokens cannot resume a
-later pause. An expired lease or ambiguous recovery stops further withdrawals.
-Already withdrawn validators are recovered without waiting for a new epoch/DKG
-admission window. Their prior owned mining pause is reconciled before recovery.
+### Failure and resumption
 
-Public miners are outside this controller's authority, so owned-miner pauses
-**cannot guarantee a frozen chain or zero PoSe risk**. The height admission gate
-remains in force, even with mining paused. A watchdog can restore generation
-while a failed validator is still recovering; that is an explicitly bounded
-network-pause fallback, not a promise that its DKG risk has disappeared.
+An error stops further withdrawals, stops renewal, and attempts to restore
+owned mining using an independent cleanup deadline. The host-local watchdogs
+also restore originally active generation after controller loss. Thus **one
+pause/resume is the successful path, not a promise to leave the network paused
+indefinitely after failure**. A watchdog can restore mining while a failed
+validator still needs recovery; no zero-PoSe guarantee is made.
 
-Use separate reviewed canary and small-batch plans/resumptions; this change does
-not introduce parallel validator withdrawal, auto-select a canary, upgrade the
-Dashmate CLI/helper, activate a protocol, or authorize a live network operation.
-The actual-image/legacy-data rehearsal and exact release pins remain required.
+The journal records `pausing`, `paused`, `resuming`, `resumed` separately from
+per-node completion. Resume the exact original plan/snapshot. A still-valid
+owned pause continues without a start/stop cycle and without restaging. Lost or
+expired pauses fail closed and reconcile mining before an explicit retry. If
+mining was already restored on failure, recover an already withdrawn validator
+before admitting a new one. A replay after final resumption never starts another
+fleet pause. Existing network runner-claim rules still apply after a hard kill;
+inspect before releasing a stale claim.
+
+Older plans without `fleetMiningPause` retain their previously hashed per-node
+mining behavior. **Do not execute those for this fleet-wide maintenance.** The
+console's existing generic planner does not select this policy automatically;
+use the explicit reviewed migration plan and matching executor.
+
+Actual rc.3-image/legacy-data rehearsal, Dashmate CLI/helper reconciliation,
+verified release pins and separate network GO remain required. Installing this
+controller does not clear those gates or authorize stopping live miners.
