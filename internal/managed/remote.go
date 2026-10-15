@@ -22,6 +22,7 @@ var worker string
 func RecipeDigest() string { return hash(worker) }
 
 type Request struct {
+	Migration       *Migration        `json:"migration,omitempty"`
 	Fleet           Fleet             `json:"fleet"`
 	FleetID         string            `json:"fleetId"`
 	Target          Target            `json:"target"`

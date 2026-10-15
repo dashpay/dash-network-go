@@ -152,7 +152,14 @@ type Chain struct {
 	DAPIHeight       int64            `json:"dapiHeight"`
 	DAPIHealthy      bool             `json:"dapiHealthy"`
 }
+type MigrationReceipt struct {
+	OperationID string `json:"operationId"`
+	Before      string `json:"before"`
+	After       string `json:"after"`
+}
+
 type Observation struct {
+	Migration       *MigrationReceipt    `json:"migration,omitempty"`
 	Join            *node.CoreJoin       `json:"join,omitempty"`
 	InstanceID      string               `json:"instanceId"`
 	At              time.Time            `json:"at"`
@@ -250,18 +257,24 @@ func validPin(pin string) bool {
 	return e == nil && strings.HasPrefix(d.DigestStr(), "sha256:") && digestRE.MatchString(strings.TrimPrefix(d.DigestStr(), "sha256:"))
 }
 
-type Plan struct {
-	Targets    []string  `json:"targets,omitempty"`
-	APIVersion string    `json:"apiVersion"`
+type Migration struct {
 	Kind       string    `json:"kind"`
-	ID         string    `json:"id"`
-	Snapshot   Snapshot  `json:"snapshot"`
-	Operation  string    `json:"operation"`
-	Scope      string    `json:"scope"`
-	Images     Images    `json:"images"`
-	PreviousID string    `json:"previousId,omitempty"`
-	Recipe     string    `json:"recipe"`
-	CreatedAt  time.Time `json:"createdAt"`
+	EpochStart time.Time `json:"epochStart"`
+}
+
+type Plan struct {
+	Migration  *Migration `json:"migration,omitempty"`
+	Targets    []string   `json:"targets,omitempty"`
+	APIVersion string     `json:"apiVersion"`
+	Kind       string     `json:"kind"`
+	ID         string     `json:"id"`
+	Snapshot   Snapshot   `json:"snapshot"`
+	Operation  string     `json:"operation"`
+	Scope      string     `json:"scope"`
+	Images     Images     `json:"images"`
+	PreviousID string     `json:"previousId,omitempty"`
+	Recipe     string     `json:"recipe"`
+	CreatedAt  time.Time  `json:"createdAt"`
 }
 
 func Selected(scope, component string) bool {
@@ -348,5 +361,5 @@ func (p Plan) Validate() error {
 	if len(p.Images) != len(p.Snapshot.Fleet.Targets) || count == 0 {
 		return errors.New("image selection lost target or selects nothing")
 	}
-	return nil
+	return p.validateMigration()
 }

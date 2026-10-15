@@ -124,6 +124,9 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 // doctor extends the window for the focus targets (all when empty) that have
 // not advanced, so a gate on one node never waits on an unrelated stuck node.
 func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error, focus []string) (Health, error) {
+	return doctorWithPlan(ctx, s, remote, window, wait, focus, nil)
+}
+func doctorWithPlan(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error, focus []string, plan *Plan) (Health, error) {
 	h := Health{Window: window.String(), Problems: []string{}, Nodes: map[string]NodeHealth{}}
 	if err := s.Validate(); err != nil {
 		return h, err
@@ -182,7 +185,7 @@ func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 		if err := b.Healthy(t); err != nil {
 			h.Problems = append(h.Problems, t.Name+": "+err.Error())
 		}
-		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !SameIdentity(baseline, b, t) {
+		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !samePlannedIdentity(baseline, a, b, t, plan) {
 			h.Problems = append(h.Problems, t.Name+": identity/configuration/protocol changed")
 		}
 		if t.Containers["core"] != "" && (b.Chain.CoreHeight <= a.Chain.CoreHeight || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {

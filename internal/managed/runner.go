@@ -236,7 +236,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			}
 		}
 		if p.Operation == "upgrade" {
-			h, e := r.health(ctx, p.Snapshot, p.Targets)
+			h, e := r.planHealth(ctx, p)
 			if e != nil {
 				return record, e
 			}
@@ -257,7 +257,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 	}
 	if record.Phase == "complete" {
-		h, e := r.health(ctx, p.Snapshot, p.Targets)
+		h, e := r.planHealth(ctx, p)
 		if e != nil {
 			return record, e
 		}
@@ -279,6 +279,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		q.Pins = p.Images[t.Name]
 		q.Operation = p.Operation
 		q.OperationID = p.ID
+		q.Migration = p.Migration
 		if _, err = r.Remote.Call(ctx, q); err != nil {
 			return
 		}
@@ -295,8 +296,17 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			return
 		}
 		// Resume only the journaled target; it may be between stop/remove/create.
-		if p.Operation == "upgrade" && record.Current == "" {
-			h, e := r.health(ctx, p.Snapshot, p.Targets)
+		freshWithdrawal := record.Current == ""
+		if p.Migration != nil && record.Current == t.Name {
+			// The epoch/DKG gate can refuse before stopping anything. A pending
+			// journal name alone is not permission to skip a fresh quorum gate.
+			o, e := r.Remote.Call(ctx, request(f, t, "observe"))
+			if e == nil && o.Healthy(t) == nil {
+				freshWithdrawal = true
+			}
+		}
+		if p.Operation == "upgrade" && freshWithdrawal {
+			h, e := r.planHealth(ctx, p)
 			if e != nil {
 				return record, e
 			}
@@ -320,6 +330,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		q.Pins = maps.Clone(p.Images[t.Name])
 		q.Operation = p.Operation
 		q.OperationID = p.ID
+		q.Migration = p.Migration
 		if _, err = r.Remote.Call(ctx, q); err != nil {
 			return
 		}
@@ -357,7 +368,7 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 	defer cancel()
 	r.report("managed-verifying")
 	for {
-		h, e := r.health(check, p.Snapshot, p.Targets)
+		h, e := r.planHealth(check, p)
 		if e != nil {
 			return e
 		}
@@ -372,7 +383,7 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 						selected = append(selected, c)
 					}
 				}
-				current := h.Snapshot.Nodes[t.Name]
+				current := p.normalized(h.Snapshot.Nodes[t.Name])
 				if e = Preserved(p.Snapshot.Nodes[t.Name], current, selected); e != nil {
 					return fmt.Errorf("%s: %w", t.Name, e)
 				}

@@ -34,8 +34,12 @@ New **Core fullnode** allocations can join testnet or Moutai through the separat
 [existing-chain join path](join-existing-chain.md). They never copy validator
 identities, mine, register collateral, or silently expand this managed fleet.
 
+The explicit [legacy testnet v5 migration](legacy-testnet-v5.md) adds the reviewed
+Core 24 / Platform 4.1 → 5 runtime configuration delta and permits protocol 13 →
+14 during a managed rollout. It is not an arbitrary Dashmate schema migration.
+
 **Not implemented:** adding/registering additional existing-network validators,
-configuration/schema/protocol migration, resets, automatic downgrade or abandoning
+general configuration/schema/protocol migration, resets, automatic downgrade or abandoning
 an unfinished operation. These remain requirements/adapter work, not claims hidden
 behind the word "deploy". Existing executors and the dashboard must expose these
 capability limits honestly.
@@ -115,10 +119,11 @@ leave the host; exported observations contain only hashes, identities and health
 Private host recovery files are root-only and may contain secrets: do not attach
 or print them in chat, public artifacts or issue reports.
 
-A version rollout modifies the selected container image, not the application's
-configuration schema. Core process and native Core/Tor fingerprints are preserved
+A normal version rollout modifies the selected container image, not the application's
+configuration schema. The separately selected v5 adapter permits only its fixed,
+backed-up runtime delta. Core process and native Core/Tor fingerprints are preserved
 when Core is outside scope. Core upgrades preserve configuration/genesis and
-require readiness after the expected process replacement. Live protocol changes
+require readiness after the expected process replacement. Unplanned protocol changes
 stop verification; migrated data is never blindly downgraded.
 
 Drive is Tenderdash's ABCI dependency. Replacing Drive deliberately stops the

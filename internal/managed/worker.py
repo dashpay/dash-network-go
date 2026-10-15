@@ -5,6 +5,7 @@ adds private recovery records only. Image replacements preserve exact mounts,
 network attachments, command/env and published ports; there is no inferred rollback.
 """
 import copy
+import base64
 import datetime
 import fcntl
 import hashlib
@@ -249,7 +250,7 @@ class Worker:
                 data = ''.join(lines).encode()
         return hashlib.sha256(data).hexdigest()
 
-    def files_hash(self, selected):
+    def files_hash(self, selected, migration=None):
         files = {}
         for c in selected.values():
             for m in c['Mounts']:
@@ -263,7 +264,13 @@ class Worker:
                     if p.is_dir():continue
                     require(not p.is_symlink() and p.is_file() and p.stat().st_size<=2*1024*1024,'unsupported-config-file')
                     if p.name.endswith('.lock') or p.name=='priv_validator_state.json':continue
-                    files[str(p)]=self.configuration_digest(p)
+                    digest = self.configuration_digest(p)
+                    if migration and str(p) in migration:
+                        record = migration[str(p)]
+                        raw = p.read_bytes()
+                        require(raw in [base64.b64decode(record['before']), base64.b64decode(record['after'])], 'migration-file-drift')
+                        digest = record['digest']
+                    files[str(p)]=digest
         require(len(files)<=200,'configuration-file-count')
         return fingerprint(files)
 
@@ -368,11 +375,24 @@ class Worker:
                      running=v['State']['Running'],startedAt=v['State']['StartedAt'],restarts=v['RestartCount']) for k,v in companions.items()}
         chain,problems=self.health(selected)
         for k,c in selected.items():require(self.engine.inspect(c['Id']) is not None,'concurrent-container-change')
-        return dict(instanceId=self.t['instanceId'],at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        result = dict(instanceId=self.t['instanceId'],at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     components=components,companions=extra,nativeProcesses=self.native_processes(),filesHash=self.files_hash(selected),chain=chain,problems=problems)
+        marker = self.read('operation.json')
+        if marker and marker.get('migration') and marker.get('migrationPhase') == 'installed':
+            records = marker['migrationFiles']
+            for path, record in records.items():
+                require(Path(path).read_bytes() == base64.b64decode(record['after']), 'migration-file-drift')
+            before = self.files_hash(selected, records)
+            require(before == marker['baseline']['filesHash'], 'migration-unrelated-file-drift')
+            result['migration'] = dict(operationId=marker['id'], before=before, after=result['filesHash'])
+        return result
 
     def assert_baseline(self, actual, baseline, mutable=()):
-        require(actual['filesHash']==baseline['filesHash'],'configuration-files-changed')
+        files = actual['filesHash']
+        receipt = actual.get('migration')
+        if self.q.get('migration') and receipt and receipt['operationId'] == self.q.get('operationId') and receipt['after'] == files:
+            files = receipt['before']
+        require(files==baseline['filesHash'],'configuration-files-changed')
         require(actual['companions']==baseline['companions'],'companion-changed')
         keep=lambda m:{k:v for k,v in m.items() if 'core' not in mutable or not k.startswith('dashd:')}
         require(keep(actual['nativeProcesses'])==keep(baseline['nativeProcesses']),'native-core-or-tor-changed')
@@ -405,7 +425,209 @@ class Worker:
                 image=self.engine.image(pin)
             require(image and image['Architecture']==self.t['architecture'] and image['Os']=='linux'
                     and any(d.split('@')[-1]==pin.split('@')[-1] for d in image.get('RepoDigests',[])),'image-proof')
+        if self.q.get('migration'):
+            self.validate_migration()
+            marker = self.read('operation.json')
+            if marker and marker['id'] == self.q['operationId']:
+                self.clean_migration_temp(marker)
+                self.operation_guard(marker)
+            else:
+                selected, _ = self.containers()
+                self.migration_files(selected)  # fail before the first withdrawal
         return dict(instanceId=self.t['instanceId'])
+
+    def validate_migration(self):
+        require(self.q['migration']['kind'] == 'legacy-testnet-v5'
+                and self.f['chainType'] == 'testnet' and self.t['role'] == 'validator'
+                and self.q['operation'] == 'upgrade'
+                and set(self.q['pins']) == {'core', 'drive', 'tenderdash', 'dapi'}, 'migration-scope')
+        # Compare the actual image ID, not a version tag (including custom builds).
+        core = self.engine.image(self.q['pins']['core'])
+        require(core and core['Id'] == self.q['expected']['components']['core']['imageId'], 'migration-core-image-changed')
+        for component in ['drive', 'dapi']:
+            image = self.engine.image(self.q['pins'][component])
+            require(image and image['Id'] != self.q['expected']['components'][component]['imageId'], 'migration-old-platform-image')
+        # Source must actually be Core 24; an image tag is not this proof.
+        # During recovery Core may be stopped, so the check is made before
+        # recording the first migration, not repeated on a half-applied host.
+        marker = self.read('operation.json')
+        if not marker or marker['id'] != self.q['operationId']:
+            selected, companions = self.containers()
+            namespaces = {c['Id'] for c in selected.values()} | set(self.t['containers'].values())
+            for c in companions.values():
+                require(c['HostConfig'].get('NetworkMode', '').removeprefix('container:') not in namespaces,
+                        'migration-shared-companion-namespace')
+            version = self.rpc(selected, 'getnetworkinfo').get('subversion', '')
+            require(re.fullmatch(r'/Dash Core:24\.[0-9]+\.[0-9]+[^/]*/', version), 'migration-requires-core24')
+
+    @staticmethod
+    def migrate_core(data, user):
+        """Only additive RPC permissions and the Core 24 compatibility output.
+
+        Core intersects repeated whitelist entries: extend EVERY matching line,
+        not a new permissive line. No credentials or other users are changed.
+        Unknown include layouts fail rather than guessing effective permissions.
+        """
+        text = data.decode('utf-8')
+        output, found, deprecated = [], False, False
+        section = ''
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped.startswith('['):
+                section = stripped
+            key, sep, value = stripped.partition('=')
+            key, value = key.strip(), value.strip()
+            require(key != 'includeconf', 'migration-includeconf-unsupported')
+            if sep and key == 'deprecatedrpc' and value == 'service' and section in ['', '[test]']:
+                deprecated = True
+            if sep and key == 'rpcwhitelist':
+                name, colon, methods = value.partition(':')
+                if name == user:
+                    require(colon and section in ['', '[test]'] and '#' not in methods and ';' not in methods, 'migration-rpc-whitelist-layout')
+                    ending = '\r\n' if line.endswith('\r\n') else '\n'
+                    methods = methods.split(',') if methods else []
+                    for method in ['getspecialtxes', 'getdeploymentinfo']:
+                        if method not in methods:
+                            methods.append(method)
+                    line = 'rpcwhitelist=' + user + ':' + ','.join(methods) + ending
+                    found = True
+            output.append(line)
+        require(found, 'migration-consensus-whitelist-missing')
+        if not deprecated:
+            output.insert(0, 'deprecatedrpc=service\n')
+        return ''.join(output).encode()
+
+    @staticmethod
+    def migrate_tenderdash(data):
+        output, section = [], ''
+        for line in data.decode('utf-8').splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped.startswith('['):
+                section = stripped
+            key = stripped.partition('=')[0].strip()
+            if key in ['unsafe-commit-timeout-override', 'unsafe-bypass-commit-timeout-override']:
+                require(section == '[consensus]', 'migration-tenderdash-layout')
+                continue
+            output.append(line)
+        return ''.join(output).encode()
+
+    def migration_files(self, selected):
+        env = dict(x.split('=', 1) for x in selected['drive']['Config'].get('Env', []) if '=' in x)
+        user = env.get('CORE_CONSENSUS_JSON_RPC_USERNAME')
+        require(user == 'drive_consensus', 'migration-consensus-user')
+        paths = [Path(m['Source']) for m in selected['core']['Mounts']
+                 if m['Type'] == 'bind' and m['Destination'].endswith('/dash.conf')]
+        require(len(paths) == 1, 'migration-core-config-mount')
+        core = paths[0]
+        paths = []
+        for m in selected['tenderdash']['Mounts']:
+            if m['Type'] != 'bind': continue
+            if m['Destination'].endswith('/config.toml'): paths.append(Path(m['Source']))
+            elif m['Destination'].endswith('/config'): paths.append(Path(m['Source']) / 'config.toml')
+        require(len(paths) == 1 and paths[0] != core, 'migration-tenderdash-config-mount')
+        records = {}
+        for path, transform in [(core, lambda b: self.migrate_core(b, user)), (paths[0], self.migrate_tenderdash)]:
+            require(path.is_file() and not path.is_symlink() and path.resolve() == path
+                    and path.stat().st_size <= 2*1024*1024, 'migration-config-file')
+            before = path.read_bytes()
+            after = transform(before)
+            st = path.stat()
+            records[str(path)] = dict(before=base64.b64encode(before).decode(), after=base64.b64encode(after).decode(),
+                digest=self.configuration_digest(path), uid=st.st_uid, gid=st.st_gid, mode=st.st_mode & 0o777)
+        # These backups remain in the root-only host journal, never in output.
+        return records
+
+    def migration_window(self, selected):
+        epoch = datetime.datetime.fromisoformat(self.q['migration']['epochStart'].replace('Z', '+00:00'))
+        require(epoch.tzinfo is not None, 'migration-epoch-timezone')
+        now = datetime.datetime.now(datetime.timezone.utc)
+        elapsed = (now - epoch).total_seconds()
+        require(elapsed >= 0, 'migration-epoch-future')
+        # Five minutes after the boundary, ten minutes before the next. This
+        # admission budget is not a guarantee that an unhealthy node recovers.
+        require(300 <= elapsed % 3600 < 3000, 'migration-epoch-window')
+        # A public testnet's miners cannot be paused. Do not start during DKG.
+        height = self.rpc(selected, 'getblockcount')
+        require(13 <= height % 24 <= 20, 'migration-dkg-window')
+
+    def install_migration(self, marker):
+        if marker.get('migrationPhase') == 'installed': return
+        if marker.get('migrationPhase') in [None, 'stopping']:
+            selected, _ = self.containers()
+            # A stop-intent checkpoint is not evidence that a stop occurred.
+            # Recheck the admission window if a lost request left everything up.
+            if not marker.get('migrationPhase') or all(selected[k]['State']['Running'] for k in self.q['pins']):
+                self.migration_window(selected)
+            marker['migrationPhase'] = 'stopping'
+            self.atomic('operation.json', marker)
+        # A lost stop response is replayed before any file is written. No
+        # automatic restart of old Drive after the first withdrawal.
+        for k in ['dapi', 'tenderdash', 'drive', 'core']:
+            c = self.engine.inspect(self.t['containers'][k])
+            require(c is not None, 'migration-source-missing')
+            self.engine.call('POST', '/containers/' + c['Id'] + '/stop?t=120', timeout=150)
+        marker['migrationPhase'] = 'writing'
+        self.atomic('operation.json', marker)
+        for name, record in marker['migrationFiles'].items():
+            path = Path(name)
+            before, after = base64.b64decode(record['before']), base64.b64decode(record['after'])
+            require(path.is_file() and not path.is_symlink() and path.read_bytes() in [before, after], 'migration-file-drift')
+            if path.read_bytes() == after: continue
+            temp = str(path.parent / ('.dashnet-migration-' + marker['id'] + '-' + path.name))
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    os.fchmod(stream.fileno(), record['mode'])
+                    os.fchown(stream.fileno(), record['uid'], record['gid'])
+                    stream.write(after); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temp, path)
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try: os.fsync(directory)
+                finally: os.close(directory)
+            finally:
+                if os.path.exists(temp): os.unlink(temp)
+        marker['migrationPhase'] = 'installed'
+        self.atomic('operation.json', marker)
+
+    def clean_migration_temp(self, marker):
+        # A hard kill can leave a partly written same-directory temp. Its exact
+        # name and permitted bytes are bound to the durable operation, never a
+        # wildcard deletion or an exemption from the configuration fingerprint.
+        if marker.get('migrationPhase') != 'writing': return
+        for name, record in marker.get('migrationFiles', {}).items():
+            path = Path(name)
+            temp = path.parent / ('.dashnet-migration-' + marker['id'] + '-' + path.name)
+            if not temp.exists(): continue
+            require(not temp.is_symlink() and temp.is_file()
+                    and temp.stat().st_size <= len(base64.b64decode(record['after']))
+                    and base64.b64decode(record['after']).startswith(temp.read_bytes()), 'migration-temporary-drift')
+            temp.unlink()
+
+    def wait_migrated_core(self):
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            try:
+                core = self.engine.inspect(self.t['containers']['core'])
+                selected = {'core': core}
+                self.rpc(selected, 'getdeploymentinfo')
+                info = self.rpc(selected, 'getblockchaininfo')
+                sync = self.rpc(selected, 'mnsync', 'status')
+                if not info['initialblockdownload'] and sync.get('IsSynced') and sync.get('IsBlockchainSynced'):
+                    drive = self.engine.inspect(self.t['containers']['drive'])
+                    env = dict(x.split('=', 1) for x in drive['Config'].get('Env', []) if '=' in x)
+                    password = env.get('CORE_CONSENSUS_JSON_RPC_PASSWORD')
+                    require(password and '\n' not in password, 'migration-consensus-password')
+                    paths = [m['Destination'] for m in core['Mounts'] if m['Destination'].endswith('/dash.conf')]
+                    require(len(paths) == 1, 'migration-core-config-mount')
+                    for method in [['getdeploymentinfo'], ['getspecialtxes', info['bestblockhash']]]:
+                        result = subprocess.run(['docker', 'exec', '-i', core['Id'], 'dash-cli', '-conf=' + paths[0],
+                            '-rpcuser=drive_consensus', '-stdinrpcpass', *method], input=(password+'\n').encode(),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+                        require(result.returncode == 0, 'migration-consensus-rpc-denied')
+                    return
+            except (Failure, Warmup, subprocess.TimeoutExpired): pass
+            time.sleep(3)
+        raise Failure('migration-core-readiness-timeout')
 
     def operation_guard(self, marker):
         # Recheck unaffected workloads and files even when the selected container
@@ -445,7 +667,7 @@ class Worker:
                 require((c['Id']==b['id'] and c['Image']==b['imageId'])
                         or c['Image']==desired['Id'],'unexpected-selected-container')
             file_sources[k]=c
-        require(self.files_hash(file_sources)==baseline['filesHash'],'configuration-files-changed')
+        require(self.files_hash(file_sources, marker.get('migrationFiles'))==baseline['filesHash'],'configuration-files-changed')
 
     def wait_abci(self):
         drive=self.engine.inspect(self.t['containers']['drive'])
@@ -475,7 +697,7 @@ class Worker:
         self.owner();pins=self.q['pins'];baseline=self.q['expected']
         marker=self.read('operation.json');same=marker and marker['id']==self.q['operationId']
         if same:
-            require(marker['pins']==pins and marker['baseline']==baseline and marker['operation']==self.q['operation'],'operation-marker-drift')
+            require(marker['pins']==pins and marker['baseline']==baseline and marker['operation']==self.q['operation'] and marker.get('migration')==self.q.get('migration'),'operation-marker-drift')
         else:
             require(marker is None or marker['phase']=='complete','unfinished-host-operation')
             actual=self.observe();self.assert_baseline(actual,baseline, pins if self.q['operation']=='deploy' else ())
@@ -490,9 +712,21 @@ class Worker:
             require(not drain or 'tenderdash' in pins,'tenderdash-dependency-outside-scope')
             marker=dict(id=self.q['operationId'],pins=pins,baseline=baseline,recipes=recipes,
                         operation=self.q['operation'],completed={},phase='applying',drain=drain)
+            if self.q.get('migration'):
+                self.validate_migration()
+                marker['migration'] = self.q['migration']
+                marker['migrationFiles'] = self.migration_files(selected)
+                marker['drain'] = True
+                archive = 'migration-' + self.q['operationId'] + '.json'
+                saved = self.read(archive)
+                require(saved is None or saved == marker['migrationFiles'], 'migration-backup-drift')
+                if saved is None: self.atomic(archive, marker['migrationFiles'])
             self.atomic('operation.json',marker)
+        self.clean_migration_temp(marker)
         self.operation_guard(marker)
         if marker['phase']=='complete':return self.observe()
+        if marker.get('migration'):
+            self.install_migration(marker)
         if marker.get('drain') and marker.get('dependency') not in ['start-requested','started']:
             marker['dependency']='stop-requested';self.atomic('operation.json',marker)
             td=self.engine.inspect(self.t['containers']['tenderdash'])
@@ -514,7 +748,7 @@ class Worker:
                 require(c['Image'] in [baseline['components'][k]['imageId'],desired['Id']],'unexpected-running-image')
             if self.q['operation']=='deploy':
                 require(desired['Id']==baseline['components'][k]['imageId'],'deploy-cannot-change-image')
-            if c is not None and c['Image']!=desired['Id']:
+            if c is not None and (c['Image']!=desired['Id'] or (marker.get('migration') and c['Id']==baseline['components'][k]['id'])):
                 require(c['Id']==baseline['components'][k]['id'],'unexpected-container-identity')
                 self.engine.call('POST','/containers/'+c['Id']+'/stop?t=120',timeout=150)
                 # No v=true: existing named AND anonymous volumes are retained.
@@ -529,6 +763,8 @@ class Worker:
             c=self.engine.inspect(name)
             require(c['State']['Running'] and self.config_hash(self.recipe(c))==baseline['components'][k]['configHash'],'replacement-not-preserved')
             marker['completed'][k]=c['Id'];self.atomic('operation.json',marker)
+            if k=='core' and marker.get('migration'):
+                self.wait_migrated_core()
             if k=='tenderdash' and marker.get('drain'):
                 marker['dependency']='started';self.atomic('operation.json',marker)
         actual=self.observe();self.assert_baseline(actual,baseline,pins)
