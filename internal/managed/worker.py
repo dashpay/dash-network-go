@@ -331,11 +331,17 @@ class Worker:
             try:
                 info=self.rpc(selected,'getblockchaininfo');sync=self.rpc(selected,'mnsync','status')
                 chain.update(coreNetwork=info['chain'],coreGenesis=self.rpc(selected,'getblockhash',1 if self.f['chainType']=='devnet' else 0),
+                             coreHash=info['bestblockhash'],
                              coreHeight=info['blocks'],coreSynced=not info['initialblockdownload'] and sync['IsSynced'] and sync['IsBlockchainSynced'],
                              chainLockHeight=self.rpc(selected,'getbestchainlock')['height'])
+                if self.q.get('coreCheckpointHeight'):
+                    chain['coreCheckpointHash']=self.rpc(selected,'getblockhash',self.q['coreCheckpointHeight'])
                 require(info['chain']==self.f['coreNetwork'],'wrong-core-chain')
                 if self.t['role'] in ['validator','masternode']:
                     mn=self.rpc(selected,'masternode','status');chain.update(masternodeState=mn.get('state',''),proTxHash=mn.get('proTxHash',''))
+                    if chain['proTxHash']:
+                        protx=self.rpc(selected,'protx','info',chain['proTxHash'])
+                        chain['posePenalty']=int(protx['state']['PoSePenalty'])
             except Warmup as w:problems.append('core-starting: '+(str(w) or 'RPC warm-up'))
             except Exception:problems.append('core-health-unavailable')
         if self.t['role']=='validator':
@@ -377,6 +383,8 @@ class Worker:
         for k,c in selected.items():require(self.engine.inspect(c['Id']) is not None,'concurrent-container-change')
         result = dict(instanceId=self.t['instanceId'],at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     components=components,companions=extra,nativeProcesses=self.native_processes(),filesHash=self.files_hash(selected),chain=chain,problems=problems)
+        if self.t.get('miningService'):
+            result['mining']=self.mining_receipt()
         marker = self.read('operation.json')
         if marker and marker.get('migration') and marker.get('migrationPhase') == 'installed':
             records = marker['migrationFiles']
@@ -386,6 +394,110 @@ class Worker:
             require(before == marker['baseline']['filesHash'], 'migration-unrelated-file-drift')
             result['migration'] = dict(operationId=marker['id'], before=before, after=result['filesHash'])
         return result
+
+    def admit(self):
+        self.owner()
+        require(self.q.get('migration',{}).get('kind')=='legacy-testnet-v5','migration-policy')
+        selected,_=self.containers()
+        self.migration_window(selected)
+        return self.observe()
+
+    def mining_service(self):
+        require(self.f['chainType']=='testnet' and self.t['role']=='core' and
+                self.t.get('miningService')=='dashd-generate-miner.service','mining-target')
+        unit=self.t['miningService']
+        properties=run(['systemctl','show',unit,'-p','LoadState','-p','FragmentPath','-p','DropInPaths','-p','User','-p','Group'])
+        unit_text=run(['systemctl','cat',unit])
+        require(b'LoadState=loaded' in properties and b'/usr/local/bin/dashd-generate-miner.sh' in unit_text,'mining-unit-layout')
+        script=Path('/usr/local/bin/dashd-generate-miner.sh')
+        require(script.is_file() and not script.is_symlink(),'mining-script-layout')
+        digest=hashlib.sha256(properties+b'\0'+unit_text+b'\0'+script.read_bytes()).hexdigest()
+        state=run(['systemctl','show',unit,'--property=ActiveState','--value']).decode().strip()
+        require(state in ['active','inactive'],'mining-service-transition')
+        return digest,state=='active'
+
+    def mining_receipt(self):
+        digest,active=self.mining_service()
+        marker=self.read('mining-pause.json') or {}
+        return dict(serviceHash=digest,active=active,operationId=marker.get('operationId',''),
+                    paused=bool(marker.get('paused')) and not active,expiresAt=marker.get('expiresAt',0))
+
+    def mining_guard(self):
+        self.owner()
+        m=self.q.get('migration') or {}
+        require(m.get('kind')=='legacy-testnet-v5' and m.get('readinessDriven') and
+                self.t['name'] in m.get('miners',[]) and re.fullmatch('[0-9a-f]{64}',self.q.get('operationId','')),
+                'mining-policy')
+        return self.mining_service()
+
+    def mining_pause(self):
+        digest,active=self.mining_guard()
+        expected=self.q['expected'].get('mining') or {}
+        require(digest==expected.get('serviceHash') and expected.get('active'),'mining-service-drift')
+        self.assert_baseline(self.observe(),self.q['expected'])
+        marker=self.read('mining-pause.json')
+        if marker and marker.get('paused'):
+            require(marker['operationId']==self.q['operationId'] and not active and marker['expiresAt']>time.time()+660,'mining-existing-pause')
+        else:
+            require(active,'mining-not-originally-active')
+            marker=dict(operationId=self.q['operationId'],paused=True,expiresAt=int(time.time())+900,
+                        serviceHash=digest,token=os.urandom(16).hex())
+            self.atomic('mining-pause.json',marker)
+            # Arm independent recovery BEFORE stopping anything. Unique token
+            # and host lock prevent an old timer from resuming a later pause.
+            recovery = '''import fcntl,hashlib,json,os,subprocess,sys,tempfile
+from pathlib import Path
+root=Path(sys.argv[1]);token=sys.argv[2]
+with open('/run/dashnet-managed.lock','a') as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ path=root/'mining-pause.json'
+ if not path.exists():sys.exit(0)
+ m=json.loads(path.read_text())
+ if not m.get('paused') or m.get('token')!=token:sys.exit(0)
+ properties=subprocess.check_output(['systemctl','show','dashd-generate-miner.service','-p','LoadState','-p','FragmentPath','-p','DropInPaths','-p','User','-p','Group'],timeout=30)
+ unit_text=subprocess.check_output(['systemctl','cat','dashd-generate-miner.service'],timeout=30)
+ digest=hashlib.sha256(properties+b'\\0'+unit_text+b'\\0'+Path('/usr/local/bin/dashd-generate-miner.sh').read_bytes()).hexdigest()
+ if digest!=m['serviceHash']:sys.exit(1)
+ subprocess.run(['systemctl','start','dashd-generate-miner.service'],check=True,timeout=60)
+ m['paused']=False;m['watchdogResumed']=True
+ fd,tmp=tempfile.mkstemp(dir=root,prefix='.mining-')
+ with os.fdopen(fd,'w') as f:json.dump(m,f);f.flush();os.fsync(f.fileno())
+ os.replace(tmp,path)
+'''
+            run(['systemd-run','--quiet','--unit=dashnet-mining-'+marker['token'], '--on-active=900s','--collect',
+                 '--timer-property=AccuracySec=1s','/usr/bin/python3','-c',recovery,str(self.root),marker['token']])
+            run(['systemctl','stop',self.t['miningService']],timeout=90)
+        selected,_=self.containers()
+        # Killing a CLI does not necessarily cancel its in-flight mining RPC.
+        # Require server-side generation work to drain, without stopping Core.
+        deadline=time.monotonic()+90
+        while True:
+            info=self.rpc(selected,'getrpcinfo')
+            require(isinstance(info.get('active_commands'),list),'mining-rpc-observation')
+            if not any(c.get('method') in ['generate','generatetoaddress','generateblock'] for c in info['active_commands']):break
+            require(time.monotonic()<deadline,'mining-rpc-did-not-drain')
+            time.sleep(2)
+        o=self.observe()
+        require(o['mining']['paused'] and not o['mining']['active'],'mining-not-paused')
+        return o
+
+    def mining_status(self):
+        digest,active=self.mining_guard()
+        marker=self.read('mining-pause.json')
+        require(marker and marker['operationId']==self.q['operationId'] and marker['serviceHash']==digest,'mining-owner-or-drift')
+        return self.observe()
+
+    def mining_resume(self):
+        digest,active=self.mining_guard()
+        marker=self.read('mining-pause.json')
+        if marker and marker.get('paused'):
+            require(marker['operationId']==self.q['operationId'] and marker['serviceHash']==digest,'mining-owner-or-drift')
+            run(['systemctl','start',self.t['miningService']],timeout=60)
+            require(self.mining_service()[1],'mining-resume-failed')
+            marker['paused']=False
+            self.atomic('mining-pause.json',marker)
+        else:require(active,'mining-unowned-inactive')
+        return self.observe()
 
     def assert_baseline(self, actual, baseline, mutable=()):
         files = actual['filesHash']
@@ -546,9 +658,26 @@ class Worker:
         # Five minutes after the boundary, ten minutes before the next. This
         # admission budget is not a guarantee that an unhealthy node recovers.
         require(300 <= elapsed % 3600 < 3000, 'migration-epoch-window')
-        # A public testnet's miners cannot be paused. Do not start during DKG.
+        # Owned miners can be paused, but public miners remain outside control.
         height = self.rpc(selected, 'getblockcount')
         require(13 <= height % 24 <= 20, 'migration-dkg-window')
+        if self.q['migration'].get('readinessDriven'):
+            status=self.rpc(selected,'quorum','dkgstatus')
+            sessions=status.get('session')
+            require(isinstance(sessions,list) and bool(sessions),'migration-dkg-unobserved')
+            phases=[]
+            def collect(value):
+                if isinstance(value,dict):
+                    for key,item in value.items():
+                        if key=='phase':phases.append(item)
+                        else:collect(item)
+                elif isinstance(value,list):
+                    for item in value:collect(item)
+            collect(sessions)
+            require(bool(phases) and all(p==6 for p in phases),'migration-dkg-active')
+        if self.q.get('coreCheckpointHeight'):
+            require(height>=self.q['coreCheckpointHeight'] and
+                    self.rpc(selected,'getblockhash',self.q['coreCheckpointHeight'])==self.q['coreCheckpointHash'], 'migration-core-checkpoint')
 
     def install_migration(self, marker):
         if marker.get('migrationPhase') == 'installed': return

@@ -43,12 +43,13 @@ type Fleet struct {
 	Targets       []Target         `json:"targets"`
 }
 type Target struct {
-	Name         string            `json:"name"`
-	InstanceID   string            `json:"instanceId"`
-	Address      string            `json:"address"`
-	Architecture string            `json:"architecture"`
-	Role         string            `json:"role"`
-	Containers   map[string]string `json:"containers"`
+	Name          string            `json:"name"`
+	InstanceID    string            `json:"instanceId"`
+	Address       string            `json:"address"`
+	Architecture  string            `json:"architecture"`
+	Role          string            `json:"role"`
+	MiningService string            `json:"miningService,omitempty"`
+	Containers    map[string]string `json:"containers"`
 }
 
 func hash(v any) string {
@@ -103,6 +104,9 @@ func (f Fleet) Validate() error {
 		if t.Role != "validator" && t.Role != "seed" && t.Role != "core" && t.Role != "masternode" {
 			return errors.New("supported roles: validator, seed, core, masternode")
 		}
+		if t.MiningService != "" && (t.Role != "core" || t.MiningService != "dashd-generate-miner.service" || f.ChainType != "testnet") {
+			return errors.New("only explicit testnet Core mining service supported")
+		}
 		containers := map[string]bool{}
 		for c, n := range t.Containers {
 			if !slices.Contains(Components, c) || !containerRE.MatchString(n) || containers[n] {
@@ -135,22 +139,25 @@ type Container struct {
 	Restarts   int      `json:"restarts"`
 }
 type Chain struct {
-	CoreNetwork      string           `json:"coreNetwork"`
-	CoreGenesis      string           `json:"coreGenesis"`
-	CoreHeight       int64            `json:"coreHeight"`
-	CoreSynced       bool             `json:"coreSynced"`
-	ChainLockHeight  int64            `json:"chainLockHeight"`
-	MasternodeState  string           `json:"masternodeState"`
-	ProTxHash        string           `json:"proTxHash"`
-	PlatformChainID  string           `json:"platformChainId"`
-	PlatformHeight   int64            `json:"platformHeight"`
-	PlatformHash     string           `json:"platformHash"`
-	PlatformProtocol uint32           `json:"platformProtocol"`
-	PlatformNodeID   string           `json:"platformNodeId"`
-	CatchingUp       bool             `json:"catchingUp"`
-	VotingPower      map[string]int64 `json:"votingPower"`
-	DAPIHeight       int64            `json:"dapiHeight"`
-	DAPIHealthy      bool             `json:"dapiHealthy"`
+	PosePenalty        int64            `json:"posePenalty,omitempty"`
+	CoreNetwork        string           `json:"coreNetwork"`
+	CoreGenesis        string           `json:"coreGenesis"`
+	CoreCheckpointHash string           `json:"coreCheckpointHash,omitempty"`
+	CoreHash           string           `json:"coreHash,omitempty"`
+	CoreHeight         int64            `json:"coreHeight"`
+	CoreSynced         bool             `json:"coreSynced"`
+	ChainLockHeight    int64            `json:"chainLockHeight"`
+	MasternodeState    string           `json:"masternodeState"`
+	ProTxHash          string           `json:"proTxHash"`
+	PlatformChainID    string           `json:"platformChainId"`
+	PlatformHeight     int64            `json:"platformHeight"`
+	PlatformHash       string           `json:"platformHash"`
+	PlatformProtocol   uint32           `json:"platformProtocol"`
+	PlatformNodeID     string           `json:"platformNodeId"`
+	CatchingUp         bool             `json:"catchingUp"`
+	VotingPower        map[string]int64 `json:"votingPower"`
+	DAPIHeight         int64            `json:"dapiHeight"`
+	DAPIHealthy        bool             `json:"dapiHealthy"`
 }
 type MigrationReceipt struct {
 	OperationID string `json:"operationId"`
@@ -159,6 +166,7 @@ type MigrationReceipt struct {
 }
 
 type Observation struct {
+	Mining          *MiningReceipt       `json:"mining,omitempty"`
 	Migration       *MigrationReceipt    `json:"migration,omitempty"`
 	Join            *node.CoreJoin       `json:"join,omitempty"`
 	InstanceID      string               `json:"instanceId"`
@@ -258,8 +266,10 @@ func validPin(pin string) bool {
 }
 
 type Migration struct {
-	Kind       string    `json:"kind"`
-	EpochStart time.Time `json:"epochStart"`
+	Kind            string    `json:"kind"`
+	EpochStart      time.Time `json:"epochStart"`
+	ReadinessDriven bool      `json:"readinessDriven,omitempty"`
+	Miners          []string  `json:"miners,omitempty"`
 }
 
 type Plan struct {

@@ -26,6 +26,35 @@ func (p Plan) validateMigration() error {
 	if m.Kind != LegacyTestnetV5 || m.EpochStart.IsZero() || m.EpochStart.After(p.CreatedAt) || p.CreatedAt.Sub(m.EpochStart) > 24*time.Hour || p.Operation != "upgrade" || p.Snapshot.Fleet.ChainType != "testnet" {
 		return errors.New("legacy-testnet-v5 requires a testnet upgrade and a recent chain-verified epoch start")
 	}
+	if len(m.Miners) > 0 && !m.ReadinessDriven {
+		return errors.New("mining pauses require readiness-driven checks")
+	}
+	seenMiners := map[string]bool{}
+	for _, name := range m.Miners {
+		if seenMiners[name] {
+			return errors.New("duplicate mining target")
+		}
+		seenMiners[name] = true
+		found := false
+		for _, t := range p.Snapshot.Fleet.Targets {
+			if t.Name == name && t.Role == "core" && t.MiningService == "dashd-generate-miner.service" && !p.Selects(t) {
+				if err := p.Snapshot.CompleteTargets([]string{name}); err != nil {
+					return err
+				}
+				o := p.Snapshot.Nodes[name]
+				if o.Mining == nil || !o.Mining.Active || !digestRE.MatchString(o.Mining.ServiceHash) {
+					return errors.New("active mining service baseline required")
+				}
+				found = true
+			}
+		}
+		if !found {
+			return errors.New("miners must be explicit unselected Core-only fleet targets")
+		}
+	}
+	if len(m.Miners) > 4 {
+		return errors.New("at most four explicit managed miners")
+	}
 	for _, t := range p.Snapshot.Fleet.Targets {
 		if !p.Selects(t) {
 			continue
@@ -84,5 +113,8 @@ func samePlannedIdentity(base, first, current Observation, t Target, p *Plan) bo
 }
 
 func (r Runner) planHealth(ctx context.Context, p Plan) (Health, error) {
+	if p.Migration != nil && p.Migration.ReadinessDriven {
+		return r.readinessHealth(ctx, p)
+	}
 	return doctorWithPlan(ctx, p.Snapshot, r.Remote, r.window(), r.wait, p.Targets, &p)
 }

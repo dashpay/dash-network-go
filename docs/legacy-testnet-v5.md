@@ -124,3 +124,71 @@ These are **not a real Dash/Core/Tenderdash rehearsal**. Before live use, exerci
 the actual candidate images and captured legacy layout on a separately authorized
 disposable clone, including stop/restart, consensus RPC authorization, existing
 database open/migration, protocol activation and interrupted-run recovery.
+
+## Readiness-driven, owned-miner-coordinated execution
+
+Opt in through the reviewed migration policy (the fields are hashed into the
+plan, not an ambient environment variable):
+
+```json
+{
+  "kind": "legacy-testnet-v5",
+  "epochStart": "2026-10-15T14:40:09Z",
+  "readinessDriven": true,
+  "miners": ["miner-1", "miner-2"]
+}
+```
+
+Again, the epoch timestamp is illustrative, not operational authority. Explicitly
+list the validators in `--nodes`. Add each owned miner as an **unselected**
+Core-only fleet target, with `miningService: "dashd-generate-miner.service"`, its
+verified EC2 identity/address/architecture and actual Core container name. Import
+and explicitly enroll those miners too. Their service and script fingerprint and
+original active state must be captured in the snapshot. The plan never replaces
+a miner's Core container, image, configuration, wallets or chain data.
+
+Readiness mode replaces the fixed four-minute health gap with immediate checks,
+then 15-second polling when evidence is missing, bounded to ten minutes. Each
+poll compares against the original progression baseline, so a slow block does
+not cause false failure after four short samples. It rejects identity/protocol
+regression, conflicting common Platform history, increased PoSe penalty, and
+banned/removed nodes. Core, ChainLock and Platform advancement are still required
+before staging and after each restarted validator. Fresh pre-withdrawal samples
+check health and available quorum without waiting for another block merely to
+repeat a just-completed progression check. The ordinary non-opted-in workflow
+retains its former behavior.
+
+For each new withdrawal:
+
+1. Verify epoch/DKG admission, then pause only the explicit mining services.
+   Each miner receives an operation-bound, tokenized fifteen-minute systemd
+   recovery timer **before** generation stops. A private write-ahead receipt
+   survives a lost SSH response. No timer extends implicitly on retries.
+2. Wait for Core's `getrpcinfo` to show no active generation RPC; stopping a
+   client alone is not sufficient. Confirm miners are inactive and agree on a
+   valid Core tip. Recheck fleet health and available quorum after this drain.
+3. Recheck epoch/DKG and the paused Core checkpoint on the target, perform the
+   same backed-up no-wipe migration, then poll target readiness. Controller work
+   for apply/readiness is bounded to ten minutes, below the independent lease.
+4. Require the recovered validator to retain the paused checkpoint, and verify
+   the mining leases did not expire. Resume mining and verify active services,
+   then require Core/ChainLock and Platform progression before the next node.
+
+Any error attempts mining restoration using an independent cleanup deadline.
+The watchdog also restores an originally active service after controller death,
+provided its configuration fingerprint still matches. Foreign pauses and
+originally inactive services are never claimed. Old timer tokens cannot resume a
+later pause. An expired lease or ambiguous recovery stops further withdrawals.
+Already withdrawn validators are recovered without waiting for a new epoch/DKG
+admission window. Their prior owned mining pause is reconciled before recovery.
+
+Public miners are outside this controller's authority, so owned-miner pauses
+**cannot guarantee a frozen chain or zero PoSe risk**. The height admission gate
+remains in force, even with mining paused. A watchdog can restore generation
+while a failed validator is still recovering; that is an explicitly bounded
+network-pause fallback, not a promise that its DKG risk has disappeared.
+
+Use separate reviewed canary and small-batch plans/resumptions; this change does
+not introduce parallel validator withdrawal, auto-select a canary, upgrade the
+Dashmate CLI/helper, activate a protocol, or authorize a live network operation.
+The actual-image/legacy-data rehearsal and exact release pins remain required.

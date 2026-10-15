@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/transport"
@@ -22,16 +23,18 @@ var worker string
 func RecipeDigest() string { return hash(worker) }
 
 type Request struct {
-	Migration       *Migration        `json:"migration,omitempty"`
-	Fleet           Fleet             `json:"fleet"`
-	FleetID         string            `json:"fleetId"`
-	Target          Target            `json:"target"`
-	Action          string            `json:"action"`
-	Expected        *Observation      `json:"expected,omitempty"`
-	Pins            map[string]string `json:"pins,omitempty"`
-	Operation       string            `json:"operation,omitempty"`
-	OperationID     string            `json:"operationId,omitempty"`
-	ReferenceHeight int64             `json:"referenceHeight,omitempty"`
+	CoreCheckpointHeight int64             `json:"coreCheckpointHeight,omitempty"`
+	CoreCheckpointHash   string            `json:"coreCheckpointHash,omitempty"`
+	Migration            *Migration        `json:"migration,omitempty"`
+	Fleet                Fleet             `json:"fleet"`
+	FleetID              string            `json:"fleetId"`
+	Target               Target            `json:"target"`
+	Action               string            `json:"action"`
+	Expected             *Observation      `json:"expected,omitempty"`
+	Pins                 map[string]string `json:"pins,omitempty"`
+	Operation            string            `json:"operation,omitempty"`
+	OperationID          string            `json:"operationId,omitempty"`
+	ReferenceHeight      int64             `json:"referenceHeight,omitempty"`
 }
 type Backend interface {
 	Call(context.Context, Request) (Observation, error)
@@ -68,7 +71,11 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 		if q.Expected == nil {
 			return Observation{}, errors.New("enrollment baseline required")
 		}
-	case "stage", "apply":
+	case "mining_pause", "mining_resume", "mining_status":
+		if q.Migration == nil || !q.Migration.ReadinessDriven || q.Migration.Kind != LegacyTestnetV5 || q.Fleet.ChainType != "testnet" || q.Target.Role != "core" || !slices.Contains(q.Migration.Miners, q.Target.Name) || q.Expected == nil || !digestRE.MatchString(q.OperationID) || q.Operation != "upgrade" {
+			return Observation{}, errors.New("explicit plan-bound testnet mining policy required")
+		}
+	case "stage", "apply", "admit":
 		if !digestRE.MatchString(q.OperationID) || q.Expected == nil || (q.Operation != "deploy" && q.Operation != "upgrade") {
 			return Observation{}, errors.New("reviewed operation required")
 		}

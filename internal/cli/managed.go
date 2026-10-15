@@ -61,7 +61,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		fs.StringVar(&confirm, "confirm", "", "exact snapshot/plan ID")
 	}
 	if command == "managed-plan" {
-		fs.StringVar(&migrationPath, "migration", "", "reviewed legacy-testnet-v5 policy JSON; requires core,drive,tenderdash,dapi scope")
+		fs.StringVar(&migrationPath, "migration", "", "reviewed legacy-testnet-v5 policy JSON; supports readinessDriven/miners; requires core,drive,tenderdash,dapi scope")
 		fs.StringVar(&scope, "scope", "platform", "component names (comma separated), platform or all")
 		fs.StringVar(&operation, "operation", "upgrade", "deploy (same-image restoration) or upgrade")
 		fs.StringVar(&choicesPath, "images", "", "JSON component to image candidate map; omitted components retain exact existing images")
