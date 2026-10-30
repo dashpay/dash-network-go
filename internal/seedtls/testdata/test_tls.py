@@ -143,6 +143,57 @@ class InstallationTests(unittest.TestCase):
 
 
 class PreservationTests(unittest.TestCase):
+    def test_failed_adoption_restores_bounded_helper_restart_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            systemd = base / 'systemd'; systemd.mkdir()
+            certificate = base / 'served.crt'; certificate.write_bytes(b'original-cert')
+            key = base / 'served.key'; key.write_bytes(b'original-key')
+            root = base / 'operation'
+            target = {'name': 'seed-1', 'helper': 'existing-helper',
+                      'hostname': 'seed.example.org', 'address': '8.8.8.8'}
+            baseline = {'paths': {'certificate': str(certificate), 'key': str(key)}}
+            helper = {'Name': '/existing-helper', 'State': {'Running': True},
+                      'HostConfig': {'RestartPolicy': {'Name': 'on-failure', 'MaximumRetryCount': 5}}}
+            plan = {'id': 'test-plan', 'snapshot': {'target': target, 'baseline': baseline,
+                    'fingerprint': worker.sha(baseline)}, 'acmeImage': 'example@sha256:test',
+                    'email': 'ops@example.org'}
+            renewal = '''
+def issue(*args, **kwargs):
+    raise ValueError('simulated-issuance-failure')
+def recover(*args): pass
+def write_existing(*args): pass
+def reload(*args): pass
+'''
+            real_require = worker.require
+            def require(condition, message):
+                # The test operation directory is task-owned, not root-owned.
+                if message != 'unsafe-operation-directory':
+                    real_require(condition, message)
+            def path(value):
+                return systemd if value == '/etc/systemd/system' else Path(value)
+            with mock.patch.object(worker, 'require', side_effect=require), \
+                    mock.patch.object(worker, 'Path', side_effect=path), \
+                    mock.patch.object(worker, 'observe', return_value=(baseline, [helper])), \
+                    mock.patch.object(worker, 'core_ready'), \
+                    mock.patch.object(worker, 'check_retirement'), \
+                    mock.patch.object(worker, 'backup_package'), \
+                    mock.patch.object(worker.socket, 'getaddrinfo', return_value=[(0, 0, 0, '', ('8.8.8.8', 443))]), \
+                    mock.patch.object(worker.socket, 'socket'), \
+                    mock.patch.object(worker, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'simulated-issuance-failure'):
+                    worker.apply({'target': target, 'plan': plan, 'renewSource': renewal}, root)
+            updates = [call.args[0] for call in run.call_args_list
+                       if call.args[0][:2] == ['docker', 'update']]
+            self.assertEqual(updates, [
+                ['docker', 'update', '--restart=no', 'existing-helper'],
+                ['docker', 'update', '--restart=on-failure:5', 'existing-helper'],
+            ])
+            run.assert_any_call(['docker', 'start', 'existing-helper'])
+            self.assertEqual(json.loads((root / 'operation.json').read_text())['phase'], 'rolled-back')
+            self.assertEqual(certificate.read_bytes(), b'original-cert')
+            self.assertEqual(key.read_bytes(), b'original-key')
+
     def test_container_configuration_and_start_time_preserved(self):
         expected = {'containers': {'core': {'id': 'a', 'startedAt': 'before'}, 'helper': {'id': 'h'}}, 'files': {'/config': 'sha'}}
         current = {'containers': {'core': {'id': 'a', 'startedAt': 'before'}}, 'files': {'/config': 'sha'}}
