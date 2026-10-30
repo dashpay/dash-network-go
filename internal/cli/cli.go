@@ -67,6 +67,12 @@ Usage:
   dashnet join --plan join.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
   dashnet version
 
+  dashnet seed-tls-inspect --target seed.json --ssh-key PATH --known-hosts PATH --out seed-snapshot.json
+  dashnet seed-tls-plan --snapshot seed-snapshot.json --acme-image IMAGE@sha256:DIGEST --acme-email EMAIL --out seed-plan.json
+  dashnet seed-tls-apply --plan seed-plan.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
+  dashnet seed-tls-doctor --target seed.json --ssh-key PATH --known-hosts PATH
+  dashnet seed-tls-rollback --plan seed-plan.json --confirm PLAN_ID --ssh-key PATH --known-hosts PATH
+
 Planning and discovery are read-only. Provision creates EC2 instances and durable
 DynamoDB state: devnet compute or testnet fullnode allocations, NOT a working network. operation-unlock
 changes a runner claim and requires the previous runner to be stopped first.
@@ -101,6 +107,8 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		})
 	}
 	switch args[0] {
+	case "seed-tls-inspect", "seed-tls-plan", "seed-tls-apply", "seed-tls-doctor", "seed-tls-rollback":
+		return runSeedTLS(ctx, args, out, stderr)
 	case "join-plan", "join":
 		return runJoin(ctx, args, out, stderr)
 	case "managed-join-profile", "managed-import", "managed-enroll", "managed-plan", "managed-deploy", "managed-upgrade", "managed-doctor", "managed-operation", "managed-unlock":
