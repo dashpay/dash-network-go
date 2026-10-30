@@ -6,6 +6,11 @@ Node services are nonetheless **dashmate's own**: each node's release renders th
 with its pinned dashmate helper image, and they run from that release's dashmate
 compose files; dashmate never runs a node's lifecycle ([details](docs/lifecycle.md#dashmate-services)).
 
+Existing AWS mainnet DAPI bootstrap gateways have a separate, narrowly scoped
+[hostname/IP TLS adoption path](docs/dapi-seed-tls.md). It retires the installed
+Dashmate package/helper while preserving the running node stack, adds independent
+ACME renewal and rollback, and does not enable general mainnet deployments.
+
 New public-facing allocations require an explicit [AWS BYOIP/IPAM pool](docs/ipam.md).
 Their Elastic IPs are ownership-tagged and journaled through allocation, resume
 and explicit post-termination cleanup; automatic Amazon public IPv4 is disabled.
