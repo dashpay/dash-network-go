@@ -6,6 +6,7 @@ Core, DAPI, Drive, Tenderdash, rate limiters, networks and all volumes are kept.
 import datetime
 import fcntl
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -64,6 +65,37 @@ def package():
     return p.stdout.strip() if p.returncode == 0 else 'absent'
 
 
+def container_fingerprint(c):
+    # Docker emits Mounts from a map; ordering is not a workload change.
+    return sha([c['Config'], c['HostConfig'], sorted(c['Mounts'], key=lambda m: m['Destination'])])
+
+
+def configuration_digest(path):
+    data = path.read_bytes()
+    # The legacy helper can regenerate rpcauth salts while running. As in the
+    # existing managed adapter, normalize ONLY HMAC-verified credentials. Do not
+    # ignore authentication lines, unknown users, or any other configuration.
+    if path.name == 'dash.conf' and path.parent.name == 'core' and path.parents[2].name == '.dashmate':
+        source = path.parents[2] / 'config.json'
+        require(source.is_file() and not source.is_symlink() and source.stat().st_size <= 2*1024*1024, 'rpc-auth-source')
+        users = json.loads(source.read_text())['configs'][path.parents[1].name]['core']['rpc']['users']
+        lines = []
+        for line in data.decode().splitlines(keepends=True):
+            if line.startswith('rpcauth='):
+                user, auth = line[len('rpcauth='):].strip().split(':', 1)
+                salt, digest = auth.split('$', 1)
+                password = users.get(user, {}).get('password')
+                require(isinstance(password, str) and bool(password), 'rpc-auth-source')
+                verified = hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()
+                require(hmac.compare_digest(verified, digest), 'rpc-auth-source-mismatch')
+                credential = sha(['dashnet-rpcauth-v1', user, password])
+                ending = '\r\n' if line.endswith('\r\n') else ('\n' if line.endswith('\n') else '')
+                line = 'rpcauth=' + user + ':verified-credential-' + credential + ending
+            lines.append(line)
+        data = ''.join(lines).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
 def file_hashes(c, excluded):
     result = {}
     for mount in c['Mounts']:
@@ -76,7 +108,7 @@ def file_hashes(c, excluded):
             require(not f.is_symlink(), 'symlink-bound-config')
             if f.is_file():
                 require(f.stat().st_size < 32 * 1024 * 1024, 'unexpected-large-bound-file')
-                result[str(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
+                result[str(f)] = configuration_digest(f)
     return result
 
 
@@ -110,7 +142,7 @@ def observe(t, allow_retired=False):
         n = c['Name'].lstrip('/')
         is_helper = n == t['helper']
         require(is_helper or c['State']['Running'], 'seed-service-not-running')
-        baseline['containers'][n] = {'id': c['Id'], 'image': c['Image'], 'config': sha([c['Config'], c['HostConfig'], c['Mounts']]), 'startedAt': '' if is_helper else c['State']['StartedAt']}
+        baseline['containers'][n] = {'id': c['Id'], 'image': c['Image'], 'config': container_fingerprint(c), 'startedAt': '' if is_helper else c['State']['StartedAt']}
         if not is_helper:
             baseline['files'].update(file_hashes(c, set(paths.values())))
     return baseline, family
@@ -205,7 +237,7 @@ def restore_helper(saved):
     if restart == 'on-failure' and policy.get('MaximumRetryCount'):
         restart += ':' + str(policy['MaximumRetryCount'])
     run(['docker', 'update', '--restart=' + restart, name])
-    if saved['State']['Running']:
+    if saved['State']['Running'] or saved['State'].get('Restarting'):
         run(['docker', 'start', name])
 
 
@@ -339,7 +371,7 @@ def apply(q, root):
                 ns['reload'](config)
             policy = helper['HostConfig']['RestartPolicy']['Name']
             run(['docker', 'update', '--restart=' + policy, t['helper']])
-            if helper['State']['Running']:
+            if helper['State']['Running'] or helper['State'].get('Restarting'):
                 run(['docker', 'start', t['helper']])
             state['phase'] = 'rolled-back'; atomic(record, state)
             raise

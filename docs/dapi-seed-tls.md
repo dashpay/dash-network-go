@@ -55,6 +55,10 @@ dashnet seed-tls-doctor --target seed.json --profile OPS \
 
 Plans bind the worker/renewal recipe, immutable ACME image, exact target and
 fresh (24-hour) source snapshot. Apply rejects configuration/container drift.
+Mount observations are sorted by destination because Docker does not guarantee
+their order. Legacy `rpcauth` salts are normalized only after verifying each
+HMAC against the named on-host profile credential; changed users/passwords,
+invalid hashes and all other configuration changes remain drift.
 EC2 Instance Connect can provide temporary SSH access separately; the tool does
 not install permanent SSH keys or change IAM/security groups/DNS.
 

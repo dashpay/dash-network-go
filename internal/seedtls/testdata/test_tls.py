@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import hashlib
+import hmac
 from pathlib import Path
 import subprocess
 import socket
@@ -143,6 +145,34 @@ class InstallationTests(unittest.TestCase):
 
 
 class PreservationTests(unittest.TestCase):
+    def test_mount_order_is_not_drift_but_source_change_is(self):
+        a = {'Config': {'Image': 'pinned'}, 'HostConfig': {'Binds': ['a:/a', 'b:/b']}, 'Mounts': [
+            {'Source': '/a', 'Destination': '/a', 'RW': False},
+            {'Source': '/b', 'Destination': '/b', 'RW': True}]}
+        b = json.loads(json.dumps(a)); b['Mounts'].reverse()
+        self.assertEqual(worker.container_fingerprint(a), worker.container_fingerprint(b))
+        b['Mounts'][0]['Source'] = '/other'
+        self.assertNotEqual(worker.container_fingerprint(a), worker.container_fingerprint(b))
+
+    def test_rpc_salt_normalization_verifies_authentication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)/'.dashmate'
+            config = root/'mainnet/core/dash.conf'; config.parent.mkdir(parents=True)
+            def profile(password):
+                (root/'config.json').write_text(json.dumps({'configs': {'mainnet': {'core': {'rpc': {'users': {'dapi': {'password': password}}}}}}}))
+            def render(salt, password, other='server=1'):
+                digest = hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()
+                config.write_text('rpcauth=dapi:' + salt + '$' + digest + '\n' + other + '\n')
+            profile('first-password')
+            render('salt-one', 'first-password'); first = worker.configuration_digest(config)
+            render('salt-two', 'first-password'); self.assertEqual(first, worker.configuration_digest(config))
+            render('salt-two', 'first-password', 'server=0'); self.assertNotEqual(first, worker.configuration_digest(config))
+            render('salt-two', 'wrong-password')
+            with self.assertRaisesRegex(worker.Failure, 'rpc-auth-source-mismatch'):
+                worker.configuration_digest(config)
+            profile('changed-password'); render('salt-three', 'changed-password')
+            self.assertNotEqual(first, worker.configuration_digest(config))
+
     def test_container_configuration_and_start_time_preserved(self):
         expected = {'containers': {'core': {'id': 'a', 'startedAt': 'before'}, 'helper': {'id': 'h'}}, 'files': {'/config': 'sha'}}
         current = {'containers': {'core': {'id': 'a', 'startedAt': 'before'}}, 'files': {'/config': 'sha'}}
