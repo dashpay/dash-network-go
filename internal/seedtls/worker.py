@@ -345,6 +345,8 @@ def apply(q, root):
             raise
         # No package maintainer scripts, no purge, no volumes removed. Historical
         # rendered files remain mounted; they are data, not a Dashmate dependency.
+        check_retirement()
+        require(package() == baseline['package'], 'dashmate-package-drift')
         run(['dpkg', '--remove', 'dashmate'], timeout=120)
         run(['docker', 'rm', t['helper']])
         run(['systemctl', 'enable', '--now', unit + '.timer'])
