@@ -18,10 +18,20 @@ jobs:
           echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
           python3 --version
           openssl version
-      - name: Fixture variants under the runner's default verification
-        run: python3 .github/probe/probe_strict.py
-      - name: Main's failing test with the swallowed exception printed
-        run: python3 .github/probe/run_failing_test.py
-      - name: renew.peer's context against public Let's Encrypt chains
+      - name: What the test's listener sees when renew.peer disconnects
+        run: python3 .github/probe/probe_server.py
+      - name: Test with only the CA fixed (PR head 56d7501), swallowed exceptions printed
         if: always()
-        run: python3 .github/probe/probe_strict.py --public valid-isrgrootx1.letsencrypt.org valid-isrgrootx2.letsencrypt.org letsencrypt.org | sed -n '/=== renew.peer/,$p'
+        run: python3 .github/probe/run_failing_test.py ca_fixed_only
+      - name: Candidate test (num_tickets = 0), 25 runs of the whole seed TLS suite
+        if: always()
+        run: |
+          failed=0
+          for i in $(seq 1 25); do
+            if ! python3 -m unittest discover -s internal/seedtls/testdata -p 'test_*.py' > out.txt 2>&1; then
+              failed=$((failed+1)); echo "--- run $i failed"; cat out.txt
+            fi
+          done
+          tail -4 out.txt
+          echo "failed runs: $failed of 25"
+          test "$failed" -eq 0

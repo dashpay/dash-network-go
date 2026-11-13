@@ -59,6 +59,7 @@ class CertificateTests(unittest.TestCase):
     def test_real_served_tls_validates_both_identities(self):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(str(self.root/'leaf.crt'), str(self.root/'leaf.key'))
+        context.num_tickets = 0
         listener = socket.socket()
         listener.bind(('127.0.0.1', 0))
         listener.listen(4)

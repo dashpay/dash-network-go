@@ -3,7 +3,8 @@ import sys
 import unittest
 
 sys.path.insert(0, 'internal/seedtls/testdata')
-import test_tls
+import importlib
+test_tls = importlib.import_module(sys.argv[1] if len(sys.argv) > 1 else 'test_tls')
 
 original = test_tls.renew.peer
 
@@ -18,5 +19,6 @@ def peer(*args, **kwargs):
 
 
 test_tls.renew.peer = peer
+server_errors = []
 result = unittest.main(module=test_tls, argv=['probe', '-v', 'CertificateTests.test_real_served_tls_validates_both_identities'], exit=False).result
 print('test passed:', result.wasSuccessful())
