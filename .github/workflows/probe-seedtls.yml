@@ -35,3 +35,21 @@ jobs:
           tail -4 out.txt
           echo "failed runs: $failed of 25"
           test "$failed" -eq 0
+  previous-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Image
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          python3 --version
+          openssl version
+          python3 -c "import ssl; c = ssl.create_default_context(); print('default verify_flags', int(c.verify_flags), repr(c.verify_flags))"
+      - name: What the test's listener sees on the previous image
+        run: python3 .github/probe/probe_server.py
+      - name: main's test file on the previous image
+        if: always()
+        run: python3 .github/probe/run_failing_test.py main_version
