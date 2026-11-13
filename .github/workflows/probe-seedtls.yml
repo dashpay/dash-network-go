@@ -1,0 +1,27 @@
+name: probe seed TLS strict X.509
+on:
+  push:
+    branches: ['probe/seedtls-strict-x509']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Runner image
+        run: |
+          cat /etc/os-release | head -4
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          python3 --version
+          openssl version
+      - name: Fixture variants under the runner's default verification
+        run: python3 .github/probe/probe_strict.py
+      - name: Main's failing test with the swallowed exception printed
+        run: python3 .github/probe/run_failing_test.py
+      - name: renew.peer's context against public Let's Encrypt chains
+        if: always()
+        run: python3 .github/probe/probe_strict.py --public valid-isrgrootx1.letsencrypt.org valid-isrgrootx2.letsencrypt.org letsencrypt.org | sed -n '/=== renew.peer/,$p'
