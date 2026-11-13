@@ -1343,6 +1343,11 @@ class Worker:
             "SPORK_21_QUORUM_ALL_CONNECTED",
         ]
         active = self.rpc("spork", ["active"])
+        # Core 24 removed sporks 3 and 9: what they gated is always on there,
+        # and they are no longer listed or accepted. Any other absence is a
+        # Core this tool does not know how to activate.
+        retired = ["SPORK_3_INSTANTSEND_BLOCK_FILTERING", "SPORK_9_SUPERBLOCKS_ENABLED"]
+        required = [key for key in required if key in active or key not in retired]
         self.require(all(key in active for key in required), "unsupported-spork-profile")
         for key in required:
             if not active[key]:

@@ -216,6 +216,29 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
             w.activate()
 
+        class Core24(Sporks):
+            """Core 24 has no sporks 3 and 9 and refuses an update that names one."""
+            active = {"SPORK_2_INSTANTSEND_ENABLED": False,
+                      "SPORK_17_QUORUM_DKG_ENABLED": False,
+                      "SPORK_19_CHAINLOCKS_ENABLED": False,
+                      "SPORK_21_QUORUM_ALL_CONNECTED": False,
+                      "SPORK_23_QUORUM_POSE": False}
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "sporkupdate" and params[0] not in self.active:
+                    raise worker.RPCFailure(method, -8)
+                return super().rpc(method, params, wallet)
+
+        w = Core24(request())
+        w.activate()
+        w.activate()
+        self.assertEqual(w.updates, 4)
+        self.assertEqual(w.active["SPORK_23_QUORUM_POSE"], False, "activates only what a devnet needs")
+        # Only the two sporks Core retired may be absent.
+        del w.active["SPORK_2_INSTANTSEND_ENABLED"]
+        with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
+            w.activate()
+
     def test_block_time_sets_core_spacing_and_miner_cadence(self):
         class Miner(worker.Worker):
             def __init__(self, q, root):
