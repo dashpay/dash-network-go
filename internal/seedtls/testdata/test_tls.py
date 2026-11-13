@@ -59,6 +59,10 @@ class CertificateTests(unittest.TestCase):
     def test_real_served_tls_validates_both_identities(self):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(str(self.root/'leaf.crt'), str(self.root/'leaf.key'))
+        # renew.peer hangs up as soon as it has the certificate. A TLS 1.3 server
+        # that is still sending session tickets then fails its own handshake
+        # with EPIPE, and this listener would close before the IP identity.
+        context.num_tickets = 0
         listener = socket.socket()
         listener.bind(('127.0.0.1', 0))
         listener.listen(4)
