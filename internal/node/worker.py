@@ -153,6 +153,27 @@ def block_age(stamp, now=None):
     return max(0, int((now - when).total_seconds()))
 
 
+# Order of the secp256k1 group: a private key is an integer in [1, order - 1].
+SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def new_private_key():
+    """A new private key in Core's wallet import format, for a compressed
+    public key on a test chain (devnet, testnet and regtest share version 239).
+
+    Only the encoding is done here. Core checks the key and derives its
+    address: see Worker.key_address."""
+    number = secrets.randbelow(SECP256K1_ORDER - 1) + 1
+    raw = b"\xef" + number.to_bytes(32, "big") + b"\x01"
+    raw += hashlib.sha256(hashlib.sha256(raw).digest()).digest()[:4]
+    value, text = int.from_bytes(raw, "big"), ""
+    while value:
+        value, digit = divmod(value, 58)
+        text = BASE58[digit] + text
+    return text
+
+
 class Failure(Exception):
     pass
 
@@ -1119,6 +1140,25 @@ class Worker:
                 raise
         return self.rpc("getnewaddress", [label], True)
 
+    def key_address(self, key):
+        """The address of a private key, derived by Core without any wallet.
+
+        Core parses the key (refusing one for another chain or a damaged one)
+        and returns the same descriptor with the public key in its place."""
+        info = self.rpc("getdescriptorinfo", ["pkh(" + key + ")"])
+        self.require(
+            info.get("hasprivatekeys") is True
+            and info.get("isrange") is False
+            and key not in info.get("descriptor", key),
+            "private-key-descriptor",
+        )
+        found = self.rpc("deriveaddresses", [info["descriptor"]])
+        self.require(
+            isinstance(found, list) and len(found) == 1 and isinstance(found[0], str) and found[0],
+            "private-key-address",
+        )
+        return found[0]
+
     def wallet(self):
         self.require(self.t["role"] == "wallet", "wallet-only")
         if "dashnet" not in self.rpc("listwallets"):
@@ -1128,10 +1168,20 @@ class Worker:
             else:
                 self.rpc("createwallet", ["dashnet"])
         secret = self.secret()
-        payout, spork = self.address("dashnet:payout"), self.address("dashnet:spork")
+        payout = self.address("dashnet:payout")
+        # The spork key is this tool's, not the wallet's. Core 24 creates
+        # descriptor wallets, from which no single key can be exported
+        # (dumpprivkey is refused), and a legacy wallet is a type Core is
+        # retiring. So the key is made here and Core derives its address,
+        # identically on every Core version and wallet type. A deployment made
+        # before this kept the key it exported from its legacy wallet: that
+        # key derives the same address it always had.
         if "sporkKey" not in secret:
-            secret["sporkKey"] = self.rpc("dumpprivkey", [spork], True)
+            key = new_private_key()
+            self.key_address(key)  # Core accepts it before it is recorded
+            secret["sporkKey"] = key
             self.atomic("secrets.json", secret)
+        spork = self.key_address(secret["sporkKey"])
         # Core can restart between broadcast and the controller checkpoint. Re-lock
         # every locally recorded collateral before any subsequent wallet funding.
         for path in sorted((self.root / "transactions").glob("*.json")):
