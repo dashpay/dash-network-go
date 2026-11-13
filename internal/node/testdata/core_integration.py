@@ -50,9 +50,6 @@ def main():
             call("core-finalize")
             # Reload after Core restart before funding (wallet load is explicit).
             call("wallet")
-            call("activate")
-            # Exercise the live update RPC as well as readback/idempotent resume.
-            call("activate")
             q["requiredBalance"] = 4001
             # Premine at minimum difficulty in batches, as a real devnet does.
             q["context"]["premineHeight"] = 600
@@ -125,6 +122,15 @@ def main():
             assert (
                 len(w.rpc("listlockunspent", [], True)) == 2
             ), "Second registration spent first collateral"
+            # Sporks last, as a deployment does (registrations, then activate).
+            # With InstantSend on, Core keeps a transaction that has no
+            # InstantSend lock out of blocks for ten minutes, and this lone
+            # node has no quorum to lock one. Core 23 skipped that rule on a
+            # node whose masternode sync is incomplete; Core 24 does not, so
+            # registering after activation cannot confirm here.
+            call("activate")
+            # Exercise the live update RPC as well as readback/idempotent resume.
+            call("activate")
             print(
                 "Real Core: config, wallet, signed EvoNode registration, idempotent replay, stop/resume passed.",
                 flush=True,
