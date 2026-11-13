@@ -221,6 +221,12 @@ are not the shared journal; EC2 provisioning stores that separately in DynamoDB.
   This does not register a new validator or expand an enrolled fleet implicitly.
 - **Container contracts:** real Core wallet/registration/recovery and real
   Tenderdash/Envoy/DAPI configuration/TLS/gRPC; no AWS access or fleet-health claim.
+- **Core compatibility:** the Core-facing code against a real `dashd` of each
+  supported Core major (23 and 24): a lone regtest node for the wallet, spork
+  key, funding, EvoNode registration and spork activation, then the devnet Core
+  that dashmate renders. Before deploying any other Core release, dispatch it
+  with that image: `image=dashpay/dashd:<tag>`. It proves the RPC surface this
+  tool uses, not quorums, ChainLocks or Platform on that Core.
 
 ## Development
 
