@@ -29,9 +29,13 @@ class CertificateTests(unittest.TestCase):
         cls.root = Path(cls.tmp.name)
         def openssl(*args):
             subprocess.run(['openssl', *args], cwd=cls.root, check=True, capture_output=True)
-        openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=Test CA', '-days', '10', '-keyout', 'ca.key', '-out', 'ca.crt')
+        # Python 3.13+ verifies with VERIFY_X509_STRICT by default, which rejects
+        # a CA without keyUsage and a leaf without an authority key identifier.
+        # Publicly trusted chains carry both; state them instead of relying on
+        # what this OpenSSL CLI happens to add.
+        openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=Test CA', '-days', '10', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', 'ca.key', '-out', 'ca.crt')
         openssl('req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=seed.example.org', '-keyout', 'leaf.key', '-out', 'leaf.csr')
-        (cls.root/'san').write_text('subjectAltName=DNS:seed.example.org,IP:8.8.8.8\nextendedKeyUsage=serverAuth\n')
+        (cls.root/'san').write_text('subjectAltName=DNS:seed.example.org,IP:8.8.8.8\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nauthorityKeyIdentifier=keyid:always\n')
         openssl('x509', '-req', '-in', 'leaf.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '5', '-extfile', 'san', '-out', 'leaf.crt')
         (cls.root/'trust').mkdir()
         (cls.root/'trust/ca.crt').write_bytes((cls.root/'ca.crt').read_bytes())
@@ -55,6 +59,10 @@ class CertificateTests(unittest.TestCase):
     def test_real_served_tls_validates_both_identities(self):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(str(self.root/'leaf.crt'), str(self.root/'leaf.key'))
+        # renew.peer hangs up as soon as it has the certificate. A TLS 1.3 server
+        # still has session tickets to send then and gets EPIPE (from recv on
+        # the CI image), and this listener would close before the IP identity.
+        context.num_tickets = 0
         listener = socket.socket()
         listener.bind(('127.0.0.1', 0))
         listener.listen(4)
@@ -75,7 +83,13 @@ class CertificateTests(unittest.TestCase):
         thread.start()
         real_connect = socket.create_connection
         real_context = ssl.create_default_context
-        with mock.patch.object(renew.socket, 'create_connection', side_effect=lambda *_a, **_kw: real_connect(address, timeout=5)), mock.patch.object(renew.ssl, 'create_default_context', side_effect=lambda: real_context(cafile=str(self.root/'ca.crt'))):
+        def strict_context():
+            # Strict on every interpreter, so the fixture cannot pass on an
+            # older Python and fail on the next runner image.
+            trusted = real_context(cafile=str(self.root/'ca.crt'))
+            trusted.verify_flags |= ssl.VERIFY_X509_STRICT
+            return trusted
+        with mock.patch.object(renew.socket, 'create_connection', side_effect=lambda *_a, **_kw: real_connect(address, timeout=5)), mock.patch.object(renew.ssl, 'create_default_context', side_effect=strict_context):
             cfg = {'hostname': 'seed.example.org', 'address': '8.8.8.8'}
             renew.wait_peer(cfg, renew.leaf_der((self.root/'leaf.crt').read_bytes()))
         thread.join(6)
