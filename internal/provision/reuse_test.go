@@ -58,7 +58,7 @@ func TestDestroyedNetworkNameIsReusedBySuccessorPlan(t *testing.T) {
 	ctx := context.Background()
 	identity := testutil.Identity{Account: p.Network.AWS.AccountID}
 	// The retired plan itself, and the same network planned afresh, stay refused.
-	if _, err := ipamRun(p, c, s); err == nil || !strings.Contains(err.Error(), "allocation retired") {
+	if _, err := ipamRun(p, c, s); !errors.Is(err, ErrRetired) || !strings.Contains(err.Error(), "allocation retired") {
 		t.Fatal("retired plan provisioned again", err)
 	}
 	again, err := Prepare(ctx, p.Network, identity, c)
@@ -81,12 +81,12 @@ func TestDestroyedNetworkNameIsReusedBySuccessorPlan(t *testing.T) {
 	if _, err = Execute(ctx, next, identity, c, plainStore{s}, "owner", "test", time.Millisecond, nil); err == nil || s.record.Plan.ID != p.ID {
 		t.Fatal("a journal without succession handed the name over", err)
 	}
-	old := len(c.Instances)
+	old, retiredAt := len(c.Instances), s.record.Revision
 	r, err := Execute(ctx, next, identity, c, s, "owner", "test", time.Millisecond, nil)
 	if err != nil || r.Phase != "compute-ready" || r.Plan.ID != next.ID || len(c.Instances) != old+len(p.Targets) || len(c.addresses) != len(p.Targets) {
 		t.Fatal("successor did not provision past the terminated predecessor", err)
 	}
-	if r.Predecessor == nil || r.Predecessor.PlanID != p.ID || r.Predecessor.Archive != p.ArchiveKey() || len(r.Predecessor.Instances) != len(p.Targets) || r.Bootstrap != nil || r.Deployment != nil || r.Runtime != nil || r.Upgrade != nil {
+	if r.Predecessor == nil || r.Predecessor.PlanID != p.ID || r.Predecessor.Revision != retiredAt || r.Predecessor.Archive != p.ArchiveKey(retiredAt) || len(r.Predecessor.Instances) != len(p.Targets) || r.Bootstrap != nil || r.Deployment != nil || r.Runtime != nil || r.Upgrade != nil {
 		t.Fatal("successor operation is not fresh or lost its predecessor")
 	}
 	for _, target := range next.Targets {
@@ -246,7 +246,7 @@ func TestOnlyARetiredOperationHasASuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []string{"lost", "plan", "archive", "instances", "unsorted"} {
+	for _, change := range []string{"lost", "plan", "archive", "revision", "instances", "unsorted"} {
 		r := copyRecord(fresh)
 		switch change {
 		case "lost":
@@ -255,6 +255,9 @@ func TestOnlyARetiredOperationHasASuccessor(t *testing.T) {
 			r.Predecessor.PlanID = strings.Repeat("a", 64)
 		case "archive":
 			r.Predecessor.Archive = p.Key()
+		case "revision":
+			// The archive key names the revision that was replaced.
+			r.Predecessor.Revision++
 		case "instances":
 			r.Predecessor.Instances = nil
 		case "unsorted":

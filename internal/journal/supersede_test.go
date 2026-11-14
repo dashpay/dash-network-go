@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/dashpay/dash-network-go/internal/provision"
 	"github.com/dashpay/dash-network-go/internal/testutil"
@@ -38,6 +40,21 @@ func retiredFixture(t *testing.T) (Dynamo, *database, provision.Plan, provision.
 		t.Fatal("invalid successor plan", err)
 	}
 	return d, db, p, next, c
+}
+
+// archiveKey is where a plan's operation is kept once the given item, its live
+// record, has been replaced.
+func archiveKey(t *testing.T, p provision.Plan, item map[string]types.AttributeValue) string {
+	t.Helper()
+	n, ok := item["Revision"].(*types.AttributeValueMemberN)
+	if !ok {
+		t.Fatal("journal item has no revision")
+	}
+	revision, err := strconv.ParseInt(n.Value, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.ArchiveKey(revision)
 }
 
 // rewrite changes the stored payload of the live item, as raw JSON.
@@ -70,15 +87,16 @@ func TestRetiredNameIsArchivedAndHandedToItsSuccessor(t *testing.T) {
 	if err != nil || r.Phase != "pending" || r.Revision != 0 || r.Plan.ID != next.ID || r.Predecessor == nil || r.Predecessor.PlanID != p.ID || len(r.Predecessor.Instances) != len(p.Targets) || r.Bootstrap != nil || r.Deployment != nil || r.Runtime != nil || r.Upgrade != nil {
 		t.Fatal("successor did not start a fresh operation", err)
 	}
-	kept := db.archived[p.ArchiveKey()]
-	if len(db.archived) != 1 || len(kept) != 4 || value(kept, "Network") != p.ArchiveKey() || value(kept, "PlanID") != p.ID || value(kept, "Data") != value(before, "Data") || !sameNumber(kept["Revision"], before["Revision"]) {
+	archive := archiveKey(t, p, before)
+	kept := db.archived[archive]
+	if len(db.archived) != 1 || len(kept) != 4 || r.Predecessor.Archive != archive || value(kept, "Network") != archive || value(kept, "PlanID") != p.ID || value(kept, "Data") != value(before, "Data") || !sameNumber(kept["Revision"], before["Revision"]) {
 		t.Fatal("retired operation was not archived verbatim")
 	}
 	if value(db.item, "Network") != p.Key() || value(db.item, "PlanID") != next.ID || value(db.item, "Owner") != "one" || !sameNumber(db.item["Revision"], number(0)) {
 		t.Fatal("live item is not the successor's claimed operation")
 	}
 	current, owner, err := d.Read(ctx, next)
-	if err != nil || owner != "one" || current.Predecessor.Archive != p.ArchiveKey() || current.Predecessor.Revision != r.Predecessor.Revision {
+	if err != nil || owner != "one" || current.Predecessor.Archive != archive || current.Predecessor.Revision != r.Predecessor.Revision {
 		t.Fatal("successor operation unreadable", err)
 	}
 	if _, _, err = d.Read(ctx, p); err == nil {
@@ -118,8 +136,118 @@ func TestRetiredNameIsArchivedAndHandedToItsSuccessor(t *testing.T) {
 	if err != nil || succeeds != p.ID || reused {
 		t.Fatal("an interrupted successor cannot be planned again", err)
 	}
-	if value(db.archived[p.ArchiveKey()], "Data") != value(before, "Data") {
+	if value(db.archived[archive], "Data") != value(before, "Data") {
 		t.Fatal("archive changed after the handover")
+	}
+}
+
+// A retired operation is the proof that releases its network's name. No stage
+// may claim it and write new checkpoints into it: a retried deployment used to.
+func TestRetiredOperationIsNeverClaimedOrChangedAgain(t *testing.T) {
+	d, db, p, next, _ := retiredFixture(t)
+	ctx := context.Background()
+	// A record today's rules accept in full, so only its retirement stands in the way.
+	rewrite(t, db, func(fields map[string]json.RawMessage) {
+		for _, field := range historyFields {
+			delete(fields, field)
+		}
+	})
+	if r, _, err := d.Read(ctx, p); err != nil || r.Phase != "addresses-released" {
+		t.Fatal("fixture is not a fully valid retired operation", err)
+	}
+	before, saves := clone(db.item), db.saves
+	untouched := func() bool {
+		return len(db.item) == len(before) && value(db.item, "Owner") == "" && value(db.item, "Data") == value(before, "Data") && sameNumber(db.item["Revision"], before["Revision"]) && db.saves == saves
+	}
+	if _, err := d.Acquire(ctx, p, "deploy"); !errors.Is(err, provision.ErrRetired) || !untouched() {
+		t.Fatal("a stage claimed a retired operation", err)
+	}
+	// Retired between the stage's read and its claim: the claim is given back unused.
+	retiredData := value(db.item, "Data")
+	rewrite(t, db, func(fields map[string]json.RawMessage) { fields["phase"] = json.RawMessage(`"compute-ready"`) })
+	db.claimResponse = func(out *dynamodb.UpdateItemOutput) (*dynamodb.UpdateItemOutput, error) {
+		db.item["Data"] = str(retiredData)
+		out.Attributes["Data"] = str(retiredData)
+		return out, nil
+	}
+	if _, err := d.Acquire(ctx, p, "deploy"); !errors.Is(err, provision.ErrRetired) || !untouched() {
+		t.Fatal("a stage kept a claim on an operation retired under it", err)
+	}
+	db.claimResponse = nil
+	// Address cleanup may still look, and changes nothing. The name is then handed over.
+	cleanup := d.AddressCleanup()
+	if r, err := cleanup.Acquire(ctx, p, "cleanup"); err != nil || r.Phase != "addresses-released" {
+		t.Fatal("address cleanup can no longer replay a retired operation", err)
+	}
+	if err := cleanup.Release(ctx, p, "cleanup"); err != nil || !untouched() {
+		t.Fatal("address cleanup changed a retired operation", err)
+	}
+	r, err := d.Supersede(ctx, next, "runner")
+	if err != nil || r.Predecessor.Archive != archiveKey(t, p, before) || value(db.archived[r.Predecessor.Archive], "Data") != value(before, "Data") {
+		t.Fatal("handover failed after refused claims", err)
+	}
+	// The successor, once retired in its turn, is as closed as its predecessor.
+	for _, target := range next.Targets {
+		at := r.CreatedAt
+		r.Nodes[target.Name] = provision.NodeProgress{Phase: "present", AttemptedAt: at, ObservedAt: at, EC2State: "terminated", InstanceID: "i-0" + target.Name}
+	}
+	r.Phase = "addresses-released"
+	r.Revision++
+	if err = d.Save(ctx, r, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Release(ctx, next, "runner"); err != nil {
+		t.Fatal(err)
+	}
+	for _, acquire := range []func(context.Context, provision.Plan, string) (provision.Record, error){d.Acquire, d.Supersede} {
+		if _, err = acquire(ctx, next, "late"); !errors.Is(err, provision.ErrRetired) || value(db.item, "Owner") != "" {
+			t.Fatal("a retired successor was claimed again", err)
+		}
+	}
+}
+
+// The sequence that blocked a name for good: the handover archived the retired
+// operation and stopped; the operation then changed (two more checkpoints, from
+// a release that still let a stage claim it); every later handover found an
+// archive that no longer matched and refused.
+func TestHandoverIsNotBlockedByAnArchiveOfAnEarlierRevision(t *testing.T) {
+	d, db, p, next, _ := retiredFixture(t)
+	ctx := context.Background()
+	first := archiveKey(t, p, db.item)
+	original := value(db.item, "Data")
+	db.replace = "refuse"
+	if _, err := d.Supersede(ctx, next, "first"); err == nil || len(db.archived) != 1 || value(db.archived[first], "Data") != original || value(db.item, "PlanID") != p.ID {
+		t.Fatal("handover did not stop after the archive", err)
+	}
+	db.replace = ""
+	var revision int64
+	rewrite(t, db, func(fields map[string]json.RawMessage) {
+		if err := json.Unmarshal(fields["revision"], &revision); err != nil {
+			t.Fatal(err)
+		}
+		revision += 2
+		fields["revision"], _ = json.Marshal(revision)
+		fields["lastError"] = json.RawMessage(`"deployment retried against a retired network"`)
+	})
+	db.item["Revision"] = number(revision)
+	second, changed := archiveKey(t, p, db.item), value(db.item, "Data")
+	if second == first || changed == original {
+		t.Fatal("fixture did not change the retired operation")
+	}
+	if succeeds, reused, err := d.Succession(ctx, p); err != nil || succeeds != p.ID || !reused {
+		t.Fatal("changed retired operation is no longer plannable", err)
+	}
+	r, err := d.Supersede(ctx, next, "second")
+	if err != nil || db.replaced != 1 || value(db.item, "PlanID") != next.ID || value(db.item, "Owner") != "second" || r.Predecessor.Archive != second || r.Predecessor.Revision != revision {
+		t.Fatal("handover blocked by an archive of an earlier revision", err)
+	}
+	// Both copies are kept: the one that was replaced, and the earlier one.
+	if len(db.archived) != 2 || value(db.archived[second], "Data") != changed || value(db.archived[first], "Data") != original {
+		t.Fatal("an archived revision was lost or overwritten")
+	}
+	archived, err := d.Archived(ctx, p)
+	if err != nil || archived.Revision != revision || archived.LastError == "" {
+		t.Fatal("the archived operation is not the revision that was replaced", err)
 	}
 }
 
@@ -239,6 +367,7 @@ func TestConcurrentSupersedeHasExactlyOneWinner(t *testing.T) {
 		err  error
 	}
 	results := make(chan result, 4)
+	archive := archiveKey(t, p, db.item)
 	var wg sync.WaitGroup
 	for j, plan := range []provision.Plan{next, next, rival, rival} {
 		owner := fmt.Sprint("runner-", j)
@@ -257,7 +386,7 @@ func TestConcurrentSupersedeHasExactlyOneWinner(t *testing.T) {
 			wins++
 		}
 	}
-	if wins != 1 || db.replaced != 1 || value(db.item, "PlanID") != winner.ID || value(db.item, "Owner") == "" || len(db.archived) != 1 || value(db.archived[p.ArchiveKey()], "PlanID") != p.ID {
+	if wins != 1 || db.replaced != 1 || value(db.item, "PlanID") != winner.ID || value(db.item, "Owner") == "" || len(db.archived) != 1 || value(db.archived[archive], "PlanID") != p.ID {
 		t.Fatal("handover was not exclusive", wins, db.replaced)
 	}
 	// The loser's plan stays refused: the name now belongs to the winner.
@@ -277,7 +406,7 @@ func TestHandoverSurvivesLostResponsesAndRepeats(t *testing.T) {
 	t.Run("stopped-after-archive", func(t *testing.T) {
 		d, db, p, next, _ := retiredFixture(t)
 		ctx := context.Background()
-		before := value(db.item, "Data")
+		before, archive := value(db.item, "Data"), archiveKey(t, p, db.item)
 		db.replace = "refuse"
 		if _, err := d.Supersede(ctx, next, "first"); err == nil || db.replaced != 0 || value(db.item, "PlanID") != p.ID || value(db.item, "Owner") != "" || len(db.archived) != 1 {
 			t.Fatal("interrupted handover left an unexpected journal", err)
@@ -287,14 +416,17 @@ func TestHandoverSurvivesLostResponsesAndRepeats(t *testing.T) {
 			t.Fatal("retired operation lost after an interrupted handover", err)
 		}
 		db.replace = ""
-		if _, err := d.Supersede(ctx, next, "second"); err != nil || db.replaced != 1 || len(db.archived) != 1 || value(db.archived[p.ArchiveKey()], "Data") != before || value(db.item, "Owner") != "second" {
+		if _, err := d.Supersede(ctx, next, "second"); err != nil || db.replaced != 1 || len(db.archived) != 1 || value(db.archived[archive], "Data") != before || value(db.item, "Owner") != "second" {
 			t.Fatal("repeat after an interrupted handover failed", err)
 		}
 	})
-	t.Run("archive-holds-something-else", func(t *testing.T) {
+	t.Run("archive-of-this-revision-holds-something-else", func(t *testing.T) {
+		// Same plan, same revision, other data: no checkpoint of this tool does
+		// that. Nothing is overwritten and nothing is handed over.
 		d, db, p, next, _ := retiredFixture(t)
-		db.archived = map[string]map[string]types.AttributeValue{p.ArchiveKey(): {"Network": str(p.ArchiveKey()), "PlanID": str(p.ID), "Data": str("{}"), "Revision": number(1)}}
-		if _, err := d.Supersede(context.Background(), next, "runner"); err == nil || db.replaced != 0 || value(db.item, "PlanID") != p.ID || value(db.archived[p.ArchiveKey()], "Data") != "{}" {
+		archive := archiveKey(t, p, db.item)
+		db.archived = map[string]map[string]types.AttributeValue{archive: {"Network": str(archive), "PlanID": str(p.ID), "Data": str("{}"), "Revision": db.item["Revision"]}}
+		if _, err := d.Supersede(context.Background(), next, "runner"); err == nil || db.replaced != 0 || value(db.item, "PlanID") != p.ID || value(db.archived[archive], "Data") != "{}" {
 			t.Fatal("handover overwrote or ignored different archived evidence", err)
 		}
 	})
@@ -338,6 +470,7 @@ func TestSuccessorIsItselfRetiredAndSucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	first := r.Predecessor.Archive
 	// The second fleet is provisioned, destroyed and retired in its turn.
 	for j, target := range next.Targets {
 		at := r.CreatedAt
@@ -364,7 +497,7 @@ func TestSuccessorIsItselfRetiredAndSucceeded(t *testing.T) {
 		t.Fatal("second handover failed", err)
 	}
 	// Both earlier operations are kept, each under its own archive key.
-	if len(db.archived) != 2 || value(db.archived[p.ArchiveKey()], "PlanID") != p.ID || value(db.archived[next.ArchiveKey()], "PlanID") != next.ID {
+	if len(db.archived) != 2 || fresh.Predecessor.Archive == first || value(db.archived[first], "PlanID") != p.ID || value(db.archived[fresh.Predecessor.Archive], "PlanID") != next.ID {
 		t.Fatal("an archived operation was lost or replaced")
 	}
 	for _, old := range []provision.Plan{p, next} {

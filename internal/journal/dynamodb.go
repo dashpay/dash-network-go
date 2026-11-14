@@ -191,10 +191,17 @@ func (d Dynamo) Succession(ctx context.Context, p provision.Plan) (succeeds stri
 // Supersede is Acquire for a plan that succeeds a retired one. The key is
 // handed over only if the live item is exactly the plan p names, unclaimed and
 // retired. Nothing is deleted: the retired item is first copied, verbatim, to
-// its archive key (create-if-absent, so a repeat is harmless), then replaced
-// by p's fresh operation in one write conditional on the plan, the revision
-// that was read and the absence of a claim. Of two runners, one write wins and
-// the other finds an operation that is no longer the one it read.
+// the archive key of the revision that was read (create-if-absent, so a repeat
+// is harmless), then replaced by p's fresh operation in one write conditional
+// on the plan, that same revision and the absence of a claim. Of two runners,
+// one write wins and the other finds an operation that is no longer the one
+// it read.
+//
+// The two writes are not atomic. If the handover stops between them, the
+// retired operation simply has a copy, and the next attempt goes on. If the
+// retired operation has changed by then (an older release could still write
+// to one), that attempt archives the new revision under its own key: a copy
+// of an earlier revision never stands in its way.
 func (d Dynamo) Supersede(ctx context.Context, p provision.Plan, owner string) (provision.Record, error) {
 	if owner == "" {
 		return provision.Record{}, errors.New("empty runner ID")
@@ -228,14 +235,14 @@ func (d Dynamo) Supersede(ctx context.Context, p provision.Plan, owner string) (
 	if err != nil {
 		return provision.Record{}, err
 	}
-	archive := map[string]types.AttributeValue{"Network": str(old.Plan.ArchiveKey()), "PlanID": item["PlanID"], "Data": item["Data"], "Revision": item["Revision"]}
+	archive := map[string]types.AttributeValue{"Network": str(old.Plan.ArchiveKey(old.Revision)), "PlanID": item["PlanID"], "Data": item["Data"], "Revision": item["Revision"]}
 	_, err = d.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(d.Table), Item: archive, ConditionExpression: aws.String("attribute_not_exists(#network)"), ExpressionAttributeNames: map[string]string{"#network": "Network"}})
 	if conditional(err) {
-		// An earlier attempt archived it. It must be this very operation.
+		// An earlier attempt archived this revision. It must be this very item.
 		var kept *dynamodb.GetItemOutput
 		kept, err = d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: map[string]types.AttributeValue{"Network": archive["Network"]}, ConsistentRead: aws.Bool(true)})
 		if err == nil && (kept == nil || len(kept.Item) != len(archive) || value(kept.Item, "PlanID") != value(archive, "PlanID") || value(kept.Item, "Data") != value(archive, "Data") || !sameNumber(kept.Item["Revision"], archive["Revision"])) {
-			err = errors.New("the archive key holds a different operation; nothing replaced")
+			err = errors.New("the archive key of this revision holds different data; nothing replaced")
 		}
 	}
 	if err != nil {
@@ -271,26 +278,46 @@ func (d Dynamo) Supersede(ctx context.Context, p provision.Plan, owner string) (
 	return d.Acquire(ctx, p, owner)
 }
 
-// Archived reads the operation of a plan whose network key has been reused.
+// Archived reads the operation of a plan whose network key has been reused. It
+// is found from the live operation, each operation naming the archive key of
+// the one it replaced.
 func (d Dynamo) Archived(ctx context.Context, p provision.Plan) (provision.Record, error) {
-	out, err := d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: map[string]types.AttributeValue{"Network": str(p.ArchiveKey())}, ConsistentRead: aws.Bool(true)})
+	item, err := d.readItem(ctx, p)
 	if err != nil {
 		return provision.Record{}, err
 	}
-	if out == nil || len(out.Item) == 0 {
-		return provision.Record{}, ErrNotFound
+	for range 100 {
+		newer, err := decodePayload(item)
+		if err != nil {
+			return provision.Record{}, err
+		}
+		if newer.Predecessor == nil {
+			return provision.Record{}, ErrNotFound
+		}
+		out, err := d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: map[string]types.AttributeValue{"Network": str(newer.Predecessor.Archive)}, ConsistentRead: aws.Bool(true)})
+		if err != nil {
+			return provision.Record{}, err
+		}
+		if out == nil || len(out.Item) != 4 || value(out.Item, "Network") != newer.Predecessor.Archive || value(out.Item, "PlanID") != newer.Predecessor.PlanID {
+			return provision.Record{}, errors.New("missing or invalid archived operation")
+		}
+		item = out.Item
+		if newer.Predecessor.PlanID != p.ID {
+			continue
+		}
+		r, err := decodePayload(item)
+		if err != nil {
+			return r, err
+		}
+		if r.Revision != newer.Predecessor.Revision {
+			return r, errors.New("archived operation is not the revision that was replaced")
+		}
+		if err = r.ValidateAddressCleanup(p); err != nil {
+			return r, err
+		}
+		return r, r.Retired()
 	}
-	if len(out.Item) != 4 || value(out.Item, "Network") != p.ArchiveKey() || value(out.Item, "PlanID") != p.ID {
-		return provision.Record{}, errors.New("invalid archived operation")
-	}
-	r, err := decodePayload(out.Item)
-	if err != nil {
-		return r, err
-	}
-	if err = r.ValidateAddressCleanup(p); err != nil {
-		return r, err
-	}
-	return r, r.Retired()
+	return provision.Record{}, ErrNotFound
 }
 
 func sameNumber(a, b types.AttributeValue) bool {
@@ -327,14 +354,7 @@ func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (pr
 	if p.Succeeds != "" {
 		// A successor's operation is created only by Supersede, from provision.
 		// Every other stage may claim it once it exists, and nothing else.
-		if _, _, err := d.Read(ctx, p); err != nil {
-			return provision.Record{}, err
-		}
-		claimed, err := d.claim(ctx, p, owner)
-		if err != nil {
-			return provision.Record{}, err
-		}
-		return decode(claimed, p)
+		return d.claimLive(ctx, p, owner)
 	}
 	r := provision.NewRecord(p)
 	data, err := encode(r)
@@ -354,14 +374,34 @@ func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (pr
 		return r, err
 	}
 	// Do not overwrite an existing record. It may be an interrupted operation.
-	if _, _, err = d.Read(ctx, p); err != nil {
-		return r, err
+	return d.claimLive(ctx, p, owner)
+}
+
+// claimLive claims an existing operation for a stage that will work on it. A
+// retired operation is never claimed here: it would let that stage write new
+// checkpoints into the proof that its network is gone. Only address cleanup,
+// through its own store, still reads one, and it changes nothing.
+func (d Dynamo) claimLive(ctx context.Context, p provision.Plan, owner string) (provision.Record, error) {
+	existing, _, err := d.Read(ctx, p)
+	if err != nil {
+		return provision.Record{}, err
+	}
+	if existing.Phase == "addresses-released" {
+		return provision.Record{}, provision.ErrRetired
 	}
 	claimed, err := d.claim(ctx, p, owner)
 	if err != nil {
-		return r, err
+		return provision.Record{}, err
 	}
-	return decode(claimed, p)
+	r, err := decode(claimed, p)
+	if err == nil && r.Phase == "addresses-released" {
+		// Retired between the read and the claim: give the claim back unused.
+		if err = d.Release(ctx, p, owner); err != nil {
+			return provision.Record{}, errors.Join(provision.ErrRetired, err)
+		}
+		return provision.Record{}, provision.ErrRetired
+	}
+	return r, err
 }
 
 // claim is the same non-expiring conditional gate for active execution and
