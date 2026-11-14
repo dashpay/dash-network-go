@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/inventory"
@@ -58,7 +59,7 @@ func (d *Predecessor) validate(p Plan) error {
 		}
 		return nil
 	}
-	if p.Succeeds == "" || d.PlanID != p.Succeeds || d.Revision < 1 || d.Archive != p.Key()+"#retired#"+d.PlanID || len(d.Instances) == 0 || len(d.Instances) > 100 || !sort.StringsAreSorted(d.Instances) {
+	if p.Succeeds == "" || d.PlanID != p.Succeeds || d.Revision < 1 || d.Archive != p.Key()+"#retired#"+d.PlanID+"#"+strconv.FormatInt(d.Revision, 10) || len(d.Instances) == 0 || len(d.Instances) > 100 || !sort.StringsAreSorted(d.Instances) {
 		return errors.New("invalid predecessor in operation journal")
 	}
 	for i, id := range d.Instances {
@@ -103,7 +104,7 @@ func NewSuccessor(p Plan, retired Record) (Record, error) {
 		return Record{}, err
 	}
 	r := NewRecord(p)
-	d := &Predecessor{PlanID: retired.Plan.ID, Revision: retired.Revision, Archive: retired.Plan.ArchiveKey(), Instances: []string{}}
+	d := &Predecessor{PlanID: retired.Plan.ID, Revision: retired.Revision, Archive: retired.Plan.ArchiveKey(retired.Revision), Instances: []string{}}
 	for _, n := range retired.Nodes {
 		d.Instances = append(d.Instances, n.InstanceID)
 	}
@@ -198,6 +199,11 @@ type Store interface {
 	Release(context.Context, Plan, string) error
 }
 
+// ErrRetired refuses every further use of an operation whose addresses were
+// released. A retired operation is evidence, and the proof that releases its
+// network's name: no stage may claim or change it again.
+var ErrRetired = errors.New("allocation retired; IPAM addresses have been released (to reuse the name, generate a new plan with provision-plan)")
+
 // Superseder is a Store that can hand a network key to the plan that succeeds
 // the retired operation held under it. Supersede is Acquire for such a plan:
 // it archives the retired operation, then replaces it with the successor's
@@ -262,7 +268,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 		return
 	}
 	if r.Phase == "addresses-released" {
-		return result, errors.New("allocation retired; IPAM addresses have been released (to reuse the name, generate a new plan with provision-plan)")
+		return result, ErrRetired
 	}
 	for _, n := range r.Nodes {
 		if n.Address != nil && (n.Address.Phase == "releasing" || n.Address.Phase == "released") {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dashpay/dash-network-go/internal/spec"
@@ -108,9 +109,14 @@ func (p Plan) Key() string {
 	return p.Network.AWS.AccountID + "/" + p.Network.AWS.Region + "/" + p.Network.Metadata.Name
 }
 
-// ArchiveKey is where the journal keeps this plan's operation once its network
-// key has been reused. A network name cannot contain '#'.
-func (p Plan) ArchiveKey() string    { return p.Key() + "#retired#" + p.ID }
+// ArchiveKey is where the journal keeps this plan's operation, as it stood at
+// the given revision, once its network key has been reused. The revision is
+// part of the key so that an archive is never compared with, or blocked by, a
+// copy of some other state of the same operation. A network name cannot
+// contain '#'.
+func (p Plan) ArchiveKey(revision int64) string {
+	return p.Key() + "#retired#" + p.ID + "#" + strconv.FormatInt(revision, 10)
+}
 func (p Plan) Token(t Target) string { return digest([]string{p.ID, t.Name}) }
 func (p Plan) Tags(t Target) map[string]string {
 	return map[string]string{

@@ -193,12 +193,13 @@ is new. `provision --confirm NEW_PLAN_ID` then, and only then:
 
 1. reads the live record and checks again that it is exactly the plan named by
    `succeeds`, retired and unclaimed;
-2. copies it verbatim to the archive key `account/region/name#retired#OLD_PLAN_ID`
-   in the same table (create-if-absent; a repeat finds the same item and goes on,
-   a different item there stops the handover);
+2. copies it verbatim to the archive key
+   `account/region/name#retired#OLD_PLAN_ID#REVISION` in the same table, where
+   `REVISION` is the journal revision that was read (create-if-absent; a repeat
+   finds the same item and goes on);
 3. replaces the live item with the new plan's fresh operation, claimed by this
-   runner, in one write conditional on the old plan ID, the revision that was
-   read and the absence of a claim.
+   runner, in one write conditional on the old plan ID, that same revision and
+   the absence of a claim.
 
 Nothing is deleted. Of two runners, one conditional write wins; the other finds
 an operation that is no longer the one it read and is refused by the ordinary
@@ -208,11 +209,23 @@ then rerun the same plan. An SDK retry of the accepted write is recognised as
 this runner's own. `bootstrap`, `deploy`, `join`, `upgrade` and
 `release-addresses` never hand a name over; only `provision` does.
 
+Steps 2 and 3 are two writes, not one transaction. A handover that stops between
+them leaves the retired operation in place with a copy beside it, and the next
+`provision` of the same plan goes on from there. Because the archive key names
+the revision, a copy can never block a later attempt: if the retired operation
+has a different revision by then, that revision is archived under its own key and
+the earlier copy stays where it is.
+
+A retired operation does not change any more. Once an operation is in
+`addresses-released`, `provision`, `bootstrap`, `deploy`, `join` and `upgrade`
+refuse to claim it ("allocation retired"), so none of them can write a checkpoint
+into it. `release-addresses` can still be repeated against it and changes nothing.
+
 The successor starts empty. No instance, address, bootstrap, deployment, runtime
 or upgrade state is carried over, and nothing of the old fleet is adopted. Its
 record keeps only a `predecessor` entry: the retired plan ID, the archive key and
 the retired instance IDs. `dashnet operation --plan OLD_PLAN` keeps working and
-shows the archived record with `"archived": true`. Planning the same network
+shows the archived record, the revision that was replaced, with `"archived": true`. Planning the same network
 definition again returns the same successor plan, so a lost plan file does not
 strand an interrupted operation.
 

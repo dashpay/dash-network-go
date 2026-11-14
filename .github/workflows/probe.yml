@@ -1,0 +1,46 @@
+name: probe
+on:
+  push:
+    branches: ['probe/**']
+permissions:
+  contents: read
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        if: ${{ !cancelled() }}
+        run: |
+          echo "=====GOFMT-DIFF-BEGIN"
+          gofmt -d cmd internal || true
+          echo "=====GOFMT-DIFF-END"
+          test -z "$(gofmt -l cmd internal)"
+      - name: vet
+        if: ${{ !cancelled() }}
+        run: go vet ./...
+      - name: new tests, verbose
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run 'Supersede|Successor|Retired|Handover|Reused|Serialized|PlanChanges|AddressCleanup|Claim|Acquire' ./internal/journal ./internal/provision 2>&1 | grep -E '^(=== RUN|--- |ok|FAIL|PASS|panic)|^    ---' | grep -v '=== RUN'
+      - name: all tests
+        if: ${{ !cancelled() }}
+        run: go test -race ./...
+      - name: DynamoDB Local
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          docker run -d --name dashnet-journal -p 127.0.0.1:8000:8000 \
+            amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -sharedDb
+          trap 'docker rm -f dashnet-journal >/dev/null' EXIT
+          DASHNET_TEST_DYNAMODB=http://127.0.0.1:8000 DASHNET_DISPOSABLE_CI=1 \
+            go test -race -count=1 -v ./internal/journal -run '^TestJournalDynamoLocalNameReuse$'
+          DASHNET_TEST_DYNAMODB=http://127.0.0.1:8000 DASHNET_DISPOSABLE_CI=1 \
+            go test -race -count=1 -v ./internal/managed -run '^TestManagedDynamoLocalClaimsAndRecovery$' | tail -5

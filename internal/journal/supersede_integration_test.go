@@ -3,6 +3,7 @@ package journal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -32,6 +33,7 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 	defer cancel()
 	_, fixture, p, next, cloud := retiredFixture(t)
 	retiredItem := clone(fixture.item)
+	archive := archiveKey(t, p, retiredItem)
 	table := fmt.Sprintf("journal-test-%d", time.Now().UnixNano())
 	client := dynamodb.NewFromConfig(aws.Config{
 		Region: p.Network.AWS.Region,
@@ -82,7 +84,7 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 	}
 	unchanged := func(want map[string]types.AttributeValue) bool {
 		got := get(p.Key())
-		return len(got) == len(want) && value(got, "PlanID") == value(want, "PlanID") && value(got, "Data") == value(want, "Data") && value(got, "Owner") == value(want, "Owner") && sameNumber(got["Revision"], want["Revision"]) && len(get(p.ArchiveKey())) == 0
+		return len(got) == len(want) && value(got, "PlanID") == value(want, "PlanID") && value(got, "Data") == value(want, "Data") && value(got, "Owner") == value(want, "Owner") && sameNumber(got["Revision"], want["Revision"]) && len(get(archive)) == 0
 	}
 
 	t.Run("refused while claimed or not retired", func(t *testing.T) {
@@ -110,11 +112,30 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 		if _, err = store.Supersede(ctx, next, "runner"); err == nil || !unchanged(running) {
 			t.Fatal("live operation superseded", err)
 		}
+		// A retired operation that today's rules accept in full is still never claimed.
+		for _, field := range historyFields {
+			delete(fields, field)
+		}
+		fields["phase"] = json.RawMessage(`"addresses-released"`)
+		if data, err = json.Marshal(fields); err != nil {
+			t.Fatal(err)
+		}
+		closed := clone(retiredItem)
+		closed["Data"] = str(string(data))
+		put(closed)
+		if _, err = store.Acquire(ctx, p, "deploy"); !errors.Is(err, provision.ErrRetired) || !unchanged(closed) {
+			t.Fatal("a stage claimed a retired operation", err)
+		}
 		put(retiredItem)
 		if _, err = store.Acquire(ctx, next, "bootstrap"); err == nil || !unchanged(retiredItem) {
 			t.Fatal("a stage other than provision took the name over", err)
 		}
 	})
+
+	// A copy of an earlier revision, left by a handover that stopped half way,
+	// before the retired operation changed. It must neither block nor be touched.
+	stale := map[string]types.AttributeValue{"Network": str(p.ArchiveKey(1)), "PlanID": str(p.ID), "Data": str("{}"), "Revision": number(1)}
+	put(stale)
 
 	n := p.Network
 	n.Chain.Generation++
@@ -161,7 +182,7 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 		if wins != 1 {
 			t.Fatal("handover was not exclusive", wins)
 		}
-		live, kept := get(p.Key()), get(p.ArchiveKey())
+		live, kept := get(p.Key()), get(archive)
 		if value(live, "PlanID") != winner.ID || value(live, "Owner") != owner || !sameNumber(live["Revision"], number(0)) {
 			t.Fatal("live item is not the winner's claimed operation")
 		}
@@ -172,8 +193,11 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 		if err != nil || archived.Phase != "addresses-released" || archived.Plan.ID != p.ID {
 			t.Fatal("archived operation unreadable", err)
 		}
-		if record.Predecessor == nil || record.Predecessor.PlanID != p.ID || record.Predecessor.Archive != p.ArchiveKey() {
+		if record.Predecessor == nil || record.Predecessor.PlanID != p.ID || record.Predecessor.Archive != archive {
 			t.Fatal("successor lost its predecessor")
+		}
+		if earlier := get(p.ArchiveKey(1)); len(earlier) != 4 || value(earlier, "Data") != "{}" {
+			t.Fatal("an archive of an earlier revision was touched")
 		}
 	})
 
@@ -202,7 +226,7 @@ func TestJournalDynamoLocalNameReuse(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if value(get(p.ArchiveKey()), "Data") != value(retiredItem, "Data") {
+		if value(get(archive), "Data") != value(retiredItem, "Data") {
 			t.Fatal("archive changed after the handover")
 		}
 		if _, _, err := store.Read(ctx, p); err == nil {
