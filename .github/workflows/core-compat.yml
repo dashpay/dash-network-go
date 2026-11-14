@@ -1,0 +1,61 @@
+name: Core compatibility
+run-name: "Core compatibility / ${{ inputs.image || github.sha }}"
+
+# The code that talks to Dash Core, against a real dashd of every supported
+# Core major. Dispatch it by hand with any other dashpay/dashd tag (a release
+# candidate, a patch release) to check that release before it is deployed.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: One dashpay/dashd image to check instead of the supported majors, e.g. dashpay/dashd:24.1.0-rc.1
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-compat-${{ github.ref }}-${{ inputs.image || 'supported' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  core:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.image && format('["{0}"]', inputs.image) || '["dashpay/dashd:23", "dashpay/dashd:24"]') }}
+    env:
+      IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Pull the Core image under test
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^(docker\.io/)?dashpay/dashd(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?(@sha256:[0-9a-f]{64})?$ ]] || { echo "not a dashpay/dashd image: $IMAGE"; exit 1; }
+          docker pull -q "$IMAGE"
+          docker image inspect "$IMAGE" --format 'Core under test: {{index .RepoDigests 0}}' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Lone regtest node; wallet, spork key, funding, registration and activation
+        working-directory: internal/node/testdata
+        run: CORE_COMPAT_IMAGE="$IMAGE" python3 -m unittest -v test_core_compat
+      # Runs even if the step above failed: the two answer different questions.
+      - name: Devnet Core rendered by dashmate; wallet, registration recovery and join
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          pin() { docker pull -q "$1" >/dev/null && docker image inspect "$1" --format '{{index .RepoDigests 0}}'; }
+          core=$(pin "$IMAGE")
+          helper=$(pin dashpay/dashmate-helper:4.2.0-beta.3)
+          # The Tor image dashmate 4.2.0-beta.3 selects (digest-pinned by dashmate).
+          tor=$(pin osminogin/tor-simple:0.4.9.11@sha256:7aef2e7d957e2236d5fac7fca8e67c15fe65e6349eb90099da1cdc26bc4caa69)
+          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
+          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
