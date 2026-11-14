@@ -132,24 +132,8 @@ jobs:
           docker build -t dashnet-recipe-test -f internal/bootstrap/testdata/Dockerfile .
           docker run --rm --network none dashnet-recipe-test
 
-  core-contract:
-    if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Real Core rendered by dashmate; wallet, registration recovery and join
-        run: |
-          set -euo pipefail
-          pin() { docker pull -q "$1" >/dev/null && docker image inspect "$1" --format '{{index .RepoDigests 0}}'; }
-          core=$(pin dashpay/dashd:23)
-          helper=$(pin dashpay/dashmate-helper:4.2.0-beta.3)
-          # The Tor image dashmate 4.2.0-beta.3 selects (digest-pinned by dashmate).
-          tor=$(pin osminogin/tor-simple:0.4.9.11@sha256:7aef2e7d957e2236d5fac7fca8e67c15fe65e6349eb90099da1cdc26bc4caa69)
-          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/core_integration.py
-          sudo env CORE_IMAGE="$core" HELPER_IMAGE="$helper" TOR_IMAGE="$tor" DASHNET_DISPOSABLE_CI=1 python3 internal/node/testdata/join_contract.py
+  # The real-Core contract (wallet, registration recovery, join) runs once per
+  # supported Core major in core-compat.yml.
 
   platform-contract:
     if: github.event_name != 'workflow_dispatch' || inputs.proof_operation == 'none'

@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import io
 from pathlib import Path
 import tempfile
@@ -215,6 +216,29 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
             w.activate()
 
+        class Core24(Sporks):
+            """Core 24 has no sporks 3 and 9 and refuses an update that names one."""
+            active = {"SPORK_2_INSTANTSEND_ENABLED": False,
+                      "SPORK_17_QUORUM_DKG_ENABLED": False,
+                      "SPORK_19_CHAINLOCKS_ENABLED": False,
+                      "SPORK_21_QUORUM_ALL_CONNECTED": False,
+                      "SPORK_23_QUORUM_POSE": False}
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "sporkupdate" and params[0] not in self.active:
+                    raise worker.RPCFailure(method, -8)
+                return super().rpc(method, params, wallet)
+
+        w = Core24(request())
+        w.activate()
+        w.activate()
+        self.assertEqual(w.updates, 4)
+        self.assertEqual(w.active["SPORK_23_QUORUM_POSE"], False, "activates only what a devnet needs")
+        # Only the two sporks Core retired may be absent.
+        del w.active["SPORK_2_INSTANTSEND_ENABLED"]
+        with self.assertRaisesRegex(worker.Failure, "unsupported-spork-profile"):
+            w.activate()
+
     def test_block_time_sets_core_spacing_and_miner_cadence(self):
         class Miner(worker.Worker):
             def __init__(self, q, root):
@@ -332,6 +356,73 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(worker.Failure, "funding-needs-mining-after-dkg"):
                 w.fund()
             self.assertEqual(w.calls, [])
+
+    def test_spork_key_is_made_here_and_never_exported_from_the_wallet(self):
+        class Core(worker.Worker):
+            """Core 24: a descriptor wallet, from which no key can be exported."""
+
+            def __init__(self, q, root):
+                super().__init__(q, root, root / "lock")
+                self.atomic("secrets.json", {"rpcPassword": "p" * 64})
+                self.parsed, self.refuse, self.echo = [], False, False
+
+            def rpc(self, method, params=None, wallet=False):
+                if method == "listwallets":
+                    return ["dashnet"]
+                if method == "getaddressesbylabel":
+                    assert params == ["dashnet:payout"] and wallet, "only the payout address is the wallet's"
+                    return {"y" + "1" * 33: {}}
+                if method == "getdescriptorinfo":
+                    assert not wallet and re.fullmatch(r"pkh\([1-9A-HJ-NP-Za-km-z]+\)", params[0])
+                    if self.refuse:
+                        raise worker.RPCFailure(method, -5)
+                    self.parsed.append(params[0][4:-1])
+                    public = params[0] if self.echo else "pkh(02" + hashlib.sha256(params[0].encode()).hexdigest() + ")#checksum"
+                    return dict(descriptor=public, checksum="other", isrange=False, issolvable=True, hasprivatekeys=True)
+                if method == "deriveaddresses":
+                    assert not wallet and params[0].startswith("pkh(02")
+                    return ["y" + hashlib.sha256(params[0].encode()).hexdigest()[:33]]
+                raise AssertionError(method)  # dumpprivkey above all
+
+        def decode(text):
+            value = 0
+            for c in text:
+                value = value * 58 + worker.BASE58.index(c)
+            return value.to_bytes(38, "big")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            w = Core(request(), Path(tmp))
+            first = w.wallet()
+            key = w.read("secrets.json")["sporkKey"]
+            raw = decode(key)
+            # A compressed test-chain key in wallet import format, in range.
+            self.assertEqual((raw[0], raw[33]), (0xEF, 1))
+            self.assertEqual(hashlib.sha256(hashlib.sha256(raw[:34]).digest()).digest()[:4], raw[34:])
+            self.assertTrue(0 < int.from_bytes(raw[1:33], "big") < worker.SECP256K1_ORDER)
+            self.assertEqual(first["payoutAddress"], "y" + "1" * 33)
+            self.assertNotEqual(first["sporkAddress"], first["payoutAddress"])
+            # A resume derives the same address from the same recorded key.
+            self.assertEqual(w.wallet(), first)
+            self.assertEqual(w.read("secrets.json")["sporkKey"], key)
+            self.assertEqual(set(w.parsed), {key})
+        with tempfile.TemporaryDirectory() as tmp:
+            # A key exported by an earlier version of this tool is kept as it is.
+            w = Core(request(), Path(tmp))
+            w.atomic("secrets.json", dict(w.read("secrets.json"), sporkKey="cExported"))
+            w.wallet()
+            self.assertEqual((w.parsed, w.read("secrets.json")["sporkKey"]), (["cExported"], "cExported"))
+        with tempfile.TemporaryDirectory() as tmp:
+            # Nothing is recorded for a key Core did not accept or did not
+            # turn into a public descriptor.
+            w = Core(request(), Path(tmp))
+            w.refuse = True
+            with self.assertRaisesRegex(worker.Failure, "rpc-getdescriptorinfo:-5"):
+                w.wallet()
+            w.refuse, w.echo = False, True
+            with self.assertRaisesRegex(worker.Failure, "private-key-descriptor"):
+                w.wallet()
+            self.assertNotIn("sporkKey", w.read("secrets.json"))
+        self.assertEqual(len({worker.new_private_key() for _ in range(50)}), 50)
 
     def test_lost_registration_response_resends_no_new_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
