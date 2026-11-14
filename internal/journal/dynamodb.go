@@ -93,8 +93,16 @@ func decode(item map[string]types.AttributeValue, p provision.Plan) (provision.R
 
 func decodeRecord(item map[string]types.AttributeValue, p provision.Plan, validate func(provision.Record, provision.Plan) error) (provision.Record, error) {
 	if value(item, "Network") != p.Key() || value(item, "PlanID") != p.ID {
-		return provision.Record{}, errors.New("network is already bound to a different plan; no automatic reset, replacement, or state deletion")
+		return provision.Record{}, errors.New("network is already bound to a different plan; no automatic reset, replacement, or state deletion (a destroyed network's name is reused by a new provision-plan once its addresses are released)")
 	}
+	r, err := decodePayload(item)
+	if err != nil {
+		return r, err
+	}
+	return r, validate(r, p)
+}
+
+func decodePayload(item map[string]types.AttributeValue) (provision.Record, error) {
 	data := value(item, "Data")
 	if data == "" || len(data) > 300000 {
 		return provision.Record{}, errors.New("invalid journal payload size")
@@ -113,7 +121,182 @@ func decodeRecord(item map[string]types.AttributeValue, p provision.Plan, valida
 	if !ok || revision.Value != strconv.FormatInt(r.Revision, 10) {
 		return r, errors.New("journal revision mismatch")
 	}
-	return r, validate(r, p)
+	return r, nil
+}
+
+// retired decodes the live item under a network key on its own terms, whatever
+// plan it belongs to, and returns it only if it proves that network is gone:
+// an unclaimed operation, consistent with its own plan, whose address
+// retirement finished. An item this package did not write is never retired.
+func retired(item map[string]types.AttributeValue, network string) (provision.Record, error) {
+	if value(item, "Owner") != "" {
+		return provision.Record{}, errors.New("the operation has an active runner claim")
+	}
+	if len(item) != 4 {
+		return provision.Record{}, errors.New("the journal item is not a provision operation")
+	}
+	r, err := decodePayload(item)
+	if err != nil {
+		return r, err
+	}
+	if value(item, "Network") != network || r.Plan.Key() != network || value(item, "PlanID") != r.Plan.ID {
+		return r, errors.New("the journal item does not belong to this network key")
+	}
+	return r, r.Retired()
+}
+
+// ErrNotRetired explains why the operation under a network key cannot be
+// succeeded. It is advice for whoever is planning, never an authorization.
+var ErrNotRetired = errors.New("the existing operation is not retired")
+
+// Succession tells provision-plan which plan p's network must be planned as,
+// given what the journal holds under its key. p is the plan of the network
+// definition alone. The answer is the ID the plan must succeed:
+//
+//   - "" when the key is free, or holds p's own operation;
+//   - the retired plan's ID, with reused true, when the key holds a retired
+//     operation: the name is free again for the plan that succeeds it;
+//   - the ID the live operation's plan succeeds, when that plan is this same
+//     network: planning it again yields the same plan, so it can be resumed.
+//
+// Anything else is ErrNotRetired. Read-only, and never an authorization:
+// provision reads the journal again and Supersede decides.
+func (d Dynamo) Succession(ctx context.Context, p provision.Plan) (succeeds string, reused bool, err error) {
+	if p.Succeeds != "" {
+		return "", false, errors.New("succession starts from the plan of the network definition")
+	}
+	item, err := d.readItem(ctx, p)
+	if errors.Is(err, ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	r, notRetired := retired(item, p.Key())
+	if notRetired == nil {
+		return r.Plan.ID, true, nil
+	}
+	if live, decodeErr := decodePayload(item); decodeErr == nil && value(item, "PlanID") == live.Plan.ID {
+		same := p
+		if live.Plan.Succeeds != "" {
+			same, err = p.Successor(live.Plan.Succeeds)
+		}
+		if err == nil && same.ID == live.Plan.ID {
+			return live.Plan.Succeeds, false, nil
+		}
+	}
+	return "", false, fmt.Errorf("%w: %v", ErrNotRetired, notRetired)
+}
+
+// Supersede is Acquire for a plan that succeeds a retired one. The key is
+// handed over only if the live item is exactly the plan p names, unclaimed and
+// retired. Nothing is deleted: the retired item is first copied, verbatim, to
+// its archive key (create-if-absent, so a repeat is harmless), then replaced
+// by p's fresh operation in one write conditional on the plan, the revision
+// that was read and the absence of a claim. Of two runners, one write wins and
+// the other finds an operation that is no longer the one it read.
+func (d Dynamo) Supersede(ctx context.Context, p provision.Plan, owner string) (provision.Record, error) {
+	if owner == "" {
+		return provision.Record{}, errors.New("empty runner ID")
+	}
+	if p.Succeeds == "" {
+		return provision.Record{}, errors.New("plan does not succeed a retired operation")
+	}
+	item, err := d.readItem(ctx, p)
+	if errors.Is(err, ErrNotFound) {
+		return provision.Record{}, errors.New("plan succeeds an operation this journal does not hold; regenerate the plan")
+	}
+	if err != nil {
+		return provision.Record{}, err
+	}
+	if value(item, "PlanID") == p.ID {
+		// Already handed over to this plan, by an earlier run: resume it.
+		return d.Acquire(ctx, p, owner)
+	}
+	if value(item, "PlanID") != p.Succeeds {
+		return provision.Record{}, errors.New("network is bound to a plan other than the one this plan succeeds; regenerate the plan")
+	}
+	old, err := retired(item, p.Key())
+	if err != nil {
+		return provision.Record{}, fmt.Errorf("%w: %v", ErrNotRetired, err)
+	}
+	r, err := provision.NewSuccessor(p, old)
+	if err != nil {
+		return provision.Record{}, err
+	}
+	data, err := encode(r)
+	if err != nil {
+		return provision.Record{}, err
+	}
+	archive := map[string]types.AttributeValue{"Network": str(old.Plan.ArchiveKey()), "PlanID": item["PlanID"], "Data": item["Data"], "Revision": item["Revision"]}
+	_, err = d.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(d.Table), Item: archive, ConditionExpression: aws.String("attribute_not_exists(#network)"), ExpressionAttributeNames: map[string]string{"#network": "Network"}})
+	if conditional(err) {
+		// An earlier attempt archived it. It must be this very operation.
+		var kept *dynamodb.GetItemOutput
+		kept, err = d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: map[string]types.AttributeValue{"Network": archive["Network"]}, ConsistentRead: aws.Bool(true)})
+		if err == nil && (kept == nil || len(kept.Item) != len(archive) || value(kept.Item, "PlanID") != value(archive, "PlanID") || value(kept.Item, "Data") != value(archive, "Data") || !sameNumber(kept.Item["Revision"], archive["Revision"])) {
+			err = errors.New("the archive key holds a different operation; nothing replaced")
+		}
+	}
+	if err != nil {
+		return provision.Record{}, fmt.Errorf("archive retired operation: %w", err)
+	}
+	next := key(p)
+	next["PlanID"] = str(p.ID)
+	next["Data"] = str(data)
+	next["Owner"] = str(owner)
+	next["Revision"] = number(0)
+	_, err = d.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(d.Table), Item: next, ConditionExpression: aws.String("#plan = :retired AND #revision = :revision AND attribute_not_exists(#owner)"),
+		ExpressionAttributeNames: map[string]string{"#plan": "PlanID", "#revision": "Revision", "#owner": "Owner"}, ExpressionAttributeValues: map[string]types.AttributeValue{":retired": str(p.Succeeds), ":revision": number(old.Revision)},
+	})
+	if err == nil {
+		return r, nil
+	}
+	if !conditional(err) {
+		// The write may have been accepted: like a lost Acquire response, the
+		// claim may exist. Inspect the operation; never assume it failed.
+		return provision.Record{}, fmt.Errorf("replace retired operation (outcome may be uncertain; inspect operation): %w", err)
+	}
+	// The item is no longer the one that was read. If it is this very write,
+	// accepted before a retry of it was refused, the handover is done.
+	// Otherwise another runner won, and the ordinary claim rules decide.
+	item, err = d.readItem(ctx, p)
+	if err != nil {
+		return provision.Record{}, err
+	}
+	if value(item, "PlanID") == p.ID && value(item, "Owner") == owner && value(item, "Data") == data && sameNumber(item["Revision"], number(0)) {
+		return r, nil
+	}
+	return d.Acquire(ctx, p, owner)
+}
+
+// Archived reads the operation of a plan whose network key has been reused.
+func (d Dynamo) Archived(ctx context.Context, p provision.Plan) (provision.Record, error) {
+	out, err := d.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(d.Table), Key: map[string]types.AttributeValue{"Network": str(p.ArchiveKey())}, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return provision.Record{}, err
+	}
+	if out == nil || len(out.Item) == 0 {
+		return provision.Record{}, ErrNotFound
+	}
+	if len(out.Item) != 4 || value(out.Item, "Network") != p.ArchiveKey() || value(out.Item, "PlanID") != p.ID {
+		return provision.Record{}, errors.New("invalid archived operation")
+	}
+	r, err := decodePayload(out.Item)
+	if err != nil {
+		return r, err
+	}
+	if err = r.ValidateAddressCleanup(p); err != nil {
+		return r, err
+	}
+	return r, r.Retired()
+}
+
+func sameNumber(a, b types.AttributeValue) bool {
+	x, ok := a.(*types.AttributeValueMemberN)
+	y, also := b.(*types.AttributeValueMemberN)
+	return ok && also && x.Value == y.Value
 }
 
 // Read is strongly consistent so a resume never relies on an eventually
@@ -140,6 +323,18 @@ func (d Dynamo) readItem(ctx context.Context, p provision.Plan) (map[string]type
 func (d Dynamo) Acquire(ctx context.Context, p provision.Plan, owner string) (provision.Record, error) {
 	if owner == "" {
 		return provision.Record{}, errors.New("empty runner ID")
+	}
+	if p.Succeeds != "" {
+		// A successor's operation is created only by Supersede, from provision.
+		// Every other stage may claim it once it exists, and nothing else.
+		if _, _, err := d.Read(ctx, p); err != nil {
+			return provision.Record{}, err
+		}
+		claimed, err := d.claim(ctx, p, owner)
+		if err != nil {
+			return provision.Record{}, err
+		}
+		return decode(claimed, p)
 	}
 	r := provision.NewRecord(p)
 	data, err := encode(r)

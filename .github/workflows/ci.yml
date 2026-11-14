@@ -87,6 +87,9 @@ jobs:
           trap 'docker rm -f dashnet-journal >/dev/null' EXIT
           DASHNET_TEST_DYNAMODB=http://127.0.0.1:8000 DASHNET_DISPOSABLE_CI=1 \
             go test -race -count=1 -v ./internal/managed -run '^TestManagedDynamoLocalClaimsAndRecovery$'
+          # A retired network name handed to its successor, on the same real expressions.
+          DASHNET_TEST_DYNAMODB=http://127.0.0.1:8000 DASHNET_DISPOSABLE_CI=1 \
+            go test -race -count=1 -v ./internal/journal -run '^TestJournalDynamoLocalNameReuse$'
       - name: Node worker failure-path tests
         run: |
           python3 -m unittest discover -s internal/node/testdata -p 'test_*.py'

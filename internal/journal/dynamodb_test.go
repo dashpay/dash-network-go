@@ -3,6 +3,7 @@ package journal
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -22,6 +23,13 @@ type database struct {
 	saves           int
 	reads           int
 	claimResponse   func(*dynamodb.UpdateItemOutput) (*dynamodb.UpdateItemOutput, error)
+	// archived holds every item whose key is not a live network key. replace
+	// decides the fate of the one write that hands a retired key over: "refuse"
+	// (nothing written), "lose" (written, response lost) or "retry" (written,
+	// then the SDK's own retry of it refused).
+	archived map[string]map[string]types.AttributeValue
+	replace  string
+	replaced int
 }
 
 func clone(in map[string]types.AttributeValue) map[string]types.AttributeValue {
@@ -41,6 +49,12 @@ func (d *database) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...fu
 	if !aws.ToBool(in.ConsistentRead) {
 		return nil, errors.New("journal read must be strongly consistent")
 	}
+	if k := value(in.Key, "Network"); strings.Contains(k, "#") {
+		if d.archived[k] == nil {
+			return &dynamodb.GetItemOutput{}, nil
+		}
+		return &dynamodb.GetItemOutput{Item: clone(d.archived[k])}, nil
+	}
 	return &dynamodb.GetItemOutput{Item: clone(d.item)}, nil
 }
 func (d *database) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
@@ -49,8 +63,41 @@ func (d *database) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...fu
 	if d.failPut != nil {
 		return nil, d.failPut
 	}
+	if aws.ToString(in.ConditionExpression) == "#plan = :retired AND #revision = :revision AND attribute_not_exists(#owner)" {
+		// The handover of a retired key: one conditional replacement.
+		if len(in.ExpressionAttributeNames) != 3 || in.ExpressionAttributeNames["#plan"] != "PlanID" || in.ExpressionAttributeNames["#revision"] != "Revision" || in.ExpressionAttributeNames["#owner"] != "Owner" || len(in.ExpressionAttributeValues) != 2 {
+			return nil, errors.New("malformed handover condition")
+		}
+		if d.replace == "refuse" {
+			return nil, errors.New("handover write did not reach the table")
+		}
+		if d.item == nil || value(in.Item, "Network") != value(d.item, "Network") || value(d.item, "PlanID") != value(in.ExpressionAttributeValues, ":retired") || !sameNumber(d.item["Revision"], in.ExpressionAttributeValues[":revision"]) || value(d.item, "Owner") != "" {
+			return nil, &types.ConditionalCheckFailedException{}
+		}
+		d.item = clone(in.Item)
+		d.replaced++
+		outcome := d.replace
+		d.replace = ""
+		switch outcome {
+		case "lose":
+			return nil, errors.New("lost successful handover response")
+		case "retry":
+			return nil, &types.ConditionalCheckFailedException{}
+		}
+		return &dynamodb.PutItemOutput{}, nil
+	}
 	if aws.ToString(in.ConditionExpression) != "attribute_not_exists(#network)" || in.ExpressionAttributeNames["#network"] != "Network" {
 		return nil, errors.New("missing create-if-absent condition")
+	}
+	if k := value(in.Item, "Network"); strings.Contains(k, "#") {
+		if d.archived[k] != nil {
+			return nil, &types.ConditionalCheckFailedException{}
+		}
+		if d.archived == nil {
+			d.archived = map[string]map[string]types.AttributeValue{}
+		}
+		d.archived[k] = clone(in.Item)
+		return &dynamodb.PutItemOutput{}, nil
 	}
 	if d.item != nil {
 		return nil, &types.ConditionalCheckFailedException{}
