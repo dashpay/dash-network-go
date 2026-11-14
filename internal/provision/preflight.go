@@ -46,6 +46,12 @@ func arch(a string) types.ArchitectureType {
 // Prepare is read-only. Execute repeats these checks against the immutable plan.
 // It does not claim to verify routes, SSH trust, OS preparation, or chain health.
 func Prepare(ctx context.Context, n spec.Network, identity inventory.STS, cloud EC2) (Plan, error) {
+	return prepare(ctx, n, "", identity, cloud)
+}
+
+// prepare builds the plan that succeeds the given retired plan ID, or the first
+// plan under the network key when that ID is empty.
+func prepare(ctx context.Context, n spec.Network, succeeds string, identity inventory.STS, cloud EC2) (Plan, error) {
 	if err := n.Validate(); err != nil {
 		return Plan{}, err
 	}
@@ -142,7 +148,7 @@ func Prepare(ctx context.Context, n spec.Network, identity inventory.STS, cloud 
 			return Plan{}, fmt.Errorf("instance type %s does not support requested architecture/EBS/HVM", g.InstanceType)
 		}
 	}
-	p := build(n, roots)
+	p := build(n, roots, succeeds)
 	return p, p.Validate()
 }
 

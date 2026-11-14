@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -37,7 +38,11 @@ func launch(ctx context.Context, p Plan, t Target, c EC2) (string, error) {
 	return aws.ToString(out.Instances[0].InstanceId), nil
 }
 
-func discover(ctx context.Context, p Plan, c EC2) (map[string]types.Instance, error) {
+// discover returns this plan's live instances and refuses everything else that
+// carries the network tag. The one exception is the retired predecessor's own
+// instances: EC2 lists a terminated instance for about an hour, and one that
+// the predecessor journaled, still tagged with its plan, can never run again.
+func discover(ctx context.Context, p Plan, c EC2, retired *Predecessor) (map[string]types.Instance, error) {
 	input := &ec2.DescribeInstancesInput{Filters: []types.Filter{{Name: aws.String("tag:" + p.Network.AWS.NetworkTagKey), Values: []string{p.Network.Metadata.Name}}}}
 	targets := map[string]Target{}
 	for _, t := range p.Targets {
@@ -66,6 +71,9 @@ func discover(ctx context.Context, p Plan, c EC2) (map[string]types.Instance, er
 						return nil, errors.New("duplicate ownership tag")
 					}
 					tags[k] = aws.ToString(tag.Value)
+				}
+				if retired != nil && instance.State != nil && instance.State.Name == types.InstanceStateNameTerminated && tags["dashnet:plan"] == retired.PlanID && slices.Contains(retired.Instances, aws.ToString(instance.InstanceId)) {
+					continue
 				}
 				t, ok := targets[tags["dashnet:node"]]
 				if !ok {
