@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/dashpay/dash-network-go/internal/inventory"
@@ -37,6 +39,78 @@ type Record struct {
 	Deployment        *DeploymentProgress     `json:"deployment,omitempty"`
 	Runtime           *RuntimeState           `json:"runtime,omitempty"`
 	Upgrade           *UpgradeProgress        `json:"upgrade,omitempty"`
+	Predecessor       *Predecessor            `json:"predecessor,omitempty"`
+}
+
+// Predecessor is what an operation keeps of the retired one it replaced under
+// the same network key: where that journal is archived, and the instances it
+// had, so they are recognised for as long as EC2 still lists them terminated.
+type Predecessor struct {
+	PlanID    string   `json:"planId"`
+	Revision  int64    `json:"revision"`
+	Archive   string   `json:"archive"`
+	Instances []string `json:"instances"`
+}
+
+func (d *Predecessor) validate(p Plan) error {
+	if d == nil {
+		if p.Succeeds != "" {
+			return errors.New("successor operation lost its predecessor")
+		}
+		return nil
+	}
+	if p.Succeeds == "" || d.PlanID != p.Succeeds || d.Revision < 1 || d.Archive != p.Key()+"#retired#"+d.PlanID+"#"+strconv.FormatInt(d.Revision, 10) || len(d.Instances) == 0 || len(d.Instances) > 100 || !sort.StringsAreSorted(d.Instances) {
+		return errors.New("invalid predecessor in operation journal")
+	}
+	for i, id := range d.Instances {
+		if id == "" || (i > 0 && id == d.Instances[i-1]) {
+			return errors.New("invalid predecessor instance in operation journal")
+		}
+	}
+	return nil
+}
+
+// Retired reports nil only when this record, read on its own terms, proves its
+// network is gone: address retirement finished, which ReleaseAddresses reaches
+// only after it has seen every journaled instance terminated (or purged) under
+// this plan's ownership and every address absent by its exact ID. Nothing
+// weaker counts, so a plan without IPAM addresses can never be retired.
+func (r Record) Retired() error {
+	if err := r.ValidateAddressCleanup(r.Plan); err != nil {
+		return err
+	}
+	if r.Phase != "addresses-released" || !r.Plan.Network.AWS.Provision.PublicIPv4 || r.Plan.Network.AWS.Provision.IPAMPoolID == "" {
+		return errors.New("operation is not retired: its addresses were not released")
+	}
+	for _, t := range r.Plan.Targets {
+		n := r.Nodes[t.Name]
+		if n.Phase != "present" || n.InstanceID == "" || (n.Address != nil && n.Address.Phase != "released") {
+			return fmt.Errorf("operation is not retired: %s is unresolved", t.Name)
+		}
+	}
+	return nil
+}
+
+// NewSuccessor is the fresh operation of a plan that succeeds a retired one.
+// Nothing of the old operation is carried over except its identity.
+func NewSuccessor(p Plan, retired Record) (Record, error) {
+	if err := p.Validate(); err != nil {
+		return Record{}, err
+	}
+	if p.Succeeds == "" || retired.Plan.ID != p.Succeeds || retired.Plan.Key() != p.Key() {
+		return Record{}, errors.New("plan does not succeed this operation")
+	}
+	if err := retired.Retired(); err != nil {
+		return Record{}, err
+	}
+	r := NewRecord(p)
+	d := &Predecessor{PlanID: retired.Plan.ID, Revision: retired.Revision, Archive: retired.Plan.ArchiveKey(retired.Revision), Instances: []string{}}
+	for _, n := range retired.Nodes {
+		d.Instances = append(d.Instances, n.InstanceID)
+	}
+	sort.Strings(d.Instances)
+	r.Predecessor = d
+	return r, r.validateCompute(p)
 }
 
 func NewRecord(p Plan) Record {
@@ -72,6 +146,9 @@ func (r Record) validateCompute(p Plan) error {
 	}
 	if r.Revision < 0 || !reflect.DeepEqual(r.Plan, p) || r.APIVersion != p.APIVersion || r.Kind != "EC2ProvisionOperation" || r.ApplicationHealth != "unknown" || len(r.Nodes) != len(p.Targets) || r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() {
 		return errors.New("operation journal identity, schema, or target set mismatch")
+	}
+	if err := r.Predecessor.validate(p); err != nil {
+		return err
 	}
 	switch r.Phase {
 	case "pending", "provisioning", "interrupted", "compute-ready", "addresses-released":
@@ -122,6 +199,20 @@ type Store interface {
 	Release(context.Context, Plan, string) error
 }
 
+// ErrRetired refuses every further use of an operation whose addresses were
+// released. A retired operation is evidence, and the proof that releases its
+// network's name: no stage may claim or change it again.
+var ErrRetired = errors.New("allocation retired; IPAM addresses have been released (to reuse the name, generate a new plan with provision-plan)")
+
+// Superseder is a Store that can hand a network key to the plan that succeeds
+// the retired operation held under it. Supersede is Acquire for such a plan:
+// it archives the retired operation, then replaces it with the successor's
+// fresh one, claimed by this runner. Only Execute asks for it, so no later
+// stage can retire a journal by accident.
+type Superseder interface {
+	Supersede(context.Context, Plan, string) (Record, error)
+}
+
 // Execute verifies the footprint, records launch intent BEFORE each AWS request,
 // reconciles every target, and waits for EC2 running. EC2 running is not node or
 // application health. No SSH, bootstrap, registration, reset, or terminate call.
@@ -132,14 +223,22 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	if owner == "" || pollInterval <= 0 {
 		return result, errors.New("runner ID and positive poll interval required")
 	}
-	verified, verifyErr := Prepare(ctx, p.Network, identity, cloud)
+	verified, verifyErr := prepare(ctx, p.Network, p.Succeeds, identity, cloud)
 	if verifyErr != nil {
 		return result, verifyErr
 	}
 	if verified.ID != p.ID {
 		return result, errors.New("live footprint differs from approved plan; regenerate and review")
 	}
-	r, err := store.Acquire(ctx, p, owner)
+	acquire := store.Acquire
+	if p.Succeeds != "" {
+		successor, ok := store.(Superseder)
+		if !ok {
+			return result, errors.New("this journal cannot supersede a retired operation")
+		}
+		acquire = successor.Supersede
+	}
+	r, err := acquire(ctx, p, owner)
 	if err != nil {
 		return result, fmt.Errorf("claim operation: %w", err)
 	}
@@ -169,7 +268,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 		return
 	}
 	if r.Phase == "addresses-released" {
-		return result, errors.New("allocation retired; IPAM addresses have been released")
+		return result, ErrRetired
 	}
 	for _, n := range r.Nodes {
 		if n.Address != nil && (n.Address.Phase == "releasing" || n.Address.Phase == "released") {
@@ -191,7 +290,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 	}
 	// Validate the entire live scope before the first mutation. A legacy or foreign
 	// instance with the selected network tag prevents adoption, even on target 100.
-	live, err := discover(ctx, p, cloud)
+	live, err := discover(ctx, p, cloud, r.Predecessor)
 	if err != nil {
 		return
 	}
@@ -239,7 +338,7 @@ func Execute(ctx context.Context, p Plan, identity inventory.STS, cloud EC2, sto
 		}
 	}
 	for {
-		live, err = discover(ctx, p, cloud)
+		live, err = discover(ctx, p, cloud, r.Predecessor)
 		if err != nil {
 			return
 		}
