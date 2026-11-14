@@ -25,6 +25,7 @@ type Record struct {
 	Current     string          `json:"current,omitempty"`
 	Completed   map[string]bool `json:"completed,omitempty"`
 	LastError   string          `json:"lastError,omitempty"`
+	MiningPhase string          `json:"miningPhase,omitempty"`
 	// Instances pins each enrolled target name to the instance that was
 	// enrolled. A replaced instance under the same name is not enrolled.
 	Instances map[string]string `json:"instances,omitempty"`
@@ -36,6 +37,9 @@ func (r Record) IsEnrolled(t Target) bool {
 }
 
 func (r Record) Validate(f Fleet) error {
+	if r.MiningPhase != "" && r.MiningPhase != "pausing" && r.MiningPhase != "paused" && r.MiningPhase != "resuming" && r.MiningPhase != "resumed" {
+		return errors.New("invalid fleet mining phase")
+	}
 	if r.FleetID != f.Authority() || !digestRE.MatchString(r.SnapshotID) || r.Revision < 0 {
 		return errors.New("managed record scope mismatch")
 	}

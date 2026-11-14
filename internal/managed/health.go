@@ -124,6 +124,9 @@ func Doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 // doctor extends the window for the focus targets (all when empty) that have
 // not advanced, so a gate on one node never waits on an unrelated stuck node.
 func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error, focus []string) (Health, error) {
+	return doctorWithPlan(ctx, s, remote, window, wait, focus, nil)
+}
+func doctorWithPlan(ctx context.Context, s Snapshot, remote Backend, window time.Duration, wait func(context.Context, time.Duration) error, focus []string, plan *Plan) (Health, error) {
 	h := Health{Window: window.String(), Problems: []string{}, Nodes: map[string]NodeHealth{}}
 	if err := s.Validate(); err != nil {
 		return h, err
@@ -166,6 +169,15 @@ func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 		second.ID = ""
 		second.ID = hash(second)
 	}
+	return assessHealth(s, first, second, plan, window.String(), true), nil
+}
+
+func assessHealth(s, first, second Snapshot, plan *Plan, label string, progress bool) Health {
+	return assessHealthProgress(s, first, second, plan, label, progress, progress)
+}
+
+func assessHealthProgress(s, first, second Snapshot, plan *Plan, label string, progress, coreProgress bool) Health {
+	h := Health{Window: label, Problems: []string{}, Nodes: map[string]NodeHealth{}}
 	h.Snapshot = second
 	block := ""
 	for _, t := range s.Fleet.Targets {
@@ -182,15 +194,21 @@ func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 		if err := b.Healthy(t); err != nil {
 			h.Problems = append(h.Problems, t.Name+": "+err.Error())
 		}
-		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !SameIdentity(baseline, b, t) {
+		if baseline := s.Nodes[t.Name]; baseline.Error == "" && baseline.FilesHash != "" && !samePlannedIdentity(baseline, a, b, t, plan) {
 			h.Problems = append(h.Problems, t.Name+": identity/configuration/protocol changed")
 		}
-		if t.Containers["core"] != "" && (b.Chain.CoreHeight <= a.Chain.CoreHeight || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {
+		if t.Containers["core"] != "" && (b.Chain.CoreHeight < a.Chain.CoreHeight || (coreProgress && b.Chain.CoreHeight == a.Chain.CoreHeight) || b.Chain.ChainLockHeight < a.Chain.ChainLockHeight) {
 			h.Problems = append(h.Problems, t.Name+": Core not advancing")
 		}
+		if coreProgress && plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && t.Containers["core"] != "" && b.Chain.ChainLockHeight <= a.Chain.ChainLockHeight {
+			h.Problems = append(h.Problems, t.Name+": ChainLock not advancing")
+		}
 		if t.Role == "validator" {
-			if b.Chain.PlatformHeight <= a.Chain.PlatformHeight || b.Chain.DAPIHeight < a.Chain.DAPIHeight || b.Chain.DAPIHeight > b.Chain.PlatformHeight+5 || b.Chain.DAPIHeight+5 < b.Chain.PlatformHeight {
+			if b.Chain.PlatformHeight < a.Chain.PlatformHeight || (progress && b.Chain.PlatformHeight == a.Chain.PlatformHeight) || b.Chain.DAPIHeight < a.Chain.DAPIHeight || b.Chain.DAPIHeight > b.Chain.PlatformHeight+5 || b.Chain.DAPIHeight+5 < b.Chain.PlatformHeight {
 				h.Problems = append(h.Problems, t.Name+": Platform not advancing")
+			}
+			if plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && b.Chain.PosePenalty > s.Nodes[t.Name].Chain.PosePenalty {
+				h.Problems = append(h.Problems, t.Name+": PoSe penalty increased")
 			}
 			if !digestRE.MatchString(b.Chain.PlatformHash) || (block != "" && block != b.Chain.PlatformHash) {
 				h.Problems = append(h.Problems, t.Name+": consensus block disagreement")
@@ -223,7 +241,7 @@ func doctor(ctx context.Context, s Snapshot, remote Backend, window time.Duratio
 	}
 	h.Healthy = len(h.Problems) == 0
 	h.ObservedAt = time.Now().UTC()
-	return h, nil
+	return h
 }
 
 // idleExtensions bounds how many extra observation windows a node that has not

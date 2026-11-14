@@ -27,6 +27,8 @@ type Runner struct {
 	ReadyTimeout time.Duration
 	Progress     func(string)
 	Wait         func(context.Context, time.Duration) error
+	// Set only by the fleet controller while verified owned leases are held.
+	fleetPaused bool
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -182,7 +184,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		return
 	}
 	for _, t := range f.Targets {
-		if p.Selects(t) && !prior.IsEnrolled(t) {
+		if (p.Selects(t) || (p.Migration != nil && slices.Contains(p.Migration.Miners, t.Name))) && !prior.IsEnrolled(t) {
 			return record, errors.New("finish explicit enrollment first")
 		}
 	}
@@ -207,6 +209,12 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			err = errors.Join(err, e)
 		}
 	}()
+	// Recover an owned pause after controller loss, never a foreign pause.
+	if len(miningTargets(p)) > 0 && !fleetPause(p) {
+		if err = r.resumeMining(p); err != nil {
+			return
+		}
+	}
 	resuming := record.OperationID == p.ID
 	if !resuming {
 		if record.OperationID != p.PreviousID || (record.Phase != "enrolled" && record.Phase != "complete") {
@@ -236,7 +244,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			}
 		}
 		if p.Operation == "upgrade" {
-			h, e := r.health(ctx, p.Snapshot, p.Targets)
+			h, e := r.planHealth(ctx, p)
 			if e != nil {
 				return record, e
 			}
@@ -252,12 +260,13 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			record.Completed[t.Name] = len(p.Images[t.Name]) == 0
 		}
 		mutated = true
+		record.MiningPhase = ""
 		if err = save(); err != nil {
 			return
 		}
 	}
 	if record.Phase == "complete" {
-		h, e := r.health(ctx, p.Snapshot, p.Targets)
+		h, e := r.planHealth(ctx, p)
 		if e != nil {
 			return record, e
 		}
@@ -273,15 +282,23 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if len(p.Images[t.Name]) == 0 {
 			continue
 		}
+		if fleetPause(p) && record.MiningPhase != "" {
+			continue
+		} // Staged before pause intent was saved.
 		q := request(f, t, "stage")
 		v := p.Snapshot.Nodes[t.Name]
 		q.Expected = &v
 		q.Pins = p.Images[t.Name]
 		q.Operation = p.Operation
 		q.OperationID = p.ID
+		q.Migration = p.Migration
 		if _, err = r.Remote.Call(ctx, q); err != nil {
 			return
 		}
+	}
+	if fleetPause(p) {
+		err = r.executeFleet(ctx, p, &record, save)
+		return
 	}
 	targets := slices.Clone(f.Targets)
 	if current := record.Current; current != "" {
@@ -295,8 +312,17 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			return
 		}
 		// Resume only the journaled target; it may be between stop/remove/create.
-		if p.Operation == "upgrade" && record.Current == "" {
-			h, e := r.health(ctx, p.Snapshot, p.Targets)
+		freshWithdrawal := record.Current == ""
+		if p.Migration != nil && record.Current == t.Name {
+			// The epoch/DKG gate can refuse before stopping anything. A pending
+			// journal name alone is not permission to skip a fresh quorum gate.
+			o, e := r.Remote.Call(ctx, request(f, t, "observe"))
+			if e == nil && o.Healthy(t) == nil {
+				freshWithdrawal = true
+			}
+		}
+		if p.Operation == "upgrade" && freshWithdrawal {
+			h, e := r.withdrawalHealth(ctx, p)
 			if e != nil {
 				return record, e
 			}
@@ -320,7 +346,8 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		q.Pins = maps.Clone(p.Images[t.Name])
 		q.Operation = p.Operation
 		q.OperationID = p.ID
-		if _, err = r.Remote.Call(ctx, q); err != nil {
+		q.Migration = p.Migration
+		if err = r.applyWithMining(ctx, p, t, q, freshWithdrawal); err != nil {
 			return
 		}
 		record.Phase = "verifying"
@@ -328,9 +355,6 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 			return
 		}
 		if p.Operation == "upgrade" {
-			if err = r.awaitReady(ctx, f, t); err != nil {
-				return
-			}
 			if err = r.verify(ctx, p, record); err != nil {
 				return
 			}
@@ -357,7 +381,7 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 	defer cancel()
 	r.report("managed-verifying")
 	for {
-		h, e := r.health(check, p.Snapshot, p.Targets)
+		h, e := r.planHealth(check, p)
 		if e != nil {
 			return e
 		}
@@ -372,7 +396,7 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 						selected = append(selected, c)
 					}
 				}
-				current := h.Snapshot.Nodes[t.Name]
+				current := p.normalized(h.Snapshot.Nodes[t.Name])
 				if e = Preserved(p.Snapshot.Nodes[t.Name], current, selected); e != nil {
 					return fmt.Errorf("%s: %w", t.Name, e)
 				}

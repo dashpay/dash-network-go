@@ -30,7 +30,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	var manifestPath, snapshotPath, planPath, key, hosts, profile, output, confirm, scope, operation, choicesPath, expectedOwner string
 	var timeout, window, ready time.Duration
 	var stopped bool
-	var source, selectedNodes string
+	var source, selectedNodes, migrationPath string
 	if command == "managed-plan" || command == "managed-enroll" {
 		fs.StringVar(&selectedNodes, "nodes", "", "comma-separated explicit target names; omitted means whole fleet")
 	}
@@ -61,6 +61,7 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		fs.StringVar(&confirm, "confirm", "", "exact snapshot/plan ID")
 	}
 	if command == "managed-plan" {
+		fs.StringVar(&migrationPath, "migration", "", "reviewed legacy-testnet-v5 policy JSON; supports readinessDriven/miners/fleetMiningPause/canaries; requires core,drive,tenderdash,dapi scope")
 		fs.StringVar(&scope, "scope", "platform", "component names (comma separated), platform or all")
 		fs.StringVar(&operation, "operation", "upgrade", "deploy (same-image restoration) or upgrade")
 		fs.StringVar(&choicesPath, "images", "", "JSON component to image candidate map; omitted components retain exact existing images")
@@ -243,9 +244,36 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		if e != nil {
 			return e
 		}
+		if migrationPath != "" {
+			if choices["drive"] == "" || choices["dapi"] == "" {
+				return errors.New("migration needs explicit target-release Drive and DAPI images")
+			}
+			if choices["core"] != "" {
+				return errors.New("migration preserves Core; omit its image override")
+			}
+			for _, target := range f.Targets {
+				if images[target.Name]["core"] == "" {
+					continue
+				}
+				digests := s.Nodes[target.Name].Components["core"].Digests
+				if len(digests) == 0 {
+					return errors.New("migration needs a captured immutable Core image")
+				}
+				images[target.Name]["core"] = digests[0]
+			}
+		}
 		p, e = managed.BuildSelected(s, operation, scope, record.OperationID, images, targets, time.Now())
 		if e != nil {
 			return e
+		}
+		if migrationPath != "" {
+			var migration managed.Migration
+			if e = files.ReadJSON(migrationPath, &migration); e != nil {
+				return e
+			}
+			if e = p.WithMigration(migration); e != nil {
+				return e
+			}
 		}
 		return emit(out, output, p)
 	}
