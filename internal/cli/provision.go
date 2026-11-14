@@ -117,18 +117,44 @@ func runProvision(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	switch command {
 	case "provision-plan":
+		// A destroyed network's name is reused by the plan that succeeds its
+		// retired operation. Read-only here: provision decides again.
+		succeeds, reused, err := store.Succession(ctx, p)
+		switch {
+		case errors.Is(err, journal.ErrNotRetired):
+			fmt.Fprintln(stderr, "note: this name already has an operation for a different plan, and it is not retired;", err)
+			fmt.Fprintln(stderr, "note: provision will refuse this plan")
+		case err != nil:
+			return fmt.Errorf("read journal for name reuse: %w", err)
+		case succeeds != "":
+			if p, err = p.Successor(succeeds); err != nil {
+				return err
+			}
+			if reused {
+				fmt.Fprintln(stderr, "This name belonged to a destroyed network, retired plan "+succeeds+".")
+				fmt.Fprintln(stderr, "This plan succeeds it: provision archives that operation and starts a new one. The chain identity follows the name and generation, so it is unchanged.")
+			}
+		}
 		fmt.Fprintln(stderr, p.Footprint())
 		fmt.Fprintln(stderr, "Read-only footprint check, not a cost quote or proof of SSH/OS/chain readiness. Review networking and AMI contents separately.")
 		return emit(out, output, p)
 	case "operation":
 		r, owner, err := store.Read(ctx, p)
+		archived := false
 		if err != nil {
-			return err
+			// The name may have been reused since: the operation is then kept
+			// under its archive key, unclaimed and read-only.
+			kept, e := store.Archived(ctx, p)
+			if e != nil {
+				return err
+			}
+			r, owner, archived = kept, "", true
 		}
 		return emit(out, output, struct {
 			Owner     string           `json:"owner"`
+			Archived  bool             `json:"archived,omitempty"`
 			Operation provision.Record `json:"operation"`
-		}{owner, r})
+		}{owner, archived, r})
 	case "operation-unlock":
 		if _, owner, err := store.Read(ctx, p); err != nil {
 			return err

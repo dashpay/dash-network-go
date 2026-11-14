@@ -70,11 +70,13 @@ roles table deletion or state item deletion permissions. Restrict roles to the
 canonical table: choosing another table is not a recovery procedure.
 
 The network key is `account/region/name`, intentionally **without generation**.
-A different generation or plan cannot bypass a previous claim/operation. This
-milestone stores one immutable provision operation per network, not a general
-workflow history service. It refuses changed plans even after completion. Reset,
-replacement, and state migration need their own reviewed lifecycle implementation;
-never delete the record just to make a retry pass.
+A different generation or plan cannot bypass a previous claim/operation. The
+journal holds one immutable provision operation per network key, not a general
+workflow history service, and refuses changed plans even after completion. A key
+changes hands in exactly one reviewed way:
+[the name of a destroyed network is reused](#reusing-the-name-of-a-destroyed-network).
+Reset, in-place replacement and state migration are not implemented; never delete
+or edit a record to make a retry pass.
 
 ## Human and agent command path
 
@@ -156,6 +158,100 @@ stale runner from changing state, **not** an already-issued EC2 API request from
 completing. There is no claim that DynamoDB fencing fences EC2 itself. The stopped
 runner prerequisite matters. Never unlock just because a job appears slow.
 
+## Reusing the name of a destroyed network
+
+A network name is released for reuse when, and only when, the operation the
+journal holds under its key proves that network is gone:
+
+- its phase is `addresses-released`, which only `dashnet release-addresses`
+  writes, after it has seen **every** journaled instance terminated under this
+  plan's ownership tags and client token (or reported absent by its exact ID once
+  EC2 purged it) and **every** address absent by its exact allocation ID;
+- every target has a journaled instance ID, and no address is in any state but
+  `released`;
+- the record is consistent with its own plan, schema and revision;
+- no runner holds its claim.
+
+Nothing weaker counts. A terminated fleet whose addresses were not released, an
+interrupted or pending operation, and a claimed record all keep their name. A
+plan without IPAM public addresses (`publicIpv4: false`) has no address
+retirement and therefore **no proof**: its name is never released by this tool.
+
+Reuse is part of the plan, so it is reviewed like any other plan:
+
+```sh
+# After release-addresses for the old plan. Reads the journal (read-only).
+dashnet provision-plan --network networks/devnet-lab.yaml \
+  --profile YOUR_PROFILE --out out/lab-ec2-plan-2.json
+```
+
+When the key holds a retired operation, `provision-plan` says so and writes a
+plan with `"succeeds": "RETIRED_PLAN_ID"`. That field is covered by the plan ID,
+so the new plan differs from the retired one even if the network definition is
+unchanged: every EC2 client token and every `dashnet:plan` tag of the new fleet
+is new. `provision --confirm NEW_PLAN_ID` then, and only then:
+
+1. reads the live record and checks again that it is exactly the plan named by
+   `succeeds`, retired and unclaimed;
+2. copies it verbatim to the archive key
+   `account/region/name#retired#OLD_PLAN_ID#REVISION` in the same table, where
+   `REVISION` is the journal revision that was read (create-if-absent; a repeat
+   finds the same item and goes on);
+3. replaces the live item with the new plan's fresh operation, claimed by this
+   runner, in one write conditional on the old plan ID, that same revision and
+   the absence of a claim.
+
+Nothing is deleted. Of two runners, one conditional write wins; the other finds
+an operation that is no longer the one it read and is refused by the ordinary
+plan and claim rules. If the response to step 3 is lost, the claim may exist:
+inspect and unlock it exactly as after any [crashed runner](#crashed-runner--persistent-claim),
+then rerun the same plan. An SDK retry of the accepted write is recognised as
+this runner's own. `bootstrap`, `deploy`, `join`, `upgrade` and
+`release-addresses` never hand a name over; only `provision` does.
+
+Steps 2 and 3 are two writes, not one transaction. A handover that stops between
+them leaves the retired operation in place with a copy beside it, and the next
+`provision` of the same plan goes on from there. Because the archive key names
+the revision, a copy can never block a later attempt: if the retired operation
+has a different revision by then, that revision is archived under its own key and
+the earlier copy stays where it is.
+
+A retired operation does not change any more. Once an operation is in
+`addresses-released`, `provision`, `bootstrap`, `deploy`, `join` and `upgrade`
+refuse to claim it ("allocation retired"), so none of them can write a checkpoint
+into it. `release-addresses` can still be repeated against it and changes nothing.
+
+The successor starts empty. No instance, address, bootstrap, deployment, runtime
+or upgrade state is carried over, and nothing of the old fleet is adopted. Its
+record keeps only a `predecessor` entry: the retired plan ID, the archive key and
+the retired instance IDs. `dashnet operation --plan OLD_PLAN` keeps working and
+shows the archived record, the revision that was replaced, with `"archived": true`. Planning the same network
+definition again returns the same successor plan, so a lost plan file does not
+strand an interrupted operation.
+
+The live scope is checked as strictly as for a first provision: any instance
+carrying the network tag that is not this plan's own blocks it. The single
+exception is the retired predecessor's own instances, which EC2 keeps listing as
+`terminated` for about an hour: an instance is skipped only if it is
+`terminated`, carries the predecessor's `dashnet:plan` tag **and** its ID is one
+the predecessor journaled. Such an instance can never run again. A stopped,
+shutting-down or running one, or a terminated one the predecessor did not
+record, still blocks. Only the direct predecessor is known, so a third reuse
+within that hour waits for EC2 to purge the first fleet's instances.
+
+What reuse does **not** change or cover:
+
+- **Chain identity.** The Core devnet name and the Platform chain ID follow the
+  network name and generation. A name reused at the same generation is the same
+  chain identity as the destroyed network, on a new genesis. Raise the
+  generation in the network definition if the two must be distinguishable.
+- **Root volumes.** They are retained on termination and keep the old plan's
+  tags. They are never adopted and never checked; delete them separately.
+- **Existing-network enrollments.** A name enrolled with the managed-network
+  commands shares the table and key space and is never retired.
+- **Old binaries.** A release without this feature rejects a plan with
+  `succeeds` and a record with `predecessor` as unknown fields.
+
 ## Permissions and Actions boundary
 
 The CLI uses the normal AWS SDK credential chain. `--profile` is for terminals;
@@ -169,7 +265,7 @@ Minimum API surfaces to scope in IAM are:
 | Instance creation | `ec2:RunInstances`, `ec2:CreateTags` for tag-on-create; scoped AMI, subnet, groups, key pair, and instance/volume resources |
 | IPAM public addresses | `ec2:DescribeIpamPools`, `DescribeAddresses`, `AllocateAddress`, `AssociateAddress`, scoped `CreateTags`; see [IPAM](ipam.md) |
 | Explicit retired-address cleanup | `ec2:ReleaseAddress` after every original instance is terminated and every owned address is detached |
-| Journal | `dynamodb:DescribeTable`, `GetItem`, `PutItem`, `UpdateItem` on the one regional table |
+| Journal | `dynamodb:DescribeTable`, `GetItem`, `PutItem`, `UpdateItem` on the one regional table. Name reuse needs nothing more: the archive and the handover are conditional `PutItem`s. `provision-plan` now also reads the network's item (`GetItem`) |
 
 Encrypted volumes using account-specific KMS policies may require additional
 permissions. IAM restrictions are defense in depth; these action names alone are

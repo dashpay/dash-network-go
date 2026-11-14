@@ -72,7 +72,7 @@ func RunningTargets(ctx context.Context, p Plan, r Record, cloud EC2) (map[strin
 	if r.Phase != "compute-ready" {
 		return nil, errors.New("bootstrap requires completed EC2 provisioning")
 	}
-	live, err := discover(ctx, p, cloud)
+	live, err := discover(ctx, p, cloud, r.Predecessor)
 	if err != nil {
 		return nil, err
 	}

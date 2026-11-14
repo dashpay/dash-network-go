@@ -92,6 +92,8 @@ tag search or a failed read. This cannot hide a retained address whose tags were
 changed. Successful cleanup marks the
 allocation retired; provisioning cannot resurrect it. Partial cleanup remains
 resumable. Root disks and other resources need their own reviewed cleanup.
+A retired allocation is also what releases the network's name: a new
+`provision-plan` for it then [succeeds the retired plan](provisioning.md#reusing-the-name-of-a-destroyed-network).
 
 ## IAM and proof boundary
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dashpay/dash-network-go/internal/spec"
@@ -16,10 +17,15 @@ import (
 
 const ManagedBy = "dash-network-go"
 
+// Succeeds is empty for the first plan under a network key. A plan that reuses
+// the name of a destroyed network names the retired plan it replaces: the ID
+// covers it, so every client token, tag and journal condition of the new fleet
+// differs from the old one's, even when nothing else in the network changed.
 type Plan struct {
 	APIVersion string       `json:"apiVersion"`
 	Kind       string       `json:"kind"`
 	ID         string       `json:"id"`
+	Succeeds   string       `json:"succeeds,omitempty"`
 	Network    spec.Network `json:"network"`
 	Targets    []Target     `json:"targets"`
 }
@@ -40,8 +46,8 @@ func digest(v any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func build(n spec.Network, roots map[string]string) Plan {
-	p := Plan{APIVersion: spec.Version, Kind: "EC2ProvisionPlan", Network: n, Targets: []Target{}}
+func build(n spec.Network, roots map[string]string, succeeds string) Plan {
+	p := Plan{APIVersion: spec.Version, Kind: "EC2ProvisionPlan", Succeeds: succeeds, Network: n, Targets: []Target{}}
 	for _, g := range n.Nodes {
 		for i := 1; i <= g.Count; i++ {
 			p.Targets = append(p.Targets, Target{Name: fmt.Sprintf("%s-%03d", g.Name, i), Group: g.Name, Role: g.Role, Architecture: g.Architecture, InstanceType: g.InstanceType, AMI: n.AWS.Provision.AMIs[g.Architecture].ID, RootDevice: roots[g.Architecture]})
@@ -69,16 +75,47 @@ func (p Plan) Validate() error {
 		}
 		roots[t.Architecture] = t.RootDevice
 	}
-	if !reflect.DeepEqual(p, build(p.Network, roots)) {
+	if p.Succeeds != "" && !hex64.MatchString(p.Succeeds) {
+		return errors.New("provision plan succeeds an invalid plan ID")
+	}
+	if !reflect.DeepEqual(p, build(p.Network, roots, p.Succeeds)) {
 		return errors.New("provision plan is altered, incomplete, or has an invalid ID; regenerate it")
 	}
 	return nil
 }
 
+// Successor is p as the plan that replaces the retired plan with the given ID
+// under the same network key. Only the journal decides whether that plan is
+// retired: see Record.Retired and the journal's Supersede.
+func (p Plan) Successor(retired string) (Plan, error) {
+	if !hex64.MatchString(retired) {
+		return Plan{}, errors.New("a successor plan needs the retired plan's ID")
+	}
+	if err := p.Validate(); err != nil {
+		return Plan{}, err
+	}
+	roots := map[string]string{}
+	for _, t := range p.Targets {
+		roots[t.Architecture] = t.RootDevice
+	}
+	next := build(p.Network, roots, retired)
+	return next, next.Validate()
+}
+
 // Key excludes generation: a changed generation cannot bypass the network lock
-// or silently replace a previous fleet. This first stage never rotates records.
+// or silently replace a previous fleet. A key is reused only by a plan that
+// succeeds the retired plan the journal holds under it.
 func (p Plan) Key() string {
 	return p.Network.AWS.AccountID + "/" + p.Network.AWS.Region + "/" + p.Network.Metadata.Name
+}
+
+// ArchiveKey is where the journal keeps this plan's operation, as it stood at
+// the given revision, once its network key has been reused. The revision is
+// part of the key so that an archive is never compared with, or blocked by, a
+// copy of some other state of the same operation. A network name cannot
+// contain '#'.
+func (p Plan) ArchiveKey(revision int64) string {
+	return p.Key() + "#retired#" + p.ID + "#" + strconv.FormatInt(revision, 10)
 }
 func (p Plan) Token(t Target) string { return digest([]string{p.ID, t.Name}) }
 func (p Plan) Tags(t Target) map[string]string {

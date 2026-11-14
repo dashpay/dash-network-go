@@ -275,7 +275,7 @@ func TestIPAMRejectsWrongPoolAndDrift(t *testing.T) {
 func TestNewPublicProvisionRequiresPoolButHistoricalPlansRemainReadable(t *testing.T) {
 	n := testutil.ProvisionNetwork(t)
 	n.AWS.Provision.PublicIPv4 = true
-	p := build(n, map[string]string{"arm64": "/dev/sda1"})
+	p := build(n, map[string]string{"arm64": "/dev/sda1"}, "")
 	if err := p.Validate(); err != nil {
 		t.Fatal("historical plan no longer readable", err)
 	}
