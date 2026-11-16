@@ -46,6 +46,9 @@ func ObservationDigest() string {
 }
 
 func workerScript(action string) string {
+	if miningAction(action) {
+		return "__name__ = 'dashnet_mining'\n" + recipe + "\n" + observer + "\n" + miningRecipe + "\nmain()\n"
+	}
 	if action == "join-start" || action == "join-status" {
 		return "__name__ = 'dashnet_join'\n" + recipe + "\n" + joinRecipe + "\nmain()\n"
 	}
@@ -175,19 +178,20 @@ type Peer struct {
 	ProTxHash         string `json:"proTxHash,omitempty"`
 }
 type Request struct {
-	Join                  *CoreJoin    `json:"join,omitempty"`
-	Context               Context      `json:"context"`
-	Target                Target       `json:"target"`
-	Action                string       `json:"action"`
-	SporkAddress          string       `json:"sporkAddress,omitempty"`
-	PayoutAddress         string       `json:"payoutAddress,omitempty"`
-	Registration          *Peer        `json:"registration,omitempty"`
-	Peers                 []Peer       `json:"peers,omitempty"`
-	GenesisCoreHeight     int64        `json:"genesisCoreHeight,omitempty"`
-	RequiredBalance       int64        `json:"requiredBalance,omitempty"`
-	RequiredConfirmations int          `json:"requiredConfirmations,omitempty"`
-	ReferenceHeight       int64        `json:"referenceHeight,omitempty"`
-	Upgrade               *ImageChange `json:"upgrade,omitempty"`
+	MiningControl         *MiningControl `json:"miningControl,omitempty"`
+	Join                  *CoreJoin      `json:"join,omitempty"`
+	Context               Context        `json:"context"`
+	Target                Target         `json:"target"`
+	Action                string         `json:"action"`
+	SporkAddress          string         `json:"sporkAddress,omitempty"`
+	PayoutAddress         string         `json:"payoutAddress,omitempty"`
+	Registration          *Peer          `json:"registration,omitempty"`
+	Peers                 []Peer         `json:"peers,omitempty"`
+	GenesisCoreHeight     int64          `json:"genesisCoreHeight,omitempty"`
+	RequiredBalance       int64          `json:"requiredBalance,omitempty"`
+	RequiredConfirmations int            `json:"requiredConfirmations,omitempty"`
+	ReferenceHeight       int64          `json:"referenceHeight,omitempty"`
+	Upgrade               *ImageChange   `json:"upgrade,omitempty"`
 	// Transient input candidates. They are never journaled or printed, and the
 	// worker refuses to replace existing identity files on resume.
 	NodePrivateKey string `json:"nodePrivateKey,omitempty"`
@@ -273,20 +277,21 @@ func (r *Render) validate() error {
 }
 
 type Observation struct {
-	InstanceID        string    `json:"instanceId"`
-	PlanID            string    `json:"planId"`
-	Action            string    `json:"action"`
-	Error             string    `json:"error,omitempty"`
-	Core              *Core     `json:"core,omitempty"`
-	Platform          *Platform `json:"platform,omitempty"`
-	OperatorPublicKey string    `json:"operatorPublicKey,omitempty"`
-	PlatformNodeID    string    `json:"platformNodeId,omitempty"`
-	PayoutAddress     string    `json:"payoutAddress,omitempty"`
-	SporkAddress      string    `json:"sporkAddress,omitempty"`
-	ProTxHash         string    `json:"proTxHash,omitempty"`
-	Confirmations     int       `json:"confirmations,omitempty"`
-	Balance           int64     `json:"balance,omitempty"`
-	Render            *Render   `json:"render,omitempty"`
+	MiningPause       *MiningPause `json:"miningPause,omitempty"`
+	InstanceID        string       `json:"instanceId"`
+	PlanID            string       `json:"planId"`
+	Action            string       `json:"action"`
+	Error             string       `json:"error,omitempty"`
+	Core              *Core        `json:"core,omitempty"`
+	Platform          *Platform    `json:"platform,omitempty"`
+	OperatorPublicKey string       `json:"operatorPublicKey,omitempty"`
+	PlatformNodeID    string       `json:"platformNodeId,omitempty"`
+	PayoutAddress     string       `json:"payoutAddress,omitempty"`
+	SporkAddress      string       `json:"sporkAddress,omitempty"`
+	ProTxHash         string       `json:"proTxHash,omitempty"`
+	Confirmations     int          `json:"confirmations,omitempty"`
+	Balance           int64        `json:"balance,omitempty"`
+	Render            *Render      `json:"render,omitempty"`
 }
 type Backend interface {
 	Call(context.Context, Request) (Observation, error)
@@ -307,7 +312,11 @@ func (r Remote) Call(ctx context.Context, q Request) (Observation, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return Observation{}, errors.New("node operation requires a deadline")
 	}
-	if q.Action == "join-start" || q.Action == "join-status" {
+	if miningAction(q.Action) {
+		if err := q.validateMining(); err != nil {
+			return Observation{}, err
+		}
+	} else if q.Action == "join-start" || q.Action == "join-status" {
 		if err := q.validateJoin(); err != nil {
 			return Observation{}, err
 		}

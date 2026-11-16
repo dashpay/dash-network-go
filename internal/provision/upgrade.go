@@ -37,15 +37,18 @@ type Preservation struct {
 }
 
 type UpgradeProgress struct {
-	PlanID      string                  `json:"planId"`
-	PreviousID  string                  `json:"previousId,omitempty"`
-	Phase       string                  `json:"phase"`
-	CurrentNode string                  `json:"currentNode,omitempty"`
-	From        FleetImages             `json:"from"`
-	To          FleetImages             `json:"to"`
-	Baseline    map[string]Preservation `json:"baseline"`
-	Completed   map[string]bool         `json:"completed"`
-	ObservedAt  time.Time               `json:"observedAt,omitempty"`
+	PendingNodes      []string                `json:"pendingNodes,omitempty"`
+	MiningPhase       string                  `json:"miningPhase,omitempty"`
+	MiningContainerID string                  `json:"miningContainerId,omitempty"`
+	PlanID            string                  `json:"planId"`
+	PreviousID        string                  `json:"previousId,omitempty"`
+	Phase             string                  `json:"phase"`
+	CurrentNode       string                  `json:"currentNode,omitempty"`
+	From              FleetImages             `json:"from"`
+	To                FleetImages             `json:"to"`
+	Baseline          map[string]Preservation `json:"baseline"`
+	Completed         map[string]bool         `json:"completed"`
+	ObservedAt        time.Time               `json:"observedAt,omitempty"`
 	// Scope "core" replaces only Core (and the miner) on every node; other
 	// scopes replace Platform components on validators and preserve Core.
 	Scope string `json:"scope,omitempty"`
@@ -87,6 +90,24 @@ func (r Record) validateUpgrade(p Plan) error {
 		return errors.New("runtime/upgrade journal identity mismatch")
 	}
 	u := r.Upgrade
+	seenPending := map[string]bool{}
+	for _, name := range u.PendingNodes {
+		t, ok := p.Target(name)
+		if !ok || seenPending[name] || u.Completed[name] || (u.Scope != "core" && t.Role != "validator") {
+			return errors.New("invalid pending upgrade batch")
+		}
+		seenPending[name] = true
+	}
+	if len(u.PendingNodes) > 16 || len(u.PendingNodes) > 0 && (u.CurrentNode != "" || u.Phase == "complete") {
+		return errors.New("invalid pending upgrade batch")
+	}
+	if u.MiningPhase != "" && u.MiningPhase != "pausing" && u.MiningPhase != "paused" && u.MiningPhase != "resuming" && u.MiningPhase != "resumed" {
+		return errors.New("invalid upgrade mining phase")
+	}
+	if u.MiningContainerID != "" && !hex64.MatchString(u.MiningContainerID) {
+		return errors.New("invalid upgrade mining container")
+	}
+
 	if u.PreviousID != "" && !hex64.MatchString(u.PreviousID) {
 		return errors.New("invalid previous upgrade identity")
 	}

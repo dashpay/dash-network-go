@@ -18,12 +18,14 @@ import (
 )
 
 type Runner struct {
-	Identity       inventory.STS
-	Cloud          provision.EC2
-	Store          bootstrap.Store
-	Remote         node.Backend
-	Owner, Version string
-	Progress       func(string)
+	readinessDriven bool
+	miningPaused    bool // only while a plan-owned mining lease is verified
+	Identity        inventory.STS
+	Cloud           provision.EC2
+	Store           bootstrap.Store
+	Remote          node.Backend
+	Owner, Version  string
+	Progress        func(string)
 	// ObservationWindow is the minimum interval between health samples. Zero
 	// retains the default; it never relaxes identity, quorum or agreement gates.
 	ObservationWindow time.Duration

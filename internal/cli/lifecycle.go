@@ -22,6 +22,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
 	"github.com/dashpay/dash-network-go/internal/release"
+	"github.com/dashpay/dash-network-go/internal/rollout"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/dashpay/dash-network-go/internal/transport"
 )
@@ -34,6 +35,8 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	var timeout, observationWindow time.Duration
 	var protocol, blockSeconds, epochSeconds uint
 	var coreOnly bool
+	var concurrency int
+	var pauseMining bool
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
@@ -47,6 +50,8 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.UintVar(&blockSeconds, "block-time", lifecycle.DefaultBlockSeconds, fmt.Sprintf("Core block interval in seconds (%d..%d): powtargetspacing and the miner's cadence", lifecycle.MinBlockSeconds, lifecycle.MaxBlockSeconds))
 		fs.UintVar(&epochSeconds, "epoch-time", lifecycle.DefaultEpochSeconds, fmt.Sprintf("Platform epoch length in seconds (%d..%d): Drive's EPOCH_TIME_LENGTH_S", lifecycle.MinEpochSeconds, lifecycle.MaxEpochSeconds))
 	} else if args[0] == "upgrade-plan" {
+		fs.IntVar(&concurrency, "concurrency", 1, "maximum nodes replaced simultaneously (1..16); quorum gates still apply")
+		fs.BoolVar(&pauseMining, "pause-mining", false, "pause the owned native miner during validator upgrades; restore on completion/failure")
 		fs.StringVar(&path, "deployment-plan", "", "original immutable deployment plan")
 		fs.StringVar(&candidatePath, "network", "", "candidate network definition; images only may change")
 		fs.StringVar(&lockPath, "lock", "", "resolved candidate release lock")
@@ -247,6 +252,11 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		upgrade, err = runner.PrepareUpgrade(ctx, p, record, candidate, candidateLock, scope)
 		if err != nil {
 			return err
+		}
+		if explicitFlag(fs, "concurrency") || concurrency != 1 || pauseMining {
+			if err = upgrade.WithRollout(rollout.Options{Concurrency: concurrency, PauseMining: pauseMining}); err != nil {
+				return err
+			}
 		}
 		fmt.Fprintln(stderr, "Forward-only image rollout on the exact owned devnet. Source images come from shared state; live digests, health, membership and Core preservation are checked before execution. No protocol migration, reset or automatic downgrade.")
 		return emit(out, output, upgrade)

@@ -28,7 +28,8 @@ type Runner struct {
 	Progress     func(string)
 	Wait         func(context.Context, time.Duration) error
 	// Set only by the fleet controller while verified owned leases are held.
-	fleetPaused bool
+	fleetPaused  bool
+	batchTargets []string
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -184,7 +185,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		return
 	}
 	for _, t := range f.Targets {
-		if (p.Selects(t) || (p.Migration != nil && slices.Contains(p.Migration.Miners, t.Name))) && !prior.IsEnrolled(t) {
+		if (p.Selects(t) || (p.miningPolicy() != nil && slices.Contains(p.miningPolicy().Miners, t.Name))) && !prior.IsEnrolled(t) {
 			return record, errors.New("finish explicit enrollment first")
 		}
 	}
@@ -210,7 +211,7 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		}
 	}()
 	// Recover an owned pause after controller loss, never a foreign pause.
-	if len(miningTargets(p)) > 0 && !fleetPause(p) {
+	if len(miningTargets(p)) > 0 && !fleetPause(p) && p.Rollout == nil {
 		if err = r.resumeMining(p); err != nil {
 			return
 		}
@@ -220,7 +221,11 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 		if record.OperationID != p.PreviousID || (record.Phase != "enrolled" && record.Phase != "complete") {
 			return record, errors.New("stale plan or a different unfinished operation")
 		}
-		current := Observe(ctx, f, r.Remote, 0)
+		observedFleet := f
+		if p.Rollout != nil {
+			observedFleet = r.rolloutSnapshot(p).Fleet
+		}
+		current := Observe(ctx, observedFleet, r.Remote, 0)
 		for _, t := range f.Targets {
 			if !p.Selects(t) {
 				continue
@@ -278,12 +283,16 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 	mutated = true
 	r.report("managed-staging")
 	// An owned fleet pause resumes from its already-staged reviewed plan.
-	if !fleetPause(p) || record.MiningPhase == "" {
+	if (!fleetPause(p) && (p.Rollout == nil || !p.Rollout.PauseMining)) || record.MiningPhase == "" {
 		if err = r.stage(ctx, p); err != nil {
 			return
 		}
 	}
 
+	if p.Rollout != nil {
+		err = r.executeRollout(ctx, p, &record, save)
+		return
+	}
 	if fleetPause(p) {
 		err = r.executeFleet(ctx, p, &record, save)
 		return
@@ -373,13 +382,13 @@ func (r Runner) verify(ctx context.Context, p Plan, record Record) error {
 		if e != nil {
 			return e
 		}
-		if healthSelected(h, p) {
+		if r.rolloutHealthy(h, p) {
 			for _, t := range p.Snapshot.Fleet.Targets {
-				if !p.Selects(t) {
+				if !p.Selects(t) || p.Rollout != nil && len(r.batchTargets) > 0 && !slices.Contains(r.batchTargets, t.Name) {
 					continue
 				}
 				selected := []string{}
-				if record.Completed[t.Name] || record.Current == t.Name {
+				if record.Completed[t.Name] || record.Current == t.Name || slices.Contains(record.PendingTargets, t.Name) {
 					for c := range p.Images[t.Name] {
 						selected = append(selected, c)
 					}

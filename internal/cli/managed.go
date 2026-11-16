@@ -20,6 +20,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/journal"
 	"github.com/dashpay/dash-network-go/internal/managed"
 	"github.com/dashpay/dash-network-go/internal/release"
+	"github.com/dashpay/dash-network-go/internal/rollout"
 	"github.com/dashpay/dash-network-go/internal/transport"
 )
 
@@ -30,7 +31,9 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 	var manifestPath, snapshotPath, planPath, key, hosts, profile, output, confirm, scope, operation, choicesPath, expectedOwner string
 	var timeout, window, ready time.Duration
 	var stopped bool
-	var source, selectedNodes, migrationPath string
+	var source, selectedNodes, migrationPath, miners string
+	var concurrency int
+	var pauseMining bool
 	if command == "managed-plan" || command == "managed-enroll" {
 		fs.StringVar(&selectedNodes, "nodes", "", "comma-separated explicit target names; omitted means whole fleet")
 	}
@@ -61,6 +64,9 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		fs.StringVar(&confirm, "confirm", "", "exact snapshot/plan ID")
 	}
 	if command == "managed-plan" {
+		fs.IntVar(&concurrency, "concurrency", 1, "maximum simultaneous node replacements (1-16)")
+		fs.BoolVar(&pauseMining, "pause-mining", false, "pause the explicit miners, automatically resume on completion or failure")
+		fs.StringVar(&miners, "miners", "", "comma-separated exact owned mining targets")
 		fs.StringVar(&migrationPath, "migration", "", "reviewed legacy-testnet-v5 policy JSON; supports readinessDriven/miners/fleetMiningPause/canaries; requires core,drive,tenderdash,dapi scope")
 		fs.StringVar(&scope, "scope", "platform", "component names (comma separated), platform or all")
 		fs.StringVar(&operation, "operation", "upgrade", "deploy (same-image restoration) or upgrade")
@@ -265,6 +271,15 @@ func runManaged(ctx context.Context, args []string, out, stderr io.Writer) error
 		p, e = managed.BuildSelected(s, operation, scope, record.OperationID, images, targets, time.Now())
 		if e != nil {
 			return e
+		}
+		if explicitFlag(fs, "concurrency") || concurrency != 1 || pauseMining || miners != "" {
+			var names []string
+			if miners != "" {
+				names = strings.Split(miners, ",")
+			}
+			if e = p.WithRollout(rollout.Options{Concurrency: concurrency, PauseMining: pauseMining, Miners: names}); e != nil {
+				return e
+			}
 		}
 		if migrationPath != "" {
 			var migration managed.Migration

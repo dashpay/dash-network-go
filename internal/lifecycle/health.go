@@ -84,6 +84,10 @@ func (r Runner) sample(ctx context.Context, p Plan, record provision.Record, ref
 // Doctor makes two independent observations. No journal write, container command,
 // restart, funding or configuration change is allowed through this path.
 func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (Health, error) {
+	return r.doctor(ctx, p, record, nil)
+}
+
+func (r Runner) doctor(ctx context.Context, p Plan, record provision.Record, baseline map[string]samples) (Health, error) {
 	h := Health{Network: p.Bootstrap.Compute.Network.Metadata.Name, PlanID: p.ID, Nodes: map[string]HealthNode{}, Problems: []string{}}
 	window := r.ObservationWindow
 	if window == 0 {
@@ -122,14 +126,19 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	if err := liveScope(ctx, p, record, r.Cloud); err != nil {
 		return h, err
 	}
-	a := r.sample(ctx, p, record, 0)
+	a := baseline
+	if a == nil {
+		a = r.sample(ctx, p, record, 0)
+	}
 	reference := int64(0)
 	for _, t := range p.Validators() {
 		if v := a[t.Name].platform; v != nil && v.Height > 0 && (reference == 0 || v.Height < reference) {
 			reference = v.Height
 		}
 	}
-	if r.Wait != nil {
+	if baseline != nil {
+		h.ObservationWindow = "readiness"
+	} else if r.Wait != nil {
 		if err := r.Wait(ctx); err != nil {
 			return h, err
 		}
@@ -147,7 +156,15 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	for _, t := range p.Targets {
 		v, first := b[t.Name], a[t.Name]
 		n := HealthNode{Problems: append(first.problems, v.problems...)}
-		if err := coreHealthy(t, record.Deployment.Nodes[t.Name], v.core, p.Miner().Name); err != nil {
+		healthCore := v.core
+		if r.miningPaused && t.Name == p.Miner().Name && v.core != nil && v.core.Mining != nil {
+			copyCore := *v.core
+			copyMining := *v.core.Mining
+			copyMining.Running = true
+			copyCore.Mining = &copyMining
+			healthCore = &copyCore
+		}
+		if err := coreHealthy(t, record.Deployment.Nodes[t.Name], healthCore, p.Miner().Name); err != nil {
 			n.Problems = append(n.Problems, err.Error())
 		}
 		if v.core != nil {
@@ -155,7 +172,7 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 			if v.core.Genesis != record.Deployment.CoreGenesis {
 				n.Problems = append(n.Problems, "Core genesis mismatch")
 			}
-			if first.core == nil || v.core.Height <= first.core.Height {
+			if !r.miningPaused && (first.core == nil || v.core.Height <= first.core.Height) {
 				n.Problems = append(n.Problems, "Core did not advance")
 			}
 			if first.core != nil && first.core.Mining != nil && v.core.Mining != nil && (first.core.Mining.ContainerID != v.core.Mining.ContainerID || first.core.Mining.Restarts != v.core.Mining.Restarts) {
@@ -215,4 +232,35 @@ func (r Runner) Doctor(ctx context.Context, p Plan, record provision.Record) (He
 	h.ObservedAt = time.Now().UTC()
 	h.Healthy = len(h.Problems) == 0
 	return h, nil
+}
+
+// New rollout plans keep one baseline while polling, so a slow block is not a
+// fixed sleep floor and does not have to land in a succession of short windows.
+func (r Runner) rolloutHealth(ctx context.Context, p Plan, record provision.Record) (Health, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	baseline := r.sample(ctx, p, record, 0)
+	for {
+		h, err := r.doctor(ctx, p, record, baseline)
+		if err != nil || h.Healthy {
+			return h, err
+		}
+		if r.Progress != nil {
+			r.Progress("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
+		}
+		if r.Wait != nil {
+			err = r.Wait(ctx)
+		} else {
+			timer := time.NewTimer(15 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				err = ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if err != nil {
+			return h, err
+		}
+	}
 }

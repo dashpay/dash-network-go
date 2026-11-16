@@ -28,20 +28,30 @@ func referenceHeight(s Snapshot) int64 {
 func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 	ctx, cancel := context.WithTimeout(ctx, progressTimeout)
 	defer cancel()
-	first := Observe(ctx, p.Snapshot.Fleet, r.Remote, 0)
+	baseline := p.Snapshot
+	if p.Rollout != nil {
+		baseline = r.rolloutSnapshot(p)
+	}
+	if p.Rollout != nil && len(r.batchTargets) > 0 {
+		current := Observe(ctx, baseline.Fleet, r.Remote, 0)
+		return assessHealth(baseline, current, current, &p, "target readiness", false), ctx.Err()
+	}
+	r.report("managed health gate waiting: sampling selected targets for readiness and chain progress")
+	first := Observe(ctx, baseline.Fleet, r.Remote, 0)
 	previous := first
 	reference := referenceHeight(first)
 	for {
-		second := Observe(ctx, p.Snapshot.Fleet, r.Remote, reference)
+		second := Observe(ctx, baseline.Fleet, r.Remote, reference)
 		// Detect regressions between polls even if still above the original sample.
-		continuity := assessHealth(p.Snapshot, previous, second, &p, "readiness", false)
+		continuity := assessHealth(baseline, previous, second, &p, "readiness", false)
 		for _, problem := range continuity.Problems {
 			if strings.Contains(problem, "identity/configuration/protocol changed") || strings.Contains(problem, "consensus block disagreement") || strings.Contains(problem, "not advancing") || strings.Contains(problem, "PoSe penalty increased") {
 				return continuity, errors.New("readiness continuity failed: " + problem)
 			}
 		}
-		h := assessHealthProgress(p.Snapshot, first, second, &p, "readiness", true, !r.fleetPaused)
-		if healthSelected(h, p) {
+		h := assessHealthProgress(baseline, first, second, &p, "readiness", true, !r.fleetPaused)
+		if r.rolloutHealthy(h, p) {
+			r.report("managed health gate passed: readiness and required chain progress verified")
 			return h, nil
 		}
 		// Permanent faults do not become healthy merely because time passed.
@@ -61,8 +71,13 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 // after a successful post-withdrawal progression proof. It still checks actual
 // health, identities, common Platform history and current available quorum.
 func (r Runner) withdrawalHealth(ctx context.Context, p Plan) (Health, error) {
-	if p.Migration == nil || !p.Migration.ReadinessDriven {
+	if p.Rollout == nil && (p.Migration == nil || !p.Migration.ReadinessDriven) {
 		return r.planHealth(ctx, p)
+	}
+	if p.Rollout != nil {
+		baseline := r.rolloutSnapshot(p)
+		current := Observe(ctx, baseline.Fleet, r.Remote, 0)
+		return assessHealth(baseline, current, current, &p, "batch readiness", false), ctx.Err()
 	}
 	first := Observe(ctx, p.Snapshot.Fleet, r.Remote, 0)
 	second := Observe(ctx, p.Snapshot.Fleet, r.Remote, referenceHeight(first))

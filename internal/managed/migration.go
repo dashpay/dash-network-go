@@ -131,7 +131,7 @@ func samePlannedIdentity(base, first, current Observation, t Target, p *Plan) bo
 }
 
 func (r Runner) planHealth(ctx context.Context, p Plan) (Health, error) {
-	if p.Migration != nil && p.Migration.ReadinessDriven {
+	if p.Rollout != nil || p.Migration != nil && p.Migration.ReadinessDriven {
 		return r.readinessHealth(ctx, p)
 	}
 	return doctorWithPlan(ctx, p.Snapshot, r.Remote, r.window(), r.wait, p.Targets, &p)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/node"
+	"github.com/dashpay/dash-network-go/internal/rollout"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -275,18 +276,19 @@ type Migration struct {
 }
 
 type Plan struct {
-	Migration  *Migration `json:"migration,omitempty"`
-	Targets    []string   `json:"targets,omitempty"`
-	APIVersion string     `json:"apiVersion"`
-	Kind       string     `json:"kind"`
-	ID         string     `json:"id"`
-	Snapshot   Snapshot   `json:"snapshot"`
-	Operation  string     `json:"operation"`
-	Scope      string     `json:"scope"`
-	Images     Images     `json:"images"`
-	PreviousID string     `json:"previousId,omitempty"`
-	Recipe     string     `json:"recipe"`
-	CreatedAt  time.Time  `json:"createdAt"`
+	Rollout    *rollout.Options `json:"rollout,omitempty"`
+	Migration  *Migration       `json:"migration,omitempty"`
+	Targets    []string         `json:"targets,omitempty"`
+	APIVersion string           `json:"apiVersion"`
+	Kind       string           `json:"kind"`
+	ID         string           `json:"id"`
+	Snapshot   Snapshot         `json:"snapshot"`
+	Operation  string           `json:"operation"`
+	Scope      string           `json:"scope"`
+	Images     Images           `json:"images"`
+	PreviousID string           `json:"previousId,omitempty"`
+	Recipe     string           `json:"recipe"`
+	CreatedAt  time.Time        `json:"createdAt"`
 }
 
 func Selected(scope, component string) bool {
@@ -327,6 +329,9 @@ func Build(s Snapshot, operation, scope, previous string, images Images, now tim
 	return p, p.Validate()
 }
 func (p Plan) Validate() error {
+	if err := p.validateRollout(); err != nil {
+		return err
+	}
 	c := p
 	c.ID = ""
 	if p.APIVersion != spec.Version || p.Kind != "ExistingOperation" || p.ID != hash(c) || p.Recipe != RecipeDigest() || p.CreatedAt.IsZero() {

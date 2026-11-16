@@ -166,3 +166,31 @@ recreating exactly the service a new image changes. Re-rendering a 4.2.0-beta.3
 node with the 4.2.0-beta.6 helper migrated its config and changed no service.
 **This does not prove a Dash version-to-version upgrade.** A live existing-state
 version change remains a separate acceptance run.
+
+## Reviewed rollout controls
+
+`upgrade-plan --concurrency N [--pause-mining]` and
+`managed-plan --concurrency N [--pause-mining --miners miner-1,miner-2]`
+bind the chosen maximum (1–16) and mining policy into the immutable plan.
+Explicit `--concurrency 1` uses the new readiness-driven path too. Omitted
+options retain historical plan/executor behavior; old active plans are unchanged.
+
+Nodes are actually replaced concurrently, not just image-staged. The entire
+batch is journaled before applying; a lost response retains that exact pending
+batch for recovery. Workers finish before the claim is released. Each batch
+waits for changed services to be ready, not a fixed four-minute sleep. Ordinary
+managed masternodes do not trigger scans of unrelated fleet services. There is
+one selected-target progression check at the end. Validator batches are trimmed
+to preserve observed >2/3 remaining Platform voting power.
+
+Mining is optional and automatically resumed on completion, error or cancellation.
+Managed Testnet uses the explicitly enrolled `miner-1` / `miner-2` service identities;
+native devnets use their exact deployment miner. Independent host recovery timers
+cover controller loss. A Core upgrade handles the native mining host last, alone,
+after restoring generation. Its existing DKG timing protection remains.
+
+These controls apply to ordinary image upgrades, not schema/config migrations.
+The optional native miner recipe is separately bound; historical node/upgrade
+recipe digests and immutable operation executors are not overwritten. Existing
+native devnets need a compatible executor; the console fails explicitly instead
+of silently discarding options or bypassing recipe compatibility.

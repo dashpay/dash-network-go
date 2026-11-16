@@ -20,9 +20,9 @@ type MiningReceipt struct {
 
 func miningTargets(p Plan) []Target {
 	var out []Target
-	if p.Migration != nil {
+	if policy := p.miningPolicy(); policy != nil {
 		for _, t := range p.Snapshot.Fleet.Targets {
-			if slices.Contains(p.Migration.Miners, t.Name) {
+			if slices.Contains(policy.Miners, t.Name) {
 				out = append(out, t)
 			}
 		}
@@ -34,7 +34,7 @@ func (r Runner) miningCall(ctx context.Context, p Plan, t Target, action string)
 	q := request(p.Snapshot.Fleet, t, action)
 	q.OperationID = p.ID
 	q.Operation = p.Operation
-	q.Migration = p.Migration
+	q.Migration = p.miningPolicy()
 	before := p.Snapshot.Nodes[t.Name]
 	q.Expected = &before
 	return r.Remote.Call(ctx, q)
