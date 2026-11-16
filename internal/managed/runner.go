@@ -277,25 +277,13 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 	}
 	mutated = true
 	r.report("managed-staging")
-	// Staging is bounded and never changes a container. Keep every target visible.
-	for _, t := range f.Targets {
-		if len(p.Images[t.Name]) == 0 {
-			continue
-		}
-		if fleetPause(p) && record.MiningPhase != "" {
-			continue
-		} // Staged before pause intent was saved.
-		q := request(f, t, "stage")
-		v := p.Snapshot.Nodes[t.Name]
-		q.Expected = &v
-		q.Pins = p.Images[t.Name]
-		q.Operation = p.Operation
-		q.OperationID = p.ID
-		q.Migration = p.Migration
-		if _, err = r.Remote.Call(ctx, q); err != nil {
+	// An owned fleet pause resumes from its already-staged reviewed plan.
+	if !fleetPause(p) || record.MiningPhase == "" {
+		if err = r.stage(ctx, p); err != nil {
 			return
 		}
 	}
+
 	if fleetPause(p) {
 		err = r.executeFleet(ctx, p, &record, save)
 		return

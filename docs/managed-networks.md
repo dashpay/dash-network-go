@@ -15,7 +15,8 @@ that the native devnet creator originally made them.
   databases and original Dashmate/Compose files remain untouched.
 - `managed-plan`: resolves candidates once to architecture-specific digests and
   binds original state, network, targets, component scope and previous operation.
-- `managed-upgrade`: stages artifacts; withdraws one selected host at a time;
+- `managed-upgrade`: stages artifacts on up to 16 hosts concurrently, then
+  withdraws one selected host at a time;
   preserves unselected workloads, configuration and existing mounts. Whole-fleet
   health, protocol, identities and quorum availability gate further withdrawals.
 - `managed-deploy`: starts captured, stopped workloads with the **same images**.
@@ -141,6 +142,16 @@ images or change configuration. Its independent process does not honor the new
 journal claim. No assertion of exclusive control over other tools is made.
 
 ## Failure and quorum policy
+
+Image staging uses the same 16-host concurrency bound as native upgrades. It
+pulls only the reviewed architecture-specific pins, without restarting services
+or changing their configuration. All selected image pulls must succeed before
+any container replacement begins; failures identify each affected host. An
+interrupted run waits for in-flight staging calls before releasing its journal
+claim and rechecks staging on resume with the same plan. This also applies to
+`managed-deploy`; replacement order and health gates are unchanged. No additional
+CLI flag or dashboard setting is required. Already-pinned executors retain their
+original behavior until a new compatible executor is explicitly selected.
 
 Choose an observation window longer than the network's idle-block interval.
 The managed default is four minutes: current Moutai emits empty blocks every
