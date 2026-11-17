@@ -173,6 +173,13 @@ def backup_package(root):
     run(['dpkg-deb', '--info', str(archive)])
 
 
+def restart_policy_argument(policy):
+    restart = policy['Name']
+    if restart == 'on-failure' and policy.get('MaximumRetryCount'):
+        restart += ':' + str(policy['MaximumRetryCount'])
+    return '--restart=' + restart
+
+
 def restore_helper(saved):
     """Recreate only the retired helper, via the Docker API (no secret argv)."""
     name = saved['Name'].lstrip('/')
@@ -200,11 +207,7 @@ def restore_helper(saved):
             client.close()
     else:
         require(existing[name]['Id'] == saved['Id'], 'helper-replaced-externally')
-    policy = saved['HostConfig']['RestartPolicy']
-    restart = policy['Name']
-    if restart == 'on-failure' and policy.get('MaximumRetryCount'):
-        restart += ':' + str(policy['MaximumRetryCount'])
-    run(['docker', 'update', '--restart=' + restart, name])
+    run(['docker', 'update', restart_policy_argument(saved['HostConfig']['RestartPolicy']), name])
     if saved['State']['Running']:
         run(['docker', 'start', name])
 
@@ -337,8 +340,7 @@ def apply(q, root):
                 ns['write_existing'](config['key'], (root / 'original-key').read_bytes())
                 ns['write_existing'](config['certificate'], (root / 'original-certificate').read_bytes())
                 ns['reload'](config)
-            policy = helper['HostConfig']['RestartPolicy']['Name']
-            run(['docker', 'update', '--restart=' + policy, t['helper']])
+            run(['docker', 'update', restart_policy_argument(helper['HostConfig']['RestartPolicy']), t['helper']])
             if helper['State']['Running']:
                 run(['docker', 'start', t['helper']])
             state['phase'] = 'rolled-back'; atomic(record, state)
