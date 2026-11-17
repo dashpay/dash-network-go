@@ -108,7 +108,14 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			}
 			// Platform quorums are 12 members; one that formed with fewer (at
 			// least the minimum of 9, e.g. after a member missed a DKG) is live.
-			if x.Protocol != p.InitialProtocolVersion || len(x.Validators) < platformQuorumMinimum || len(x.Validators) > 12 {
+			// InitialProtocolVersion is the bootstrap version, not a cap on a
+			// forward image-only upgrade. Permit the next protocol activation
+			// (PV14 -> PV15) observed at an epoch boundary, but never accept a
+			// regression or an arbitrary future protocol. dashnet does not set or
+			// migrate the protocol; it only observes what the network reports.
+			protocolOK := x.Protocol == p.InitialProtocolVersion ||
+				(p.InitialProtocolVersion < ^uint32(0) && x.Protocol == p.InitialProtocolVersion+1)
+			if !protocolOK || len(x.Validators) < platformQuorumMinimum || len(x.Validators) > 12 {
 				return nil, fmt.Errorf("unsupported live protocol or quorum size at %s", t.Name)
 			}
 			seen := map[string]bool{}
@@ -283,7 +290,7 @@ func (e *execution) verifyUpgrade() (Health, error) {
 	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Minute)
 	defer cancel()
 	for {
-		h, err := e.runner.Doctor(ctx, e.p, e.r)
+		h, err := e.runner.upgradeDoctor(ctx, e.p, e.r)
 		if err != nil {
 			return h, err
 		}
@@ -309,6 +316,20 @@ func (e *execution) verifyUpgrade() (Health, error) {
 			}
 		}
 	}
+}
+
+// upgradeDoctor gives Core enough time to produce a block between the two
+// health samples. A configured 20-second window is not sufficient when the
+// samples straddle a 10-second block boundary and a node misses that interval;
+// use the same 2.5-block safety margin as Doctor's slow-chain handling. This
+// only changes upgrade gates; an operator-requested read-only health check
+// keeps its configured observation window.
+func (r Runner) upgradeDoctor(ctx context.Context, p Plan, record provision.Record) (Health, error) {
+	window := time.Duration(p.MiningIntervalSeconds) * 5 * time.Second / 2
+	if r.ObservationWindow < window {
+		r.ObservationWindow = window
+	}
+	return r.Doctor(ctx, p, record)
 }
 
 // Upgrade stages all images, then changes one validator at a time. The durable
@@ -388,7 +409,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if previous != u.PreviousID || !reflect.DeepEqual(from, u.From) {
 			return result, errors.New("upgrade source changed after planning")
 		}
-		h, healthErr := r.Doctor(ctx, p, e.r)
+		h, healthErr := r.upgradeDoctor(ctx, p, e.r)
 		if healthErr != nil {
 			return result, healthErr
 		}

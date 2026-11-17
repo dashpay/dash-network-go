@@ -296,6 +296,20 @@ func TestUpgradeLostSSHResponseResumesOnlyPendingNodeFirst(t *testing.T) {
 	}
 }
 
+func TestUpgradeAcceptsNextProtocolAfterBootstrap(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if o.Platform != nil {
+			o.Platform.Protocol = f.plan.InitialProtocolVersion + 1
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err != nil {
+		t.Fatal("forward protocol activation blocked image upgrade", err)
+	}
+}
+
 func TestUpgradeNeverProceedsPastCoreRestartOrUnhealthyFleet(t *testing.T) {
 	for _, failure := range []string{"unreachable", "foreign-member", "protocol", "core-restart"} {
 		t.Run(failure, func(t *testing.T) {
@@ -314,7 +328,9 @@ func TestUpgradeNeverProceedsPastCoreRestartOrUnhealthyFleet(t *testing.T) {
 					o.Platform.Validators[0] = digest("foreign")
 				}
 				if o.Platform != nil && failure == "protocol" {
-					o.Platform.Protocol = 15
+					// A forward one-step activation (PV14 -> PV15) is valid;
+					// this test represents an unsupported jump.
+					o.Platform.Protocol = 16
 				}
 				if o.Core != nil && failure == "core-restart" && applied {
 					o.Core.StartedAt = "2026-09-24T11:00:00Z"
