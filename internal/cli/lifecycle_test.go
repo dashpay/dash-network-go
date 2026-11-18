@@ -72,6 +72,21 @@ func TestRecipesPrintsTheDigestsPlansBind(t *testing.T) {
 	if got["node"] != node.RecipeDigest() || got["upgrade"] != node.UpgradeDigest() || got["bootstrap"] != bootstrap.RecipeDigest() || len(got["join"]) != 64 || len(got["managed"]) != 64 {
 		t.Fatal("unexpected recipe digests", got)
 	}
+	// What the build prints as accepted is exactly what its plans accept.
+	for field, accepted := range map[string]func(string) bool{"nodeAccepts": node.RecipeCompatible, "upgradeAccepts": node.UpgradeRecipeCompatible} {
+		listed, present := got[field]
+		if !present {
+			t.Fatal("missing", field)
+		}
+		for _, digest := range strings.Split(listed, ",") {
+			if digest != "" && (len(digest) != 64 || !accepted(digest)) {
+				t.Fatal(field, "lists a recipe the build refuses:", digest)
+			}
+		}
+	}
+	if node.RecipeCompatible(strings.Repeat("0", 64)) || node.UpgradeRecipeCompatible(strings.Repeat("0", 64)) {
+		t.Fatal("an arbitrary recipe was accepted")
+	}
 }
 
 func TestPrivateAddressesRefusedBeforeReadingPlans(t *testing.T) {

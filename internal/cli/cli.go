@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -101,9 +102,13 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 	if args[0] == "recipes" {
 		// The digests plans bind: a newer binary with the same bootstrap and node
 		// recipes can operate a deployment created by an older one.
+		// nodeAccepts and upgradeAccepts are the earlier recipes this build
+		// still operates (comma-separated, usually empty), so a console can
+		// move an existing network to it without knowing the rule itself.
 		return json.NewEncoder(out).Encode(map[string]string{
 			"bootstrap": bootstrap.RecipeDigest(), "node": node.RecipeDigest(), "upgrade": node.UpgradeDigest(), "mining": node.MiningDigest(),
 			"join": node.JoinRecipeDigest(), "managed": managed.RecipeDigest(),
+			"nodeAccepts": strings.Join(node.AcceptedRecipes(), ","), "upgradeAccepts": strings.Join(node.AcceptedUpgradeRecipes(), ","),
 		})
 	}
 	switch args[0] {
