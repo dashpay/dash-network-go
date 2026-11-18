@@ -12,6 +12,9 @@ import (
 	"github.com/dashpay/dash-network-go/internal/provision"
 )
 
+// gateLimit bounds a health gate that is not waiting for replaced nodes.
+var gateLimit = 10 * time.Minute
+
 // PlatformIdleLimit bounds the age of an idle Platform chain's latest block:
 // dashmate's createEmptyBlocksInterval (3m) plus a minute for consensus.
 const PlatformIdleLimit = 4 * time.Minute
@@ -174,7 +177,12 @@ func (r Runner) doctor(ctx context.Context, p Plan, record provision.Record, bas
 			if v.core.Genesis != record.Deployment.CoreGenesis {
 				n.Problems = append(n.Problems, "Core genesis mismatch")
 			}
-			if !r.miningPaused && (first.core == nil || v.core.Height <= first.core.Height) {
+			if r.agreementOnly {
+				// A batch gate asks for no new block, only that none was lost.
+				if first.core != nil && v.core.Height < first.core.Height {
+					n.Problems = append(n.Problems, "Core height fell")
+				}
+			} else if !r.miningPaused && (first.core == nil || v.core.Height <= first.core.Height) {
 				n.Problems = append(n.Problems, "Core did not advance")
 			}
 			if first.core != nil && first.core.Mining != nil && v.core.Mining != nil && (first.core.Mining.ContainerID != v.core.Mining.ContainerID || first.core.Mining.Restarts != v.core.Mining.Restarts) {
@@ -243,15 +251,34 @@ func (r Runner) doctor(ctx context.Context, p Plan, record provision.Record, bas
 
 // New rollout plans keep one baseline while polling, so a slow block is not a
 // fixed sleep floor and does not have to land in a succession of short windows.
-func (r Runner) rolloutHealth(ctx context.Context, p Plan, record provision.Record) (Health, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+func (r Runner) rolloutHealth(parent context.Context, p Plan, record provision.Record) (Health, error) {
+	limit := max(gateLimit, r.gateTimeout)
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
+	// A gate that runs out of time says so, with what it was waiting for: the
+	// call its deadline happened to interrupt is not the reason it failed.
+	var waiting []string
+	expired := func(err error) error {
+		if ctx.Err() == nil || parent.Err() != nil {
+			return err
+		}
+		if len(waiting) == 0 {
+			return fmt.Errorf("health gate not passed within %s: %w", limit, err)
+		}
+		return fmt.Errorf("health gate not passed within %s: %s", limit, strings.Join(waiting, "; "))
+	}
 	baseline := r.sample(ctx, p, record, 0)
 	for {
 		h, err := r.doctor(ctx, p, record, baseline)
-		if err != nil || h.Healthy {
-			return h, err
+		if err != nil {
+			// Keep what the gate last waited for with the failure.
+			h.Problems = waiting
+			return h, expired(err)
 		}
+		if h.Healthy {
+			return h, nil
+		}
+		waiting = h.Problems
 		if r.Progress != nil {
 			r.Progress("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
 		}
@@ -267,7 +294,7 @@ func (r Runner) rolloutHealth(ctx context.Context, p Plan, record provision.Reco
 			}
 		}
 		if err != nil {
-			return h, err
+			return h, expired(err)
 		}
 		// A baseline entry that failed to observe its node carries that failure
 		// into every round and can never pass: take those entries again, and

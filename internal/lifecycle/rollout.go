@@ -364,7 +364,7 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 			if err = liveScope(e.ctx, e.p, e.r, e.runner.Cloud); err != nil {
 				return
 			}
-			if health, err = e.verifyUpgrade(); err != nil {
+			if health, err = e.batchGate(0); err != nil {
 				return
 			}
 			observed := e.runner.sample(e.ctx, e.p, e.r, 0)
@@ -450,7 +450,7 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 		if err = e.save(); err != nil {
 			return
 		}
-		if health, err = e.verifyUpgrade(); err != nil {
+		if health, err = e.batchGate(e.runner.readyTimeout()); err != nil {
 			return
 		}
 		for _, t := range targets {

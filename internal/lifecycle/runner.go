@@ -20,12 +20,19 @@ import (
 type Runner struct {
 	readinessDriven bool
 	miningPaused    bool // only while a plan-owned mining lease is verified
-	Identity        inventory.STS
-	Cloud           provision.EC2
-	Store           bootstrap.Store
-	Remote          node.Backend
-	Owner, Version  string
-	Progress        func(string)
+	// agreementOnly and gateTimeout shape one rollout batch gate; see batchGate.
+	agreementOnly bool
+	gateTimeout   time.Duration
+	// ReadyTimeout bounds how long the nodes a rollout batch replaced may take
+	// to serve again (a new release can migrate its databases on first start)
+	// before the rollout stops. Zero means thirty minutes.
+	ReadyTimeout   time.Duration
+	Identity       inventory.STS
+	Cloud          provision.EC2
+	Store          bootstrap.Store
+	Remote         node.Backend
+	Owner, Version string
+	Progress       func(string)
 	// ObservationWindow is the minimum interval between health samples. Zero
 	// retains the default; it never relaxes identity, quorum or agreement gates.
 	ObservationWindow time.Duration

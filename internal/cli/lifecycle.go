@@ -37,6 +37,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	var coreOnly bool
 	var concurrency int
 	var pauseMining bool
+	var readyTimeout time.Duration
 	fs.StringVar(&profile, "profile", "", "AWS profile; omit for OIDC/environment credentials")
 	fs.StringVar(&output, "out", "", "new private JSON output file")
 	fs.DurationVar(&timeout, "timeout", 60*time.Minute, "operation deadline; remote work may survive disconnect")
@@ -62,6 +63,9 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 		fs.StringVar(&hostsPath, "known-hosts", "", "verified instance-scoped SSH host keys")
 		if args[0] != "doctor" {
 			fs.StringVar(&confirm, "confirm", "", "exact operation plan ID authorizing this action")
+		}
+		if args[0] == "upgrade" {
+			fs.DurationVar(&readyTimeout, "ready-timeout", 30*time.Minute, "how long the nodes a rollout batch replaced may take to serve again (a new release may migrate its databases on first start)")
 		}
 		if args[0] == "deploy" {
 			fs.BoolVar(&coreOnly, "core-only", false, "stop once Core is mining with DKG enabled; quorums then form on their own, and deploy again (same plan) starts Platform after them")
@@ -242,6 +246,7 @@ func runLifecycle(ctx context.Context, args []string, out, stderr io.Writer, ver
 	}
 	runner := lifecycle.Runner{Identity: identity, Cloud: cloud, Store: store, Remote: node.Remote{SSH: remote, Access: b.Access, Account: b.Compute.Network.AWS.AccountID, Region: b.Compute.Network.AWS.Region}, Owner: hex.EncodeToString(random[:]), Version: version, Progress: func(s string) { fmt.Fprintln(stderr, s) }}
 	runner.ObservationWindow = observationWindow
+	runner.ReadyTimeout = readyTimeout
 	runner.CoreOnly = coreOnly
 	// Anonymous: pins the sidecar images each release's dashmate requests.
 	runner.Registry = release.Registry{}
