@@ -296,6 +296,16 @@ func TestUpgradeLostSSHResponseResumesOnlyPendingNodeFirst(t *testing.T) {
 	}
 }
 
+func TestUpgradeAcceptsPreviousProtocolDuringForwardTransition(t *testing.T) {
+	f := upgradeSetup(t)
+	observed := f.runner.sample(context.Background(), f.plan, f.store.record, 0)
+	p := f.plan
+	p.InitialProtocolVersion = 15
+	if _, err := upgradeEvidence(p, f.store.record, observed, ""); err != nil {
+		t.Fatal("PV14 live chain was rejected for PV15 forward plan", err)
+	}
+}
+
 func TestUpgradeAcceptsNextProtocolAfterBootstrap(t *testing.T) {
 	f := upgradeSetup(t)
 	u := f.change(t, "platform", "b")
