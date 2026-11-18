@@ -292,8 +292,26 @@ func (e *execution) verifyUpgrade() (Health, error) {
 			return h, err
 		}
 		if h.Healthy {
-			_, err = upgradeEvidence(e.p, e.r, e.runner.sample(ctx, e.p, e.r, 0), "")
-			return h, err
+			observed := e.runner.sample(ctx, e.p, e.r, 0)
+			if _, err = upgradeEvidence(e.p, e.r, observed, ""); err != nil {
+				return h, err
+			}
+			// Evidence tolerates a silent node that is still being replaced.
+			// Completion does not: the journal entry is all a retry has to
+			// reconcile it, so every such node must answer in this sample.
+			var silent []string
+			for _, t := range e.p.Targets {
+				if e.r.Upgrade == nil || (t.Name != e.r.Upgrade.CurrentNode && !slices.Contains(e.r.Upgrade.PendingNodes, t.Name)) {
+					continue
+				}
+				if s := observed[t.Name]; s.core == nil || (t.Role == "validator" && s.platform == nil) {
+					silent = append(silent, t.Name+": not observed after replacement")
+				}
+			}
+			if len(silent) == 0 {
+				return h, nil
+			}
+			h.Healthy, h.Problems = false, silent
 		}
 		e.report("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
 		if err = ctx.Err(); err != nil {

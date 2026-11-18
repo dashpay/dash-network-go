@@ -282,8 +282,9 @@ func (r Runner) Execute(ctx context.Context, p Plan) (record Record, err error) 
 	}
 	mutated = true
 	r.report("managed-staging")
-	// An owned fleet pause resumes from its already-staged reviewed plan.
-	if (!fleetPause(p) && (p.Rollout == nil || !p.Rollout.PauseMining)) || record.MiningPhase == "" {
+	// A live owned pause resumes from its already-staged reviewed plan. Once
+	// mining is confirmed resumed, an image may have been pruned since: stage again.
+	if (!fleetPause(p) && (p.Rollout == nil || !p.Rollout.PauseMining)) || record.MiningPhase == "" || record.MiningPhase == "resumed" {
 		if err = r.stage(ctx, p); err != nil {
 			return
 		}

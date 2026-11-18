@@ -43,8 +43,9 @@ The fixed migration:
    the image is unchanged, so file bind mounts see the atomically installed files.
    Starts Core first and verifies both RPCs with **Drive's consensus credentials**
    (password passed via stdin, never in output), then Drive → ABCI-ready →
-   Tenderdash → DAPI. Whole-fleet health and the existing observed >2/3 quorum gate
-   still apply between hosts.
+   Tenderdash → DAPI. Selected-target health and the existing observed >2/3 quorum
+   gate still apply between hosts; an unselected host outside the active quorum
+   does not hold the rollout.
 6. Permits only protocol 13/14, rejecting unexpected versions and regression
    within a health sample or below the snapshot. Chain/genesis/proTx/node identity,
    consensus block agreement, advancement and preservation checks remain active.

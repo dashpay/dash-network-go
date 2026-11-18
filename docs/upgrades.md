@@ -196,7 +196,12 @@ resume would withdraw them now, so the batch must again leave >2/3 voting power
 in the fleet as it is observed at that moment; otherwise the run stops with
 `journaled batch not resumed` and nothing is withdrawn.
 
-Mining is optional and automatically resumed on completion, error or cancellation.
+Pausing mining is optional, except for a native Core rollout: there every
+batch other than the mining host's is replaced with blocks held, with or
+without `--pause-mining`, so plan for the interruption in block production.
+The controller resumes mining on completion, error or cancellation. That
+resume is a request that can itself fail; the host's recovery timer is the
+fallback, and after a failed cleanup the mining state should be checked.
 Managed Testnet uses the explicitly enrolled `miner-1` / `miner-2` service identities;
 native devnets use their exact deployment miner. Independent host recovery timers
 cover controller loss. A Core upgrade handles the native mining host last, alone,

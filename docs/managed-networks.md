@@ -151,7 +151,9 @@ or changing their configuration. All selected image pulls must succeed before
 any container replacement begins; failures identify each affected host. An
 interrupted run waits for in-flight staging calls before releasing its journal
 claim and rechecks staging on resume with the same plan. This also applies to
-`managed-deploy`; replacement order and health gates are unchanged. No additional
+`managed-deploy`; staging changes neither replacement order nor health gates.
+With a rollout plan, a batch's gate covers that batch (and every validator,
+when the batch contains one), not every selected target. No additional
 CLI flag or dashboard setting is required. Already-pinned executors retain their
 original behavior until a new compatible executor is explicitly selected.
 
