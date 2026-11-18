@@ -172,11 +172,13 @@ class Tests(unittest.TestCase):
             dict(pro_tx_hash="A" * 64, voting_power="100"),
             dict(pro_tx_hash="B" * 64, voting_power="100")])
         with patch.object(worker.Worker, "platform_status", return_value={}):
-            for wrapped in [value, dict(result=value)]:
-                w.opener = Response(wrapped)
-                observed = w.platform_status()
-                self.assertEqual(observed["protocol"], 14)
-                self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
+            for quorum_type in [107, "107", "llmq_devnet_platform"]:
+                current = dict(value, quorum_type=quorum_type)
+                for wrapped in [current, dict(result=current)]:
+                    w.opener = Response(wrapped)
+                    observed = w.platform_status()
+                    self.assertEqual(observed["protocol"], 14)
+                    self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
             for invalid in [dict(value, total="3"), dict(value, quorum_type=101),
                             dict(error=dict(code=-1)), []]:
                 w.opener = Response(invalid)

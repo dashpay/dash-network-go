@@ -25,7 +25,8 @@ class ReadOnlyWorker(Worker):
         self.require(isinstance(value, dict) and value.get("error") is None,
                      "validator-rpc-failed")
         value = value.get("result", value)
-        self.require(isinstance(value, dict) and value.get("quorum_type") == 107,
+        quorum_type = str(value.get("quorum_type")).lower()
+        self.require(quorum_type in ["107", "llmq_devnet_platform"],
                      "unsupported-validator-quorum")
         members = value.get("validators")
         self.require(isinstance(members, list) and len(members) == int(value["total"]),
