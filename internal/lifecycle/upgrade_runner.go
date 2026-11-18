@@ -389,7 +389,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 			return result, errors.New("upgrade differs from saved intent")
 		}
 	} else {
-		if e.r.Upgrade != nil && e.r.Upgrade.Phase != "complete" {
+		if e.r.Upgrade != nil && e.r.Upgrade.Phase != "complete" && !recoverableInterruptedUpgrade(e.r) {
 			return result, errors.New("a different unfinished upgrade owns this network")
 		}
 		previous := ""

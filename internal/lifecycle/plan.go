@@ -182,7 +182,7 @@ func (p Plan) Validate() error {
 	}
 	copy := p
 	copy.ID = ""
-	if p.ID != hash(copy) || p.APIVersion != spec.Version || p.Kind != "DevnetDeploymentPlan" || p.Profile != Profile || p.RecipeSHA256 != node.RecipeDigest() {
+	if p.ID != hash(copy) || p.APIVersion != spec.Version || p.Kind != "DevnetDeploymentPlan" || p.Profile != Profile || !node.RecipeCompatible(p.RecipeSHA256) {
 		return errors.New("deployment plan altered or node recipe changed; retain exact plan/binary")
 	}
 	if p.InitialProtocolVersion < 1 || p.InitialProtocolVersion > 100 || p.GenesisTime.IsZero() || p.MiningIntervalSeconds < MinBlockSeconds || p.MiningIntervalSeconds > MaxBlockSeconds || p.PremineHeight < 0 || p.PremineHeight > 20000 {

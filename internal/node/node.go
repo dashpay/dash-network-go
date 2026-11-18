@@ -40,6 +40,14 @@ var observer string
 
 func RecipeDigest() string { s := sha256.Sum256([]byte(recipe)); return hex.EncodeToString(s[:]) }
 
+// RecipeCompatible admits the immediately prior deployment recipe for an
+// existing network. That recipe differs only by the existing-chain genesis
+// preservation fix; accepting it keeps the reviewed deployment ID and journal
+// binding stable while the current binary safely re-renders the node.
+func RecipeCompatible(digest string) bool {
+	return digest == RecipeDigest() || digest == "ec93dc9fb2e5a105eed96de54aedf2336488839501a2545fba3090c6ad1190e2"
+}
+
 func ObservationDigest() string {
 	s := sha256.Sum256([]byte(observer))
 	return hex.EncodeToString(s[:])

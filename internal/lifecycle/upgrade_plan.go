@@ -147,6 +147,18 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 	return to, to.Validate(p.Bootstrap.Compute)
 }
 
+func recoverableInterruptedUpgrade(record provision.Record) bool {
+	if record.Runtime == nil || record.Upgrade == nil || record.Upgrade.Phase != "interrupted" || record.Upgrade.CurrentNode != "" || len(record.Upgrade.PendingNodes) != 0 || !reflect.DeepEqual(record.Runtime.Images, record.Upgrade.From) {
+		return false
+	}
+	for _, completed := range record.Upgrade.Completed {
+		if completed {
+			return false
+		}
+	}
+	return true
+}
+
 func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock release.Lock, scope string, now time.Time) (UpgradePlan, error) {
 	if err := record.Validate(p.Bootstrap.Compute); err != nil {
 		return UpgradePlan{}, err
@@ -154,7 +166,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 	if record.Deployment == nil || record.Deployment.PlanID != p.ID || record.Deployment.Phase != "network-ready" {
 		return UpgradePlan{}, errors.New("complete the original deployment before planning an upgrade")
 	}
-	if record.Upgrade != nil && record.Upgrade.Phase != "complete" {
+	if record.Upgrade != nil && record.Upgrade.Phase != "complete" && !recoverableInterruptedUpgrade(record) {
 		return UpgradePlan{}, errors.New("resume the unfinished upgrade; do not supersede it")
 	}
 	from, err := effectiveImages(p, record)
