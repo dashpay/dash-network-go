@@ -392,10 +392,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if e.r.Upgrade != nil && e.r.Upgrade.Phase != "complete" && !recoverableInterruptedUpgrade(e.r) {
 			return result, errors.New("a different unfinished upgrade owns this network")
 		}
-		previous := ""
-		if e.r.Runtime != nil {
-			previous = e.r.Runtime.UpgradeID
-		}
+		previous := previousUpgrade(e.r)
 		from, sourceErr := effectiveImages(p, e.r)
 		if sourceErr != nil {
 			return result, sourceErr

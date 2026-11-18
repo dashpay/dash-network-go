@@ -147,8 +147,11 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 	return to, to.Validate(p.Bootstrap.Compute)
 }
 
+// recoverableInterruptedUpgrade reports an upgrade that stopped before it
+// reached any host, and so may be superseded instead of resumed. One that
+// still owns a mining pause is not: only its own resume restores generation.
 func recoverableInterruptedUpgrade(record provision.Record) bool {
-	if record.Runtime == nil || record.Upgrade == nil || record.Upgrade.Phase != "interrupted" || record.Upgrade.CurrentNode != "" || len(record.Upgrade.PendingNodes) != 0 || !reflect.DeepEqual(record.Runtime.Images, record.Upgrade.From) {
+	if record.Runtime == nil || record.Upgrade == nil || record.Upgrade.Phase != "interrupted" || record.Upgrade.CurrentNode != "" || len(record.Upgrade.PendingNodes) != 0 || miningHeld(record.Upgrade.MiningPhase) || !reflect.DeepEqual(record.Runtime.Images, record.Upgrade.From) {
 		return false
 	}
 	for _, completed := range record.Upgrade.Completed {
@@ -157,6 +160,20 @@ func recoverableInterruptedUpgrade(record provision.Record) bool {
 		}
 	}
 	return true
+}
+
+// previousUpgrade is the last upgrade that reached a host, which is what each
+// host's marker names and what a new change must follow. The journal's runtime
+// names an upgrade from the moment it starts; one interrupted without progress
+// never got further, so its successor follows the upgrade before it.
+func previousUpgrade(record provision.Record) string {
+	if record.Runtime == nil {
+		return ""
+	}
+	if recoverableInterruptedUpgrade(record) {
+		return record.Upgrade.PreviousID
+	}
+	return record.Runtime.UpgradeID
 }
 
 func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock release.Lock, scope string, now time.Time) (UpgradePlan, error) {
@@ -178,9 +195,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 		return UpgradePlan{}, err
 	}
 	u := UpgradePlan{APIVersion: spec.Version, Kind: "DevnetUpgradePlan", Deployment: p, Candidate: candidate, Release: lock, Scope: scope, CreatedAt: now.UTC(), From: from, To: to, RecipeSHA256: node.UpgradeDigest(), Recovery: recoveryFor(scope)}
-	if record.Runtime != nil {
-		u.PreviousID = record.Runtime.UpgradeID
-	}
+	u.PreviousID = previousUpgrade(record)
 	u.ID = hash(u)
 	return u, u.Validate()
 }

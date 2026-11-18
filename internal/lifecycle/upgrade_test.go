@@ -640,3 +640,94 @@ func TestObserverOnlyUpgradeRecipeCompatibility(t *testing.T) {
 		t.Fatal("unknown recipe accepted")
 	}
 }
+
+// hostMarkers refuses an upgrade the way a validator host does: a different
+// operation is accepted only when it follows the one the host last applied.
+func hostMarkers(f *upgradeFixture) map[string]string {
+	markers := map[string]string{}
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if q.Upgrade == nil || q.Target.Role != "validator" || markers[q.Target.Name] == q.Upgrade.ID {
+			return nil
+		}
+		if markers[q.Target.Name] != q.Upgrade.PreviousID {
+			return errors.New("node upgrade-previous-operation: exit status 1")
+		}
+		if q.Action == "upgrade-apply" {
+			markers[q.Target.Name] = q.Upgrade.ID
+		}
+		return nil
+	}
+	return markers
+}
+
+func TestInterruptedUpgradeWithoutProgressIsSupersededFromTheLastAppliedUpgrade(t *testing.T) {
+	f := upgradeSetup(t)
+	markers := hostMarkers(f)
+	applied := f.change(t, "platform", "b")
+	if _, err := f.run(t, applied); err != nil {
+		t.Fatal(err)
+	}
+	stalled := f.change(t, "platform", "c")
+	accept := f.hook
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if q.Action == "upgrade-stage" {
+			return errors.New("registry unavailable")
+		}
+		return accept(q, o)
+	}
+	if _, err := f.run(t, stalled); err == nil || !recoverableInterruptedUpgrade(f.store.record) {
+		t.Fatal("zero-progress interruption not constructed", err)
+	}
+	f.hook = accept
+	// The stalled upgrade reached no host: every marker still names the one
+	// before it, and so must its successor.
+	next := f.change(t, "platform", "d")
+	if next.PreviousID != applied.ID {
+		t.Fatal("successor chained to an upgrade no host has seen")
+	}
+	result, err := f.run(t, next)
+	if err != nil || result.Upgrade.Phase != "complete" {
+		t.Fatal(err)
+	}
+	for _, v := range f.plan.Validators() {
+		if markers[v.Name] != next.ID {
+			t.Fatal("validator not upgraded", v.Name)
+		}
+	}
+	// The stalled plan no longer follows the fleet and stays refused.
+	if _, err = f.run(t, stalled); err == nil {
+		t.Fatal("superseded plan accepted")
+	}
+}
+
+func TestInterruptedUpgradeIsSupersededOnlyWithoutProgressOrHeldMining(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if q.Action == "upgrade-stage" {
+			return errors.New("registry unavailable")
+		}
+		return nil
+	}
+	if _, err := f.run(t, u); err == nil || !recoverableInterruptedUpgrade(f.store.record) {
+		t.Fatal("zero-progress interruption not constructed", err)
+	}
+	first := f.plan.Validators()[0].Name
+	for name, change := range map[string]func(*provision.UpgradeProgress){
+		"current node":  func(p *provision.UpgradeProgress) { p.CurrentNode = first },
+		"pending batch": func(p *provision.UpgradeProgress) { p.PendingNodes = []string{first} },
+		"completed":     func(p *provision.UpgradeProgress) { p.Completed = map[string]bool{first: true} },
+		"pausing":       func(p *provision.UpgradeProgress) { p.MiningPhase = "pausing" },
+		"paused":        func(p *provision.UpgradeProgress) { p.MiningPhase = "paused" },
+		"resuming":      func(p *provision.UpgradeProgress) { p.MiningPhase = "resuming" },
+		"running":       func(p *provision.UpgradeProgress) { p.Phase = "applying" },
+	} {
+		record := f.store.record
+		progress := *record.Upgrade
+		change(&progress)
+		record.Upgrade = &progress
+		if recoverableInterruptedUpgrade(record) {
+			t.Fatal("superseding would abandon", name)
+		}
+	}
+}
