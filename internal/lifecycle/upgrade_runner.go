@@ -450,7 +450,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		return
 	}
 	var health Health
-	if e.r.Upgrade.CurrentNode == "" && len(e.r.Upgrade.PendingNodes) == 0 && (u.Rollout == nil || (e.r.Upgrade.MiningPhase != "paused" && e.r.Upgrade.MiningPhase != "pausing")) {
+	if e.r.Upgrade.CurrentNode == "" && len(e.r.Upgrade.PendingNodes) == 0 && (u.Rollout == nil || !miningHeld(e.r.Upgrade.MiningPhase)) {
 		if health, err = e.verifyUpgrade(); err != nil {
 			return
 		}
@@ -596,23 +596,35 @@ func (e *execution) pauseMiningQuietly() error {
 // settle keeps blocks (and so DKG sessions) paused until the replaced
 // validator is observably back: masternode READY, synced and connected, after
 // at least 30 seconds for its quorum connections, within a bound.
-func (e *execution) settle(t node.Target) error {
+func (e *execution) settle(targets ...node.Target) error {
+	var validators []node.Target
+	for _, t := range targets {
+		if t.Role == "validator" {
+			validators = append(validators, t)
+		}
+	}
+	if len(validators) == 0 {
+		return nil
+	}
 	if err := e.pause(30 * time.Second); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(5 * time.Minute)
-	for {
-		o, err := e.call(t, "core-status", nil)
-		if err == nil && o.Core != nil && o.Core.Synced && o.Core.MasternodeState == "READY" && o.Core.Peers >= 8 {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%s not READY and connected after its Core replacement", t.Name)
-		}
-		if err = e.pause(3 * time.Second); err != nil {
-			return err
+	for _, t := range validators {
+		for {
+			o, err := e.call(t, "core-status", nil)
+			if err == nil && o.Core != nil && o.Core.Synced && o.Core.MasternodeState == "READY" && o.Core.Peers >= 8 {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%s not READY and connected after its Core replacement", t.Name)
+			}
+			if err = e.pause(3 * time.Second); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // resumeMining uses its own bounded context so it still runs after the
