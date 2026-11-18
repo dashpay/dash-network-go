@@ -238,7 +238,12 @@ class CoreCompat(unittest.TestCase):
         for expected in ["createwallet", "getaddressesbylabel", "getbestchainlock", "getblockchaininfo", "lockunspent",
                          "masternode", "mnsync", "protx", "quorum", "spork", "sporkupdate"]:
             self.assertIn(expected, names)
-        missing = [n for n in names if str(self.ok(self.node, "help", n)).startswith("help: unknown command")]
+        # getdeploymentinfo is part of the Core 24 deployment-info contract;
+        # Core 23 intentionally does not expose it and must not fail the
+        # otherwise independent Core 23 compatibility run.
+        version = self.ok(self.node, "getnetworkinfo")["version"]
+        optional = {"getdeploymentinfo"} if version < 240000 else set()
+        missing = [n for n in names if n not in optional and str(self.ok(self.node, "help", n)).startswith("help: unknown command")]
         self.assertEqual(missing, [], "RPCs the workers call that %s does not have" % IMAGE)
         self.summary["rpcs"] = len(names)
         # Reads every role makes, in the argument forms the workers pass.
