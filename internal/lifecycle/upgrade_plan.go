@@ -191,7 +191,7 @@ func (u UpgradePlan) Validate() error {
 	}
 	copy := u
 	copy.ID = ""
-	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || u.RecipeSHA256 != node.UpgradeDigest() || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {
+	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || !node.UpgradeRecipeCompatible(u.RecipeSHA256) || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {
 		return errors.New("upgrade plan altered or recipe changed; retain exact plan/binary")
 	}
 	if u.PreviousID != "" && (len(u.PreviousID) != 64 || u.PreviousID == u.ID) {
