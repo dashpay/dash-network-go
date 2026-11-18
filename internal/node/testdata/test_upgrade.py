@@ -403,6 +403,17 @@ class CoreUpgradeTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.Failure, 'upgrade-previous-operation'):
                 u.execute()
 
+    def test_a_completed_reset_marker_is_superseded_only_at_its_rollback_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            u = deployed(tmp)
+            change(u, tenderdash=pin('tenderdash-2'))
+            u.atomic('upgrade.json', dict(id='8' * 64, previousId='7' * 64, phase='applied', reset=True,
+                                          **{'from': u.q['upgrade']['to'], 'to': u.q['upgrade']['from']}))
+            u.q['action'] = 'upgrade-stage'
+            result = u.execute()
+            self.assertEqual(result['action'], 'upgrade-stage')
+            self.assertIn('drive_tenderdash', result['render']['changes'])
+
     def test_stage_on_an_in_progress_node_needs_no_running_core(self):
         with tempfile.TemporaryDirectory() as tmp:
             u = deployed(tmp)
