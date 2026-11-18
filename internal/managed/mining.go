@@ -41,11 +41,13 @@ func (r Runner) miningCall(ctx context.Context, p Plan, t Target, action string)
 }
 
 func (r Runner) resumeMining(p Plan) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	var result error
 	for _, t := range miningTargets(p) {
+		// Each miner has its own deadline: one unreachable host must not use
+		// up the time in which the others are resumed.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		o, e := r.miningCall(ctx, p, t, "mining_resume")
+		cancel()
 		if e == nil && (o.Mining == nil || o.Mining.Paused || !o.Mining.Active) {
 			e = errors.New("mining resume unverified")
 		}

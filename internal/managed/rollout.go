@@ -85,6 +85,44 @@ func canWithdrawBatch(s Snapshot, p Plan, targets []Target) error {
 	return nil
 }
 
+// resumeAdmission protects a journaled batch that was never withdrawn. The
+// journal records intent only: a member still healthy on its previous images
+// would be taken down by the resume, in a fleet that may have degraded since
+// the batch was admitted. A member that is down or mid-replacement always
+// takes precedence, and the batch is then reconciled exactly as journaled.
+func (r Runner) resumeAdmission(ctx context.Context, p Plan, targets []Target) error {
+	var fresh []Target
+	for _, t := range targets {
+		o, err := r.Remote.Call(ctx, request(p.Snapshot.Fleet, t, "observe"))
+		if err != nil || o.Healthy(t) != nil {
+			return nil
+		}
+		for component, pin := range p.Images[t.Name] {
+			if !slices.Contains(o.Components[component].Digests, pin) {
+				fresh = append(fresh, t)
+				break
+			}
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	if err := VerifyCloud(ctx, p.Snapshot.Fleet, r.Identity, r.Cloud); err != nil {
+		return err
+	}
+	h, err := r.withdrawalHealth(ctx, p)
+	if err != nil {
+		return err
+	}
+	if !r.rolloutHealthy(h, p) {
+		return errors.New("journaled batch not resumed: fleet unhealthy before batch withdrawal")
+	}
+	if err = canWithdrawBatch(h.Snapshot, p, fresh); err != nil {
+		return fmt.Errorf("journaled batch not resumed: %w", err)
+	}
+	return nil
+}
+
 // Pending intent is persisted for the ENTIRE batch before any SSH apply. The
 // caller alone writes the journal; failed/lost replies retain every pending
 // target, and resume reconciles that exact batch before admitting another.
@@ -142,6 +180,10 @@ func (r Runner) executeRollout(ctx context.Context, p Plan, record *Record, save
 						targets = append(targets, t)
 					}
 				}
+			}
+			r.batchTargets = slices.Clone(record.PendingTargets)
+			if err = r.resumeAdmission(ctx, p, targets); err != nil {
+				return
 			}
 		} else {
 			for _, t := range p.Snapshot.Fleet.Targets {
