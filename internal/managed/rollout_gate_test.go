@@ -2,8 +2,10 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,10 +18,19 @@ func TestRolloutJournaledBatchIsNotWithdrawnFromADegradedFleet(t *testing.T) {
 	if err := p.WithRollout(rollout.Options{Concurrency: 2}); err != nil {
 		t.Fatal(err)
 	}
-	b.failure = "apply" // lost before the host: both members keep serving
+	// The canary completes; one member of the first full batch is then lost
+	// before its host and keeps serving.
+	var attempts atomic.Int32
+	r.Remote = stagingBackend(func(ctx context.Context, q Request) (Observation, error) {
+		if q.Action == "apply" && attempts.Add(1) == 2 {
+			return Observation{}, errors.New("ambiguous apply")
+		}
+		return b.Call(ctx, q)
+	})
 	ctx, c := deadline()
 	defer c()
 	record, err := r.Execute(ctx, p)
+	r.Remote = b
 	if err == nil || len(record.PendingTargets) != 2 {
 		t.Fatal("batch not journaled", err, record.PendingTargets)
 	}

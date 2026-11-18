@@ -19,7 +19,7 @@ func TestRolloutBatchOverlapDurableIntentAndResume(t *testing.T) {
 	started := make(chan string, 5)
 	release := make(chan struct{}, 5)
 	var active, peak atomic.Int32
-	var fail atomic.Bool
+	var fail, canary atomic.Bool
 	fail.Store(true)
 	r.Remote = stagingBackend(func(ctx context.Context, q Request) (Observation, error) {
 		if q.Action != "apply" {
@@ -27,6 +27,13 @@ func TestRolloutBatchOverlapDurableIntentAndResume(t *testing.T) {
 		}
 		if !slices.Contains(m.r.PendingTargets, q.Target.Name) || len(m.r.PendingTargets) > 2 || m.r.Current != "" {
 			t.Error("apply before whole batch intent", q.Target.Name)
+		}
+		// The first node goes alone, whatever the requested concurrency.
+		if canary.CompareAndSwap(false, true) {
+			if len(m.r.PendingTargets) != 1 {
+				t.Error("first batch is not a single canary", m.r.PendingTargets)
+			}
+			return b.Call(ctx, q)
 		}
 		n := active.Add(1)
 		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
@@ -89,6 +96,44 @@ func TestRolloutAdmissionExcludesEntireBatch(t *testing.T) {
 	}
 	if err = canWithdrawBatch(s, p, s.Fleet.Targets[:4]); err == nil {
 		t.Fatal("accepted loss of 1/3 voting power")
+	}
+}
+
+func TestRolloutBatchOverQuorumGivesUpValidatorsNotTheNodesBehindThem(t *testing.T) {
+	s, _, _, _ := setup(t)
+	p, err := Build(s, "upgrade", "platform", "", pins(s, "platform", "b"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Five validators, of which the quorum can spare three, then an ordinary
+	// masternode that happens to follow them in fleet order.
+	ordinary := Target{Name: "masternode-001", Role: "masternode"}
+	batch := append(slices.Clone(s.Fleet.Targets[:5]), ordinary)
+	admitted, err := admitBatch(s, p, batch)
+	if err != nil || len(admitted) != 4 || admitted[3].Name != ordinary.Name {
+		t.Fatal("ordinary node dropped for a validator's quorum", err, len(admitted))
+	}
+	for i, target := range admitted[:3] {
+		if target.Name != s.Fleet.Targets[i].Name {
+			t.Fatal("validators not kept in fleet order", target.Name)
+		}
+	}
+	if len(batch) != 6 {
+		t.Fatal("proposed batch modified in place")
+	}
+	// A lone validator the quorum cannot spare is still refused.
+	degraded := s
+	degraded.Nodes = map[string]Observation{}
+	for name, o := range s.Nodes {
+		degraded.Nodes[name] = o
+	}
+	for _, target := range s.Fleet.Targets[1:5] {
+		o := degraded.Nodes[target.Name]
+		o.Problems = []string{"platform-health-unavailable"}
+		degraded.Nodes[target.Name] = o
+	}
+	if _, err = admitBatch(degraded, p, s.Fleet.Targets[:1]); err == nil {
+		t.Fatal("withdrew a validator from a quorum that could not spare it")
 	}
 }
 

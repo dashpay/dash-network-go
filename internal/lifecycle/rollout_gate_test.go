@@ -105,9 +105,14 @@ func TestNativeJournaledBatchIsNotWithdrawnFromADegradedFleet(t *testing.T) {
 	if e := u.WithRollout(rollout.Options{Concurrency: 2}); e != nil {
 		t.Fatal(e)
 	}
-	lost := true
+	// The canary completes; the first full batch is lost before its hosts.
+	lost, canary := true, false
 	f.remote.before = func(q node.Request) error {
 		if q.Action == "upgrade-apply" && lost {
+			if !canary {
+				canary = true
+				return nil
+			}
 			return errors.New("lost before the host")
 		}
 		return nil

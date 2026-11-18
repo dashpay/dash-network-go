@@ -27,10 +27,17 @@ func TestNativeRolloutOverlapDurableBatchAndResume(t *testing.T) {
 	starts := make(chan string, 16)
 	release := make(chan struct{}, 16)
 	var active, peak atomic.Int32
-	var fail atomic.Bool
+	var fail, canary atomic.Bool
 	fail.Store(true)
 	f.runner.Remote = rolloutBackend(func(ctx context.Context, q node.Request) (node.Observation, error) {
 		if q.Action != "upgrade-apply" {
+			return f.remote.Call(ctx, q)
+		}
+		// The first node goes alone, whatever the requested concurrency.
+		if canary.CompareAndSwap(false, true) {
+			if !slices.Equal(f.store.record.Upgrade.PendingNodes, []string{q.Target.Name}) {
+				t.Error("first batch is not a single canary")
+			}
 			return f.remote.Call(ctx, q)
 		}
 		if !slices.Contains(f.store.record.Upgrade.PendingNodes, q.Target.Name) || len(f.store.record.Upgrade.PendingNodes) != 2 {
