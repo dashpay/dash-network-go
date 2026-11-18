@@ -121,7 +121,7 @@ func samePlannedIdentity(base, first, current Observation, t Target, p *Plan) bo
 	current = p.normalized(current)
 	if t.Role == "validator" {
 		a, b := first.Chain.PlatformProtocol, current.Chain.PlatformProtocol
-		if (a != 13 && a != 14) || (b != 13 && b != 14) || b < a || b < base.Chain.PlatformProtocol {
+		if (a != 13 && a != 14) || (b != 13 && b != 14) || b < a || a < base.Chain.PlatformProtocol {
 			return false
 		}
 		// A protocol activation is network-wide, including unselected observers.

@@ -204,8 +204,11 @@ func assessHealthProgress(s, first, second Snapshot, plan *Plan, label string, p
 			h.Problems = append(h.Problems, t.Name+": ChainLock not advancing")
 		}
 		if t.Role == "validator" {
-			if b.Chain.PlatformHeight < a.Chain.PlatformHeight || (progress && b.Chain.PlatformHeight == a.Chain.PlatformHeight) || b.Chain.DAPIHeight < a.Chain.DAPIHeight || b.Chain.DAPIHeight > b.Chain.PlatformHeight+5 || b.Chain.DAPIHeight+5 < b.Chain.PlatformHeight {
+			if b.Chain.PlatformHeight < a.Chain.PlatformHeight || (progress && b.Chain.PlatformHeight == a.Chain.PlatformHeight) || b.Chain.DAPIHeight < a.Chain.DAPIHeight {
 				h.Problems = append(h.Problems, t.Name+": Platform not advancing")
+			} else if b.Chain.DAPIHeight > b.Chain.PlatformHeight+5 || b.Chain.DAPIHeight+5 < b.Chain.PlatformHeight {
+				// Not ready, but not a regression: DAPI can still catch up.
+				h.Problems = append(h.Problems, t.Name+": DAPI height apart from Platform")
 			}
 			if plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && b.Chain.PosePenalty > s.Nodes[t.Name].Chain.PosePenalty {
 				h.Problems = append(h.Problems, t.Name+": PoSe penalty increased")

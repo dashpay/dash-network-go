@@ -24,6 +24,13 @@ func Keep(ctx context.Context, renew func(context.Context) error) (context.Conte
 			case <-run.Done():
 				return
 			case <-timer.C:
+				// Both channels can be ready; Stop must not wait on a renewal
+				// that starts after it asked for shutdown.
+				select {
+				case <-done:
+					return
+				default:
+				}
 				call, end := context.WithTimeout(run, 90*time.Second)
 				err := renew(call)
 				end()

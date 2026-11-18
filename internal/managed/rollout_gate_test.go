@@ -123,3 +123,65 @@ func TestFleetLeaseAsksAgainWhenABlockLandsBetweenMiners(t *testing.T) {
 		}
 	}
 }
+
+func TestReadinessWaitsOutDAPILagButStopsOnAFallAcrossAFailedProbe(t *testing.T) {
+	for _, fall := range []bool{false, true} {
+		p, r, b := migrationFixture(t)
+		p.Migration.ReadinessDriven = true
+		name := p.Snapshot.Fleet.Targets[0].Name
+		seen := 0
+		var reached, core int64
+		b.observe = func(q Request, o *Observation) {
+			if q.Target.Name != name {
+				return
+			}
+			seen++
+			o.Problems = nil
+			o.Chain.DAPIHeight = o.Chain.PlatformHeight
+			switch {
+			case seen == 1:
+				core = o.Chain.CoreHeight
+			case seen == 2 && !fall:
+				o.Chain.PlatformHeight += 8 // DAPI behind, and able to catch up
+			case seen == 2:
+				// Platform has risen; Core has not, so the gate keeps waiting.
+				o.Chain.CoreHeight, reached = core, o.Chain.PlatformHeight
+			case seen == 3 && fall:
+				o.Problems = []string{"platform-health-unavailable"}
+				o.Chain.PlatformHeight, o.Chain.DAPIHeight, o.Chain.PlatformHash = 0, 0, ""
+			case seen == 4 && fall:
+				o.Chain.PlatformHeight, o.Chain.DAPIHeight = reached-5, reached-5
+			}
+		}
+		waits := 0
+		r.Wait = func(context.Context, time.Duration) error {
+			if waits++; waits > 6 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		}
+		ctx, c := deadline()
+		h, e := r.planHealth(ctx, p)
+		c()
+		if fall != (e != nil) || (fall && !strings.Contains(e.Error(), "not advancing")) || (!fall && !h.Healthy) {
+			t.Fatal(fall, e, h.Problems)
+		}
+	}
+}
+
+func TestFleetLeaseNeedsACheckpointFromEveryMiner(t *testing.T) {
+	p, r, b := fleetFixture(t)
+	b.paused = map[string]bool{"miner-1": true, "miner-2": true}
+	r.Remote = stagingBackend(func(ctx context.Context, q Request) (Observation, error) {
+		o, e := b.Call(ctx, q)
+		if q.Action == "mining_status" && q.Target.Name == "miner-1" {
+			o.Chain.CoreHeight, o.Chain.CoreHash = 0, "" // a receipt whose Core RPC failed
+		}
+		return o, e
+	})
+	ctx, c := deadline()
+	defer c()
+	if _, _, e := (&fleetLease{r: r, p: p}).check(ctx, false); e == nil || !strings.Contains(e.Error(), "checkpoint missing") {
+		t.Fatal("one miner's tip stood in for the other's", e)
+	}
+}

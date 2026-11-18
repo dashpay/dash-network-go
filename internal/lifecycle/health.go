@@ -194,8 +194,13 @@ func (r Runner) doctor(ctx context.Context, p Plan, record provision.Record, bas
 				}
 				// An idle chain makes a block only every three minutes: a
 				// recent block proves it live without waiting for the next.
-				if first.platform == nil || (x.Height <= first.platform.Height && (x.BlockAge < 0 || time.Duration(x.BlockAge)*time.Second > PlatformIdleLimit)) {
+				old := x.BlockAge < 0 || time.Duration(x.BlockAge)*time.Second > PlatformIdleLimit
+				if first.platform == nil || (x.Height <= first.platform.Height && old) {
 					n.Problems = append(n.Problems, fmt.Sprintf("Platform did not advance and its last block is %ds old", x.BlockAge))
+				} else if baseline != nil && old {
+					// The readiness baseline is kept across polls: a block made
+					// early in the wait does not show the chain alive now.
+					n.Problems = append(n.Problems, fmt.Sprintf("Platform advanced earlier but its last block is %ds old", x.BlockAge))
 				}
 				if len(x.ReferenceBlockHash) != 64 {
 					n.Problems = append(n.Problems, "missing common-height block hash")

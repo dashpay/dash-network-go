@@ -203,3 +203,62 @@ func TestNativeReadinessRetakesABaselineThatMissedANode(t *testing.T) {
 		t.Fatal(e, missed)
 	}
 }
+
+func TestNativeBatchIsClearedOnlyAfterEveryReplacedNodeAnswers(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	if e := u.WithRollout(rollout.Options{Concurrency: 1}); e != nil {
+		t.Fatal(e)
+	}
+	first, answers, cleared := "", 0, 0
+	f.remote.before = func(q node.Request) error {
+		if q.Action == "upgrade-apply" && first == "" {
+			first = q.Target.Name
+		}
+		if first != "" && cleared == 0 && f.store.record.Upgrade != nil && f.store.record.Upgrade.Completed[first] {
+			cleared = answers
+		}
+		if q.Action == "platform-status" && q.Target.Name == first {
+			// Baseline, gate, then the evidence sample: the node goes silent
+			// exactly when its batch would be marked complete.
+			if answers++; answers == 3 {
+				return errors.New("connection reset")
+			}
+		}
+		return nil
+	}
+	result, e := f.run(t, u)
+	if e != nil || result.Upgrade.Phase != "complete" || cleared <= 3 {
+		t.Fatal(e, cleared)
+	}
+}
+
+func TestNativeReadinessNeedsACurrentPlatformBlock(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	if e := u.WithRollout(rollout.Options{Concurrency: 1}); e != nil {
+		t.Fatal(e)
+	}
+	first, polls, applies := "", 0, 0
+	f.hook = func(q node.Request, o *node.Observation) error {
+		if q.Action == "upgrade-apply" {
+			if applies++; applies == 1 {
+				first = q.Target.Name
+			} else if applies == 2 && polls <= 12 {
+				t.Error("next batch admitted on a block made minutes ago")
+			}
+		}
+		// Heights keep rising against the fixed baseline, but the chain's
+		// latest block is ten minutes old for the first twelve polls.
+		if o.Platform != nil && q.Target.Name == first && applies == 1 {
+			if polls++; polls <= 12 {
+				o.Platform.BlockAge = 600
+			}
+		}
+		return nil
+	}
+	result, e := f.run(t, u)
+	if e != nil || result.Upgrade.Phase != "complete" {
+		t.Fatal(e)
+	}
+}

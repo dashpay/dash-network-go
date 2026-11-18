@@ -53,6 +53,7 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 	first := Observe(ctx, baseline.Fleet, r.Remote, 0)
 	first.Nodes = maps.Clone(first.Nodes)
 	previous := first
+	previous.Nodes = maps.Clone(first.Nodes)
 	reference := referenceHeight(first)
 	targets := map[string]Target{}
 	for _, t := range baseline.Fleet.Targets {
@@ -98,7 +99,13 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 		if reference == 0 {
 			reference = referenceHeight(second)
 		}
-		previous = second
+		// The regression check compares against each host's last usable
+		// observation, so a failed probe cannot hide a height that fell.
+		for name, t := range targets {
+			if second.Nodes[name].Healthy(t) == nil || previous.Nodes[name].Healthy(t) != nil {
+				previous.Nodes[name] = second.Nodes[name]
+			}
+		}
 		if err := r.wait(ctx, readinessPoll); err != nil {
 			return h, err
 		}

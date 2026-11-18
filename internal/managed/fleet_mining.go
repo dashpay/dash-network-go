@@ -57,6 +57,9 @@ func (l *fleetLease) sweep(ctx context.Context, renew bool) (int64, string, erro
 		if m == nil || baseline == nil || !m.Paused || m.Active || m.OperationID != l.p.ID || m.ServiceHash != baseline.ServiceHash || m.ExpiresAt < time.Now().Add(2*time.Minute).Unix() {
 			return 0, "", errors.New("fleet mining lease lost; no further withdrawal")
 		}
+		if o.Chain.CoreHeight < 1 || !digestRE.MatchString(o.Chain.CoreHash) {
+			return 0, "", errors.New("paused Core checkpoint missing")
+		}
 		if tip != 0 && (o.Chain.CoreHeight != tip || o.Chain.CoreHash != hash) {
 			return 0, "", errMinerTips
 		}

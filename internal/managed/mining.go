@@ -75,7 +75,7 @@ func (r Runner) applyWithMining(ctx context.Context, p Plan, t Target, q Request
 		return err
 	}
 	defer func() { err = errors.Join(err, r.resumeMining(p)) }()
-	var tip int64
+	var tip, expiry int64
 	var tipHash string
 	for _, m := range miners {
 		o, e := r.miningCall(ctx, p, m, "mining_pause")
@@ -95,11 +95,19 @@ func (r Runner) applyWithMining(ctx context.Context, p Plan, t Target, q Request
 		if o.Mining == nil || !o.Mining.Paused || o.Mining.ExpiresAt < time.Now().Add(11*time.Minute).Unix() {
 			return errors.New("mining pause expired before withdrawal")
 		}
+		// A receipt can arrive without a Core tip, and one miner's evidence
+		// does not stand in for another's.
+		if o.Chain.CoreHeight < 1 || !digestRE.MatchString(o.Chain.CoreHash) {
+			return errors.New("paused Core checkpoint missing")
+		}
 		if tip != 0 && (tip != o.Chain.CoreHeight || tipHash != o.Chain.CoreHash) {
 			return errors.New("paused miners disagree on Core tip")
 		}
 		tip = o.Chain.CoreHeight
 		tipHash = o.Chain.CoreHash
+		if expiry == 0 || o.Mining.ExpiresAt < expiry {
+			expiry = o.Mining.ExpiresAt
+		}
 	}
 	if tip < 1 || !digestRE.MatchString(tipHash) {
 		return errors.New("paused Core checkpoint missing")
@@ -118,7 +126,13 @@ func (r Runner) applyWithMining(ctx context.Context, p Plan, t Target, q Request
 	q.CoreCheckpointHash = tipHash
 	// This bounds controller work below the independent fifteen-minute recovery.
 	// A failed remote apply remains resumable; never start another target on error.
-	run, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// The leases were read before the health sweeps above: the replacement must
+	// end a minute before the earliest of them, whatever those sweeps cost.
+	budget := min(10*time.Minute, time.Until(time.Unix(expiry, 0))-time.Minute)
+	if budget < 2*time.Minute {
+		return errors.New("mining pause too close to expiry for a withdrawal")
+	}
+	run, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	r.report("owned mining paused; applying " + t.Name)
 	if _, err = r.Remote.Call(run, q); err != nil {
