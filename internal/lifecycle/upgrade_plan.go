@@ -12,6 +12,7 @@ import (
 	"github.com/dashpay/dash-network-go/internal/node"
 	"github.com/dashpay/dash-network-go/internal/provision"
 	"github.com/dashpay/dash-network-go/internal/release"
+	"github.com/dashpay/dash-network-go/internal/rollout"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -30,6 +31,7 @@ func (r Runner) PrepareUpgrade(ctx context.Context, p Plan, record provision.Rec
 // UpgradePlan changes images on the exact owned deployment. It cannot adopt
 // existing testnet nodes, alter protocol/genesis, reset data or replace Core.
 type UpgradePlan struct {
+	Rollout      *rollout.Options      `json:"rollout,omitempty"`
 	APIVersion   string                `json:"apiVersion"`
 	Kind         string                `json:"kind"`
 	ID           string                `json:"id"`
@@ -172,6 +174,9 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 }
 
 func (u UpgradePlan) Validate() error {
+	if err := u.validateRollout(); err != nil {
+		return err
+	}
 	copy := u
 	copy.ID = ""
 	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || u.RecipeSHA256 != node.UpgradeDigest() || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {

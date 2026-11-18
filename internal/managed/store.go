@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,15 +17,17 @@ import (
 )
 
 type Record struct {
-	FleetID     string          `json:"fleetId"`
-	SnapshotID  string          `json:"snapshotId"`
-	Revision    int64           `json:"revision"`
-	Enrolled    map[string]bool `json:"enrolled"`
-	OperationID string          `json:"operationId,omitempty"`
-	Phase       string          `json:"phase"`
-	Current     string          `json:"current,omitempty"`
-	Completed   map[string]bool `json:"completed,omitempty"`
-	LastError   string          `json:"lastError,omitempty"`
+	PendingTargets []string        `json:"pendingTargets,omitempty"`
+	FleetID        string          `json:"fleetId"`
+	SnapshotID     string          `json:"snapshotId"`
+	Revision       int64           `json:"revision"`
+	Enrolled       map[string]bool `json:"enrolled"`
+	OperationID    string          `json:"operationId,omitempty"`
+	Phase          string          `json:"phase"`
+	Current        string          `json:"current,omitempty"`
+	Completed      map[string]bool `json:"completed,omitempty"`
+	LastError      string          `json:"lastError,omitempty"`
+	MiningPhase    string          `json:"miningPhase,omitempty"`
 	// Instances pins each enrolled target name to the instance that was
 	// enrolled. A replaced instance under the same name is not enrolled.
 	Instances map[string]string `json:"instances,omitempty"`
@@ -36,6 +39,9 @@ func (r Record) IsEnrolled(t Target) bool {
 }
 
 func (r Record) Validate(f Fleet) error {
+	if r.MiningPhase != "" && r.MiningPhase != "pausing" && r.MiningPhase != "paused" && r.MiningPhase != "resuming" && r.MiningPhase != "resumed" {
+		return errors.New("invalid fleet mining phase")
+	}
 	if r.FleetID != f.Authority() || !digestRE.MatchString(r.SnapshotID) || r.Revision < 0 {
 		return errors.New("managed record scope mismatch")
 	}
@@ -44,6 +50,16 @@ func (r Record) Validate(f Fleet) error {
 	}
 	if r.Phase != "enrolling" && r.Phase != "enrolled" && r.Phase != "staging" && r.Phase != "applying" && r.Phase != "verifying" && r.Phase != "interrupted" && r.Phase != "complete" {
 		return errors.New("invalid managed phase")
+	}
+	seenPending := map[string]bool{}
+	for _, name := range r.PendingTargets {
+		if seenPending[name] || r.Completed[name] || !slices.ContainsFunc(f.Targets, func(t Target) bool { return t.Name == name && r.IsEnrolled(t) }) {
+			return errors.New("invalid pending batch target")
+		}
+		seenPending[name] = true
+	}
+	if len(r.PendingTargets) > 16 || len(r.PendingTargets) > 0 && (r.Current != "" || r.Phase == "complete") {
+		return errors.New("invalid pending batch")
 	}
 	found := r.Current == ""
 	// Targets may be added after enrollment (they start unenrolled) and a

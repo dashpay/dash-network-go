@@ -166,3 +166,57 @@ recreating exactly the service a new image changes. Re-rendering a 4.2.0-beta.3
 node with the 4.2.0-beta.6 helper migrated its config and changed no service.
 **This does not prove a Dash version-to-version upgrade.** A live existing-state
 version change remains a separate acceptance run.
+
+## Reviewed rollout controls
+
+`upgrade-plan --concurrency N [--pause-mining]` and
+`managed-plan --concurrency N [--pause-mining --miners miner-1,miner-2]`
+bind the chosen maximum (1–16) and mining policy into the immutable plan.
+Explicit `--concurrency 1` uses the new readiness-driven path too. Omitted
+options retain historical plan/executor behavior; old active plans are unchanged.
+
+Nodes are actually replaced concurrently, not just image-staged. The entire
+batch is journaled before applying; a lost response retains that exact pending
+batch for recovery. Workers finish before the claim is released. Each batch
+waits for changed services to be ready, not a fixed four-minute sleep. Ordinary
+managed masternodes do not trigger scans of unrelated fleet services. There is
+one selected-target progression check at the end. Validator batches are trimmed
+to preserve observed >2/3 remaining Platform voting power.
+
+The gates are per batch, not per node. Before a batch is withdrawn, and again
+after it is applied, its members must be healthy and every validator must
+report the same Platform block at a height they have all reached. That check
+does not wait for a new block: proof that Core and Platform still advance is
+required once, after the last batch. A chain that stops between batches is
+therefore caught by the final gate, not by the next batch's admission.
+
+A managed rollout that selects only ordinary masternodes observes no validator
+at all, in its batch gates or in its final gate, so it says nothing about
+Platform agreement or advancement. Check Platform separately when that matters.
+
+Resuming a journaled batch reconciles it as written when any member is down or
+mid-replacement. When every member still serves on its previous images, the
+resume would withdraw them now, so the batch must again leave >2/3 voting power
+in the fleet as it is observed at that moment; otherwise the run stops with
+`journaled batch not resumed` and nothing is withdrawn.
+
+Pausing mining is optional, except for a native Core rollout: there every
+batch other than the mining host's is replaced with blocks held, with or
+without `--pause-mining`, so plan for the interruption in block production.
+The controller resumes mining on completion, error or cancellation. That
+resume is a request that can itself fail; the host's recovery timer is the
+fallback, and after a failed cleanup the mining state should be checked.
+Managed Testnet uses the explicitly enrolled `miner-1` / `miner-2` service identities;
+native devnets use their exact deployment miner. Independent host recovery timers
+cover controller loss. A Core upgrade handles the native mining host last, alone,
+after restoring generation. With blocks held, every Core batch waits until each
+replaced validator is READY and reconnected (eight peers) before the next batch
+or the return of blocks, as the one-at-a-time path does. A pause left in the
+journal by an interrupted run is restored on resume even when only the mining
+host remains.
+
+These controls apply to ordinary image upgrades, not schema/config migrations.
+The optional native miner recipe is separately bound; historical node/upgrade
+recipe digests and immutable operation executors are not overwritten. Existing
+native devnets need a compatible executor; the console fails explicitly instead
+of silently discarding options or bypassing recipe compatibility.

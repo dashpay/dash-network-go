@@ -16,6 +16,7 @@ import (
 
 	"github.com/dashpay/dash-network-go/internal/bootstrap"
 	"github.com/dashpay/dash-network-go/internal/node"
+	"github.com/dashpay/dash-network-go/internal/rollout"
 	"github.com/dashpay/dash-network-go/internal/spec"
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -43,12 +44,13 @@ type Fleet struct {
 	Targets       []Target         `json:"targets"`
 }
 type Target struct {
-	Name         string            `json:"name"`
-	InstanceID   string            `json:"instanceId"`
-	Address      string            `json:"address"`
-	Architecture string            `json:"architecture"`
-	Role         string            `json:"role"`
-	Containers   map[string]string `json:"containers"`
+	Name          string            `json:"name"`
+	InstanceID    string            `json:"instanceId"`
+	Address       string            `json:"address"`
+	Architecture  string            `json:"architecture"`
+	Role          string            `json:"role"`
+	MiningService string            `json:"miningService,omitempty"`
+	Containers    map[string]string `json:"containers"`
 }
 
 func hash(v any) string {
@@ -103,6 +105,9 @@ func (f Fleet) Validate() error {
 		if t.Role != "validator" && t.Role != "seed" && t.Role != "core" && t.Role != "masternode" {
 			return errors.New("supported roles: validator, seed, core, masternode")
 		}
+		if t.MiningService != "" && (t.Role != "core" || t.MiningService != "dashd-generate-miner.service" || f.ChainType != "testnet") {
+			return errors.New("only explicit testnet Core mining service supported")
+		}
 		containers := map[string]bool{}
 		for c, n := range t.Containers {
 			if !slices.Contains(Components, c) || !containerRE.MatchString(n) || containers[n] {
@@ -135,24 +140,35 @@ type Container struct {
 	Restarts   int      `json:"restarts"`
 }
 type Chain struct {
-	CoreNetwork      string           `json:"coreNetwork"`
-	CoreGenesis      string           `json:"coreGenesis"`
-	CoreHeight       int64            `json:"coreHeight"`
-	CoreSynced       bool             `json:"coreSynced"`
-	ChainLockHeight  int64            `json:"chainLockHeight"`
-	MasternodeState  string           `json:"masternodeState"`
-	ProTxHash        string           `json:"proTxHash"`
-	PlatformChainID  string           `json:"platformChainId"`
-	PlatformHeight   int64            `json:"platformHeight"`
-	PlatformHash     string           `json:"platformHash"`
-	PlatformProtocol uint32           `json:"platformProtocol"`
-	PlatformNodeID   string           `json:"platformNodeId"`
-	CatchingUp       bool             `json:"catchingUp"`
-	VotingPower      map[string]int64 `json:"votingPower"`
-	DAPIHeight       int64            `json:"dapiHeight"`
-	DAPIHealthy      bool             `json:"dapiHealthy"`
+	PosePenalty        int64            `json:"posePenalty,omitempty"`
+	CoreNetwork        string           `json:"coreNetwork"`
+	CoreGenesis        string           `json:"coreGenesis"`
+	CoreCheckpointHash string           `json:"coreCheckpointHash,omitempty"`
+	CoreHash           string           `json:"coreHash,omitempty"`
+	CoreHeight         int64            `json:"coreHeight"`
+	CoreSynced         bool             `json:"coreSynced"`
+	ChainLockHeight    int64            `json:"chainLockHeight"`
+	MasternodeState    string           `json:"masternodeState"`
+	ProTxHash          string           `json:"proTxHash"`
+	PlatformChainID    string           `json:"platformChainId"`
+	PlatformHeight     int64            `json:"platformHeight"`
+	PlatformHash       string           `json:"platformHash"`
+	PlatformProtocol   uint32           `json:"platformProtocol"`
+	PlatformNodeID     string           `json:"platformNodeId"`
+	CatchingUp         bool             `json:"catchingUp"`
+	VotingPower        map[string]int64 `json:"votingPower"`
+	DAPIHeight         int64            `json:"dapiHeight"`
+	DAPIHealthy        bool             `json:"dapiHealthy"`
 }
+type MigrationReceipt struct {
+	OperationID string `json:"operationId"`
+	Before      string `json:"before"`
+	After       string `json:"after"`
+}
+
 type Observation struct {
+	Mining          *MiningReceipt       `json:"mining,omitempty"`
+	Migration       *MigrationReceipt    `json:"migration,omitempty"`
 	Join            *node.CoreJoin       `json:"join,omitempty"`
 	InstanceID      string               `json:"instanceId"`
 	At              time.Time            `json:"at"`
@@ -250,18 +266,29 @@ func validPin(pin string) bool {
 	return e == nil && strings.HasPrefix(d.DigestStr(), "sha256:") && digestRE.MatchString(strings.TrimPrefix(d.DigestStr(), "sha256:"))
 }
 
+type Migration struct {
+	Kind             string    `json:"kind"`
+	EpochStart       time.Time `json:"epochStart"`
+	ReadinessDriven  bool      `json:"readinessDriven,omitempty"`
+	Miners           []string  `json:"miners,omitempty"`
+	FleetMiningPause bool      `json:"fleetMiningPause,omitempty"`
+	Canaries         []string  `json:"canaries,omitempty"`
+}
+
 type Plan struct {
-	Targets    []string  `json:"targets,omitempty"`
-	APIVersion string    `json:"apiVersion"`
-	Kind       string    `json:"kind"`
-	ID         string    `json:"id"`
-	Snapshot   Snapshot  `json:"snapshot"`
-	Operation  string    `json:"operation"`
-	Scope      string    `json:"scope"`
-	Images     Images    `json:"images"`
-	PreviousID string    `json:"previousId,omitempty"`
-	Recipe     string    `json:"recipe"`
-	CreatedAt  time.Time `json:"createdAt"`
+	Rollout    *rollout.Options `json:"rollout,omitempty"`
+	Migration  *Migration       `json:"migration,omitempty"`
+	Targets    []string         `json:"targets,omitempty"`
+	APIVersion string           `json:"apiVersion"`
+	Kind       string           `json:"kind"`
+	ID         string           `json:"id"`
+	Snapshot   Snapshot         `json:"snapshot"`
+	Operation  string           `json:"operation"`
+	Scope      string           `json:"scope"`
+	Images     Images           `json:"images"`
+	PreviousID string           `json:"previousId,omitempty"`
+	Recipe     string           `json:"recipe"`
+	CreatedAt  time.Time        `json:"createdAt"`
 }
 
 func Selected(scope, component string) bool {
@@ -302,6 +329,9 @@ func Build(s Snapshot, operation, scope, previous string, images Images, now tim
 	return p, p.Validate()
 }
 func (p Plan) Validate() error {
+	if err := p.validateRollout(); err != nil {
+		return err
+	}
 	c := p
 	c.ID = ""
 	if p.APIVersion != spec.Version || p.Kind != "ExistingOperation" || p.ID != hash(c) || p.Recipe != RecipeDigest() || p.CreatedAt.IsZero() {
@@ -348,5 +378,5 @@ func (p Plan) Validate() error {
 	if len(p.Images) != len(p.Snapshot.Fleet.Targets) || count == 0 {
 		return errors.New("image selection lost target or selects nothing")
 	}
-	return nil
+	return p.validateMigration()
 }

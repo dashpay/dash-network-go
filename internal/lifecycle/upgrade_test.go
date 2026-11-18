@@ -61,7 +61,7 @@ func upgradeSetupFrom(t *testing.T, build func(*testing.T) (Plan, Runner, *memor
 					continue
 				}
 				if fixture.installed[q.Target.Name][image.Component] != image.Pinned {
-					return errors.New("actual image differs from runtime intent")
+					return errors.New("node running-image-drift: exit status 1") // as the host worker refuses
 				}
 				o.Platform.Containers[image.Component] = digest(q.Target.Name + image.Component + image.Pinned)
 				o.Platform.Restarts[image.Component] = 0

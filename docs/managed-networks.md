@@ -15,7 +15,10 @@ that the native devnet creator originally made them.
   databases and original Dashmate/Compose files remain untouched.
 - `managed-plan`: resolves candidates once to architecture-specific digests and
   binds original state, network, targets, component scope and previous operation.
-- `managed-upgrade`: stages artifacts; withdraws one selected host at a time;
+- `managed-upgrade`: stages artifacts on up to 16 hosts concurrently, then
+  withdraws one selected host at a time (or, when the plan binds
+  `--concurrency`, one journaled batch at a time; see
+  [Reviewed rollout controls](upgrades.md#reviewed-rollout-controls));
   preserves unselected workloads, configuration and existing mounts. Whole-fleet
   health, protocol, identities and quorum availability gate further withdrawals.
 - `managed-deploy`: starts captured, stopped workloads with the **same images**.
@@ -34,8 +37,12 @@ New **Core fullnode** allocations can join testnet or Moutai through the separat
 [existing-chain join path](join-existing-chain.md). They never copy validator
 identities, mine, register collateral, or silently expand this managed fleet.
 
+The explicit [legacy testnet v5 migration](legacy-testnet-v5.md) adds the reviewed
+Core 24 / Platform 4.1 → 5 runtime configuration delta and permits protocol 13 →
+14 during a managed rollout. It is not an arbitrary Dashmate schema migration.
+
 **Not implemented:** adding/registering additional existing-network validators,
-configuration/schema/protocol migration, resets, automatic downgrade or abandoning
+general configuration/schema/protocol migration, resets, automatic downgrade or abandoning
 an unfinished operation. These remain requirements/adapter work, not claims hidden
 behind the word "deploy". Existing executors and the dashboard must expose these
 capability limits honestly.
@@ -115,10 +122,11 @@ leave the host; exported observations contain only hashes, identities and health
 Private host recovery files are root-only and may contain secrets: do not attach
 or print them in chat, public artifacts or issue reports.
 
-A version rollout modifies the selected container image, not the application's
-configuration schema. Core process and native Core/Tor fingerprints are preserved
+A normal version rollout modifies the selected container image, not the application's
+configuration schema. The separately selected v5 adapter permits only its fixed,
+backed-up runtime delta. Core process and native Core/Tor fingerprints are preserved
 when Core is outside scope. Core upgrades preserve configuration/genesis and
-require readiness after the expected process replacement. Live protocol changes
+require readiness after the expected process replacement. Unplanned protocol changes
 stop verification; migrated data is never blindly downgraded.
 
 Drive is Tenderdash's ABCI dependency. Replacing Drive deliberately stops the
@@ -136,6 +144,18 @@ images or change configuration. Its independent process does not honor the new
 journal claim. No assertion of exclusive control over other tools is made.
 
 ## Failure and quorum policy
+
+Image staging uses the same 16-host concurrency bound as native upgrades. It
+pulls only the reviewed architecture-specific pins, without restarting services
+or changing their configuration. All selected image pulls must succeed before
+any container replacement begins; failures identify each affected host. An
+interrupted run waits for in-flight staging calls before releasing its journal
+claim and rechecks staging on resume with the same plan. This also applies to
+`managed-deploy`; staging changes neither replacement order nor health gates.
+With a rollout plan, a batch's gate covers that batch (and every validator,
+when the batch contains one), not every selected target. No additional
+CLI flag or dashboard setting is required. Already-pinned executors retain their
+original behavior until a new compatible executor is explicitly selected.
 
 Choose an observation window longer than the network's idle-block interval.
 The managed default is four minutes: current Moutai emits empty blocks every

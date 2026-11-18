@@ -73,7 +73,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 	}
 	for _, t := range p.Targets {
 		s := observed[t.Name]
-		if coreScope && t.Name == pending && s.core == nil {
+		if coreScope && (t.Name == pending || slices.Contains(record.Upgrade.PendingNodes, t.Name)) && s.core == nil {
 			// The node whose Core is being replaced may be on either image, or
 			// briefly down; its resumed apply reconciles it from the host marker.
 			baseline[t.Name] = record.Upgrade.Baseline[t.Name]
@@ -88,7 +88,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 		b := provision.Preservation{CoreID: s.core.ContainerID, CoreStarted: s.core.StartedAt, CoreConfig: s.core.ConfigSHA256, CoreGenesis: s.core.Genesis}
 		// A node whose Core this upgrade replaced keeps its configuration and
 		// genesis; every other node keeps the exact Core process.
-		touched := coreScope && (record.Upgrade.Completed[t.Name] || t.Name == record.Upgrade.CurrentNode)
+		touched := coreScope && (record.Upgrade.Completed[t.Name] || (t.Name == record.Upgrade.CurrentNode || slices.Contains(record.Upgrade.PendingNodes, t.Name)))
 		if touched {
 			old := record.Upgrade.Baseline[t.Name]
 			if s.core.ConfigSHA256 != old.CoreConfig || s.core.Genesis != old.CoreGenesis {
@@ -100,7 +100,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 		if t.Role == "validator" {
 			x := s.platform
 			if x == nil {
-				if t.Name == pending {
+				if t.Name == pending || record.Upgrade != nil && slices.Contains(record.Upgrade.PendingNodes, t.Name) {
 					baseline[t.Name] = b
 					continue
 				}
@@ -134,7 +134,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 					}
 					// A node the rollout has reached runs its target images and
 					// every service the target release reconfigured anew.
-					reached := record.Upgrade.Completed[t.Name] || t.Name == record.Upgrade.CurrentNode
+					reached := record.Upgrade.Completed[t.Name] || t.Name == record.Upgrade.CurrentNode || slices.Contains(record.Upgrade.PendingNodes, t.Name)
 					changes := record.Upgrade.Changes[t.Name]
 					if reached && slices.Contains(changes, componentServices[component]) {
 						continue
@@ -143,7 +143,11 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 					if component == "tenderdash" && reached && slices.Contains(changes, "drive_abci") {
 						// A planned graceful stop/start around Drive preserves the
 						// Tenderdash container/image, but resets Docker's counter.
-						expectedRestarts = 0
+						// Until a journaled node's replacement has begun, it still
+						// shows the baseline count; that must not block every resume.
+						if record.Upgrade.Completed[t.Name] || x.Restarts[component] != old.Restarts[component] {
+							expectedRestarts = 0
+						}
 					}
 					if record.Runtime.Images[t.Name][component] == record.Upgrade.From[t.Name][component] && (x.Containers[component] != old.Containers[component] || x.Restarts[component] != expectedRestarts) {
 						return nil, fmt.Errorf("unselected/not-yet-upgraded service changed: %s/%s", t.Name, component)
@@ -283,13 +287,35 @@ func (e *execution) verifyUpgrade() (Health, error) {
 	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Minute)
 	defer cancel()
 	for {
-		h, err := e.runner.Doctor(ctx, e.p, e.r)
+		check := e.runner.Doctor
+		if e.runner.readinessDriven {
+			check = e.runner.rolloutHealth
+		}
+		h, err := check(ctx, e.p, e.r)
 		if err != nil {
 			return h, err
 		}
 		if h.Healthy {
-			_, err = upgradeEvidence(e.p, e.r, e.runner.sample(ctx, e.p, e.r, 0), "")
-			return h, err
+			observed := e.runner.sample(ctx, e.p, e.r, 0)
+			if _, err = upgradeEvidence(e.p, e.r, observed, ""); err != nil {
+				return h, err
+			}
+			// Evidence tolerates a silent node that is still being replaced.
+			// Completion does not: the journal entry is all a retry has to
+			// reconcile it, so every such node must answer in this sample.
+			var silent []string
+			for _, t := range e.p.Targets {
+				if e.r.Upgrade == nil || (t.Name != e.r.Upgrade.CurrentNode && !slices.Contains(e.r.Upgrade.PendingNodes, t.Name)) {
+					continue
+				}
+				if s := observed[t.Name]; s.core == nil || (t.Role == "validator" && s.platform == nil) {
+					silent = append(silent, t.Name+": not observed after replacement")
+				}
+			}
+			if len(silent) == 0 {
+				return h, nil
+			}
+			h.Healthy, h.Problems = false, silent
 		}
 		e.report("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
 		if err = ctx.Err(); err != nil {
@@ -324,6 +350,7 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 	if _, ok := ctx.Deadline(); !ok {
 		return result, errors.New("upgrade requires a deadline")
 	}
+	r.readinessDriven = u.Rollout != nil
 	p := u.Deployment
 	if err = provision.VerifyAccount(ctx, p.Bootstrap.Compute.Network.AWS.AccountID, r.Identity); err != nil {
 		return
@@ -388,7 +415,11 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		if previous != u.PreviousID || !reflect.DeepEqual(from, u.From) {
 			return result, errors.New("upgrade source changed after planning")
 		}
-		h, healthErr := r.Doctor(ctx, p, e.r)
+		check := r.Doctor
+		if r.readinessDriven {
+			check = r.rolloutHealth
+		}
+		h, healthErr := check(ctx, p, e.r)
 		if healthErr != nil {
 			return result, healthErr
 		}
@@ -441,83 +472,89 @@ func (r Runner) Upgrade(ctx context.Context, u UpgradePlan) (result provision.Re
 		return
 	}
 	var health Health
-	if e.r.Upgrade.CurrentNode == "" {
+	if e.r.Upgrade.CurrentNode == "" && len(e.r.Upgrade.PendingNodes) == 0 && (u.Rollout == nil || !miningHeld(e.r.Upgrade.MiningPhase)) {
 		if health, err = e.verifyUpgrade(); err != nil {
 			return
 		}
 	}
-	// Recover the previously journaled withdrawal before scheduling any other.
-	targets := upgradeOrder(p, u.Scope)
-	if current := e.r.Upgrade.CurrentNode; current != "" {
-		sort.SliceStable(targets, func(i, j int) bool { return targets[i].Name == current && targets[j].Name != current })
-	}
-	for _, t := range targets {
-		if e.r.Upgrade.Completed[t.Name] {
-			continue
-		}
-		if err = liveScope(ctx, p, e.r, r.Cloud); err != nil {
+	if u.Rollout != nil {
+		if health, err = e.upgradeBatches(u); err != nil {
 			return
 		}
-		e.r.Upgrade.Phase = "applying"
-		e.r.Upgrade.CurrentNode = t.Name
-		e.r.Runtime.Images[t.Name] = cloneImages(u.To)[t.Name]
-		if err = e.save(); err != nil {
-			return
+	} else {
+		// Recover the previously journaled withdrawal before scheduling any other.
+		targets := upgradeOrder(p, u.Scope)
+		if current := e.r.Upgrade.CurrentNode; current != "" {
+			sort.SliceStable(targets, func(i, j int) bool { return targets[i].Name == current && targets[j].Name != current })
 		}
-		if u.Scope == "core" {
-			e.report("upgrade Core on " + t.Name + "; configuration, keys and data preserved")
-		} else {
-			e.report("upgrade " + t.Name + "; Core preserved")
-		}
-		e.report("upgrade-applying")
-		// DKG sessions advance only with blocks, and this network's miner is
-		// ours: hold block production while a validator's Core is replaced, so
-		// no session can start before it is back and reconnected (PoSe).
-		paused := false
-		if u.Scope == "core" && t.Role == "validator" {
-			if err = e.pauseMiningQuietly(); err != nil {
+		for _, t := range targets {
+			if e.r.Upgrade.Completed[t.Name] {
+				continue
+			}
+			if err = liveScope(ctx, p, e.r, r.Cloud); err != nil {
 				return
 			}
-			paused = true
-		}
-		var observed node.Observation
-		observed, err = r.Remote.Call(ctx, e.upgradeRequest(u, t, "upgrade-apply"))
-		if paused {
-			if err == nil {
-				err = e.settle(t)
+			e.r.Upgrade.Phase = "applying"
+			e.r.Upgrade.CurrentNode = t.Name
+			e.r.Runtime.Images[t.Name] = cloneImages(u.To)[t.Name]
+			if err = e.save(); err != nil {
+				return
 			}
-			// Always resume, even after a failure or cancellation.
-			if startErr := e.resumeMining(); startErr != nil {
-				err = errors.Join(err, startErr)
+			if u.Scope == "core" {
+				e.report("upgrade Core on " + t.Name + "; configuration, keys and data preserved")
+			} else {
+				e.report("upgrade " + t.Name + "; Core preserved")
 			}
-		}
-		if err != nil {
-			return
-		}
-		if u.Scope == "core" {
-			old := e.r.Upgrade.Baseline[t.Name]
-			if observed.Core == nil || observed.Core.ConfigSHA256 != old.CoreConfig || observed.Core.Genesis != old.CoreGenesis {
-				return result, errors.New("Core upgrade response failed configuration/genesis preservation")
+			e.report("upgrade-applying")
+			// DKG sessions advance only with blocks, and this network's miner is
+			// ours: hold block production while a validator's Core is replaced, so
+			// no session can start before it is back and reconnected (PoSe).
+			paused := false
+			if u.Scope == "core" && t.Role == "validator" {
+				if err = e.pauseMiningQuietly(); err != nil {
+					return
+				}
+				paused = true
 			}
-		} else if !preservedCore(observed.Core, e.r.Upgrade.Baseline[t.Name]) {
-			return result, errors.New("upgrade response failed Core preservation")
-		} else if observed.Render == nil || !slices.Equal(observed.Render.Changes, e.r.Upgrade.Changes[t.Name]) {
-			return result, fmt.Errorf("%s applied changes other than those staged", t.Name)
+			var observed node.Observation
+			observed, err = r.Remote.Call(ctx, e.upgradeRequest(u, t, "upgrade-apply"))
+			if paused {
+				if err == nil {
+					err = e.settle(t)
+				}
+				// Always resume, even after a failure or cancellation.
+				if startErr := e.resumeMining(); startErr != nil {
+					err = errors.Join(err, startErr)
+				}
+			}
+			if err != nil {
+				return
+			}
+			if u.Scope == "core" {
+				old := e.r.Upgrade.Baseline[t.Name]
+				if observed.Core == nil || observed.Core.ConfigSHA256 != old.CoreConfig || observed.Core.Genesis != old.CoreGenesis {
+					return result, errors.New("Core upgrade response failed configuration/genesis preservation")
+				}
+			} else if !preservedCore(observed.Core, e.r.Upgrade.Baseline[t.Name]) {
+				return result, errors.New("upgrade response failed Core preservation")
+			} else if observed.Render == nil || !slices.Equal(observed.Render.Changes, e.r.Upgrade.Changes[t.Name]) {
+				return result, fmt.Errorf("%s applied changes other than those staged", t.Name)
+			}
+			e.r.Upgrade.Phase = "verifying"
+			e.report("upgrade-verifying")
+			if err = e.save(); err != nil {
+				return
+			}
+			if health, err = e.verifyUpgrade(); err != nil {
+				return
+			}
+			e.r.Upgrade.Completed[t.Name] = true
+			e.r.Upgrade.CurrentNode = ""
+			if err = e.save(); err != nil {
+				return
+			}
+			e.report("upgrade " + t.Name + " verified; whole fleet healthy")
 		}
-		e.r.Upgrade.Phase = "verifying"
-		e.report("upgrade-verifying")
-		if err = e.save(); err != nil {
-			return
-		}
-		if health, err = e.verifyUpgrade(); err != nil {
-			return
-		}
-		e.r.Upgrade.Completed[t.Name] = true
-		e.r.Upgrade.CurrentNode = ""
-		if err = e.save(); err != nil {
-			return
-		}
-		e.report("upgrade " + t.Name + " verified; whole fleet healthy")
 	}
 	if health.ObservedAt.IsZero() {
 		if health, err = e.verifyUpgrade(); err != nil {
@@ -581,20 +618,42 @@ func (e *execution) pauseMiningQuietly() error {
 // settle keeps blocks (and so DKG sessions) paused until the replaced
 // validator is observably back: masternode READY, synced and connected, after
 // at least 30 seconds for its quorum connections, within a bound.
-func (e *execution) settle(t node.Target) error {
+func (e *execution) settle(targets ...node.Target) error {
+	var validators []node.Target
+	for _, t := range targets {
+		if t.Role == "validator" {
+			validators = append(validators, t)
+		}
+	}
+	if len(validators) == 0 {
+		return nil
+	}
 	if err := e.pause(30 * time.Second); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		o, err := e.call(t, "core-status", nil)
-		if err == nil && o.Core != nil && o.Core.Synced && o.Core.MasternodeState == "READY" && o.Core.Peers >= 8 {
+		// Every validator in the same round: one that was ready a minute ago
+		// may have lost its peers while another was still starting.
+		waiting := ""
+		for _, t := range validators {
+			o, err := e.call(t, "core-status", nil)
+			if err != nil || o.Core == nil || !o.Core.Synced || o.Core.MasternodeState != "READY" || o.Core.Peers < 8 {
+				waiting = t.Name
+				break
+			}
+		}
+		// An answer that arrives after the deadline is not accepted either.
+		if time.Now().After(deadline) {
+			if waiting == "" {
+				waiting = validators[0].Name
+			}
+			return fmt.Errorf("%s not READY and connected after its Core replacement", waiting)
+		}
+		if waiting == "" {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%s not READY and connected after its Core replacement", t.Name)
-		}
-		if err = e.pause(3 * time.Second); err != nil {
+		if err := e.pause(3 * time.Second); err != nil {
 			return err
 		}
 	}

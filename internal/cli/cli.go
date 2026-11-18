@@ -102,7 +102,7 @@ func Run(ctx context.Context, args []string, out, stderr io.Writer, version stri
 		// The digests plans bind: a newer binary with the same bootstrap and node
 		// recipes can operate a deployment created by an older one.
 		return json.NewEncoder(out).Encode(map[string]string{
-			"bootstrap": bootstrap.RecipeDigest(), "node": node.RecipeDigest(), "upgrade": node.UpgradeDigest(),
+			"bootstrap": bootstrap.RecipeDigest(), "node": node.RecipeDigest(), "upgrade": node.UpgradeDigest(), "mining": node.MiningDigest(),
 			"join": node.JoinRecipeDigest(), "managed": managed.RecipeDigest(),
 		})
 	}
@@ -250,4 +250,14 @@ func Main(ctx context.Context, version string) int {
 		return 1
 	}
 	return 0
+}
+
+func explicitFlag(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
