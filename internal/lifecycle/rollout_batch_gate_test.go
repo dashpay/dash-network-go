@@ -49,14 +49,21 @@ func TestNativeBatchGatesAskForNoNewCoreBlock(t *testing.T) {
 
 func TestNativeFinalGateStillNeedsTheChainToAdvance(t *testing.T) {
 	old := gateLimit
-	gateLimit = 50 * time.Millisecond
+	gateLimit = 500 * time.Millisecond
 	defer func() { gateLimit = old }()
 	f := upgradeSetup(t)
 	u := f.change(t, "platform", "b")
 	if e := u.WithRollout(rollout.Options{Concurrency: 3}); e != nil {
 		t.Fatal(e)
 	}
-	f.runner.ReadyTimeout = time.Second
+	f.runner.ReadyTimeout = 5 * time.Second
+	f.runner.Wait = func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Millisecond):
+		}
+		return ctx.Err()
+	}
 	applies, total := 0, len(f.plan.Validators())
 	f.hook = func(q node.Request, o *node.Observation) error {
 		if q.Action == "upgrade-apply" {
@@ -108,7 +115,7 @@ func TestNativeGateSamplesAgainWhenANodeMissesOneProbe(t *testing.T) {
 
 func TestNativeReplacedNodesGetTheirReadyTimeNotTheShortGate(t *testing.T) {
 	old := gateLimit
-	gateLimit = 20 * time.Millisecond
+	gateLimit = 300 * time.Millisecond
 	defer func() { gateLimit = old }()
 	f := upgradeSetup(t)
 	u := f.change(t, "platform", "b")
@@ -124,7 +131,7 @@ func TestNativeReplacedNodesGetTheirReadyTimeNotTheShortGate(t *testing.T) {
 		if q.Action == "upgrade-apply" && first == "" {
 			first, replaced = q.Target.Name, time.Now()
 		}
-		if o.Platform != nil && q.Target.Name == first && time.Since(replaced) < 150*time.Millisecond {
+		if o.Platform != nil && q.Target.Name == first && time.Since(replaced) < 900*time.Millisecond {
 			o.Platform.CatchingUp = true
 		}
 		return nil

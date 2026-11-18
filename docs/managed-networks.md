@@ -129,6 +129,17 @@ when Core is outside scope. Core upgrades preserve configuration/genesis and
 require readiness after the expected process replacement. Unplanned protocol changes
 stop verification; migrated data is never blindly downgraded.
 
+Preservation compares the workload, not its uptime. An unselected Platform
+service or a companion container that Docker or its operator restarted in place
+since the reviewed snapshot (same container, image and configuration, running
+again) is the same workload and does not stop an operation. A replaced, stopped
+or reconfigured one does, and so does any restart of Core outside the scope.
+
+Health is per validator. One whose own Platform cannot be read is unhealthy by
+itself and counts as unavailable voting power; it does not mark the other
+validators as disagreeing. A validator that answers with a different block at
+the common height still does.
+
 Drive is Tenderdash's ABCI dependency. Replacing Drive deliberately stops the
 selected Tenderdash process before disconnecting ABCI, then starts it after the
 replacement's listener is ready. The same-image Tenderdash container, data and

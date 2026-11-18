@@ -278,6 +278,14 @@ func (r Runner) rolloutHealth(parent context.Context, p Plan, record provision.R
 		if h.Healthy {
 			return h, nil
 		}
+		if ctx.Err() != nil {
+			// The deadline cut this round short, and its samples say only
+			// that: report the last complete round.
+			if len(waiting) > 0 {
+				h.Problems = waiting
+			}
+			return h, expired(ctx.Err())
+		}
 		waiting = h.Problems
 		if r.Progress != nil {
 			r.Progress("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
