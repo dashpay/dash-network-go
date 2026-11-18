@@ -256,6 +256,27 @@ class UpgradeWorker(Worker):
                              "core-upgrade-miner-not-restored")
             return dict(instanceId=self.t["instanceId"], planId=self.c["planId"], action=self.q["action"], core=core)
 
+    def recoverable_reset_marker(self, marker, before):
+        """Accept only a completed reset marker whose rollback target is the
+        current image set and whose running component images still match it.
+
+        This is the node-side counterpart of the controller's zero-progress
+        recovery gate. It never changes a container or marker during staging.
+        """
+        if not marker or marker.get("phase") != "applied" or marker.get("reset") is not True:
+            return False
+        if marker.get("to") != before:
+            return False
+        for service, component in COMPONENTS.items():
+            value = self.inspect_container(service)
+            if not value:
+                return False
+            try:
+                self.verify_image(value, before[component])
+            except Failure:
+                return False
+        return True
+
     def execute(self):
         self.require(self.q["action"] in ["upgrade-stage", "upgrade-apply"],
                      "upgrade-action-refused")
@@ -282,9 +303,11 @@ class UpgradeWorker(Worker):
                              and marker.get("phase") in ["applying", "applied"],
                              "upgrade-marker-drift")
             else:
-                self.require((marker is None and not change.get("previousId"))
-                             or (marker and marker.get("id") == change.get("previousId")
-                                 and marker.get("phase") == "applied"),
+                standard = (marker is None and not change.get("previousId")) or (
+                    marker and marker.get("id") == change.get("previousId")
+                    and marker.get("phase") == "applied"
+                )
+                self.require(standard or self.recoverable_reset_marker(marker, before),
                              "upgrade-previous-operation")
             for component, pin in after.items():
                 if before[component] != pin:
