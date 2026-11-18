@@ -7,6 +7,23 @@ Keep the response decoder aligned with Worker.tenderdash (tested together).
 """
 
 
+def platform_quorum_type(value):
+    """Normalize Tenderdash's numeric, named, and enum-shaped quorum forms."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 107
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_")
+        return normalized in {"107", "107.0", "llmq_devnet_platform", "devnet_platform"}
+    if isinstance(value, dict):
+        fields = [value[key] for key in ["name", "value", "id", "quorum_type"] if key in value]
+        if "type" in value and value["type"] != "enum":
+            fields.append(value["type"])
+        return bool(fields) and all(platform_quorum_type(field) for field in fields)
+    return False
+
+
 class ReadOnlyWorker(Worker):
     def core_status(self):
         result = super().core_status()
@@ -25,8 +42,11 @@ class ReadOnlyWorker(Worker):
         self.require(isinstance(value, dict) and value.get("error") is None,
                      "validator-rpc-failed")
         value = value.get("result", value)
-        self.require(isinstance(value, dict) and value.get("quorum_type") == 107,
-                     "unsupported-validator-quorum")
+        self.require(isinstance(value, dict), "validator-response-shape")
+        quorum = value.get("quorum_type")
+        diagnostic = str(quorum) if isinstance(quorum, (int, float)) and not isinstance(quorum, bool) else type(quorum).__name__.lower()
+        self.require(platform_quorum_type(quorum),
+                     "unsupported-validator-quorum:" + diagnostic)
         members = value.get("validators")
         self.require(isinstance(members, list) and len(members) == int(value["total"]),
                      "incomplete-validator-membership")

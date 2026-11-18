@@ -147,6 +147,35 @@ func upgradeTargets(p Plan, candidate spec.Network, lock release.Lock, from prov
 	return to, to.Validate(p.Bootstrap.Compute)
 }
 
+// recoverableInterruptedUpgrade reports an upgrade that stopped before it
+// reached any host, and so may be superseded instead of resumed. One that
+// still owns a mining pause is not: only its own resume restores generation.
+func recoverableInterruptedUpgrade(record provision.Record) bool {
+	if record.Runtime == nil || record.Upgrade == nil || record.Upgrade.Phase != "interrupted" || record.Upgrade.CurrentNode != "" || len(record.Upgrade.PendingNodes) != 0 || miningHeld(record.Upgrade.MiningPhase) || !reflect.DeepEqual(record.Runtime.Images, record.Upgrade.From) {
+		return false
+	}
+	for _, completed := range record.Upgrade.Completed {
+		if completed {
+			return false
+		}
+	}
+	return true
+}
+
+// previousUpgrade is the last upgrade that reached a host, which is what each
+// host's marker names and what a new change must follow. The journal's runtime
+// names an upgrade from the moment it starts; one interrupted without progress
+// never got further, so its successor follows the upgrade before it.
+func previousUpgrade(record provision.Record) string {
+	if record.Runtime == nil {
+		return ""
+	}
+	if recoverableInterruptedUpgrade(record) {
+		return record.Upgrade.PreviousID
+	}
+	return record.Runtime.UpgradeID
+}
+
 func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock release.Lock, scope string, now time.Time) (UpgradePlan, error) {
 	if err := record.Validate(p.Bootstrap.Compute); err != nil {
 		return UpgradePlan{}, err
@@ -154,7 +183,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 	if record.Deployment == nil || record.Deployment.PlanID != p.ID || record.Deployment.Phase != "network-ready" {
 		return UpgradePlan{}, errors.New("complete the original deployment before planning an upgrade")
 	}
-	if record.Upgrade != nil && record.Upgrade.Phase != "complete" {
+	if record.Upgrade != nil && record.Upgrade.Phase != "complete" && !recoverableInterruptedUpgrade(record) {
 		return UpgradePlan{}, errors.New("resume the unfinished upgrade; do not supersede it")
 	}
 	from, err := effectiveImages(p, record)
@@ -166,9 +195,7 @@ func BuildUpgrade(p Plan, record provision.Record, candidate spec.Network, lock 
 		return UpgradePlan{}, err
 	}
 	u := UpgradePlan{APIVersion: spec.Version, Kind: "DevnetUpgradePlan", Deployment: p, Candidate: candidate, Release: lock, Scope: scope, CreatedAt: now.UTC(), From: from, To: to, RecipeSHA256: node.UpgradeDigest(), Recovery: recoveryFor(scope)}
-	if record.Runtime != nil {
-		u.PreviousID = record.Runtime.UpgradeID
-	}
+	u.PreviousID = previousUpgrade(record)
 	u.ID = hash(u)
 	return u, u.Validate()
 }
@@ -179,7 +206,7 @@ func (u UpgradePlan) Validate() error {
 	}
 	copy := u
 	copy.ID = ""
-	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || u.RecipeSHA256 != node.UpgradeDigest() || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {
+	if u.ID != hash(copy) || u.APIVersion != spec.Version || u.Kind != "DevnetUpgradePlan" || !node.UpgradeRecipeCompatible(u.RecipeSHA256) || u.Recovery != recoveryFor(u.Scope) || u.CreatedAt.IsZero() {
 		return errors.New("upgrade plan altered or recipe changed; retain exact plan/binary")
 	}
 	if u.PreviousID != "" && (len(u.PreviousID) != 64 || u.PreviousID == u.ID) {

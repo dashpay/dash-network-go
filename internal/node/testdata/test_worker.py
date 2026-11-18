@@ -172,13 +172,18 @@ class Tests(unittest.TestCase):
             dict(pro_tx_hash="A" * 64, voting_power="100"),
             dict(pro_tx_hash="B" * 64, voting_power="100")])
         with patch.object(worker.Worker, "platform_status", return_value={}):
-            for wrapped in [value, dict(result=value)]:
-                w.opener = Response(wrapped)
-                observed = w.platform_status()
-                self.assertEqual(observed["protocol"], 14)
-                self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
+            for quorum_type in [107, 107.0, " 107 ", "107.0", "LLMQ-DEVNET-PLATFORM", "devnet_platform",
+                                 {"name": "llmq_devnet_platform"}, {"type": "enum", "value": 107}]:
+                current = dict(value, quorum_type=quorum_type)
+                for wrapped in [current, dict(result=current)]:
+                    w.opener = Response(wrapped)
+                    observed = w.platform_status()
+                    self.assertEqual(observed["protocol"], 14)
+                    self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
             for invalid in [dict(value, total="3"), dict(value, quorum_type=101),
-                            dict(error=dict(code=-1)), []]:
+                            *[dict(value, quorum_type=q) for q in [True, False, None, 101, "101", {},
+                              {"name": "llmq_devnet_platform", "value": 101}, {"type": "enum"}]],
+                            dict(error=dict(code=-1)), [], dict(result=None)]:
                 w.opener = Response(invalid)
                 with self.assertRaises(worker.Failure):
                     w.platform_status()
@@ -601,6 +606,30 @@ class DashmateTests(unittest.TestCase):
             self.assertEqual(d["core"]["spork"]["privateKey"], "cSporkKey")
             self.assertIs(d["platform"]["enable"], False)
             self.assertIs(d["core"]["masternode"]["enable"], False)
+
+    def test_existing_platform_genesis_is_preserved_across_protocol_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = host(tmp)
+            config = json.loads(fakehost.FIXTURE.read_text())
+            config["configs"] = {w.config_name: config["configs"]["node"]}
+            w.home.mkdir(parents=True)
+            config["configs"][w.config_name]["platform"]["drive"]["abci"]["epochTime"] = 3600
+            (w.home / "config.json").write_text(json.dumps(config))
+            genesis = copy.deepcopy(config["configs"][w.config_name]["platform"]["drive"]["tenderdash"]["genesis"])
+            genesis["chain_id"] = "dash-devnet-existing"
+            genesis["genesis_time"] = "2026-11-14T16:12:06.619959722Z"
+            genesis["consensus_params"]["version"] = {"app_version": "14"}
+            path = w.home / w.config_name / "platform/drive/tenderdash/genesis.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(genesis))
+            w.atomic("platform/inputs.json", dict(genesisCoreHeight=4500, peers=[]))
+            w.atomic("platform/identity.json", dict(genesis="existing", node="existing"))
+            w.c["platformChainId"] = "dash-devnet-existing"
+            w.c["genesisTime"] = "2026-11-14T16:12:06.619959722Z"
+            w.c["initialProtocolVersion"] = 15
+            w.configure(config, None)
+            self.assertEqual(config["configs"][w.config_name]["platform"]["drive"]["tenderdash"]["genesis"], genesis)
+            self.assertEqual(config["configs"][w.config_name]["platform"]["drive"]["abci"]["epochTime"], 3600)
 
     def test_salted_render_lines_are_verified_then_normalized(self):
         password = "torControlFixture"
