@@ -183,11 +183,28 @@ managed masternodes do not trigger scans of unrelated fleet services. There is
 one selected-target progression check at the end. Validator batches are trimmed
 to preserve observed >2/3 remaining Platform voting power.
 
+The gates are per batch, not per node. Before a batch is withdrawn, and again
+after it is applied, its members must be healthy and every validator must
+report the same Platform block at a height they have all reached. That check
+does not wait for a new block: proof that Core and Platform still advance is
+required once, after the last batch. A chain that stops between batches is
+therefore caught by the final gate, not by the next batch's admission.
+
+Resuming a journaled batch reconciles it as written when any member is down or
+mid-replacement. When every member still serves on its previous images, the
+resume would withdraw them now, so the batch must again leave >2/3 voting power
+in the fleet as it is observed at that moment; otherwise the run stops with
+`journaled batch not resumed` and nothing is withdrawn.
+
 Mining is optional and automatically resumed on completion, error or cancellation.
 Managed Testnet uses the explicitly enrolled `miner-1` / `miner-2` service identities;
 native devnets use their exact deployment miner. Independent host recovery timers
 cover controller loss. A Core upgrade handles the native mining host last, alone,
-after restoring generation. Its existing DKG timing protection remains.
+after restoring generation. With blocks held, every Core batch waits until each
+replaced validator is READY and reconnected (eight peers) before the next batch
+or the return of blocks, as the one-at-a-time path does. A pause left in the
+journal by an interrupted run is restored on resume even when only the mining
+host remains.
 
 These controls apply to ordinary image upgrades, not schema/config migrations.
 The optional native miner recipe is separately bound; historical node/upgrade

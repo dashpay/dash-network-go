@@ -11,7 +11,8 @@ import (
 )
 
 // Match native upgrade staging: image pulls are independent per host and never
-// withdraw a service. Container replacement still runs one target at a time.
+// withdraw a service. Container replacement is a separate step: one target at
+// a time, or one journaled batch at a time when the plan binds a rollout.
 const stagingConcurrency = 16
 
 // stage waits for every started call before returning, including on failure or

@@ -21,9 +21,22 @@ type fleetLease struct {
 	mu sync.Mutex
 }
 
+var errMinerTips = errors.New("paused miners disagree on Core tip")
+
+// Held miners keep following the public chain, and they are asked one after
+// another: a block that arrives between two answers is not a disagreement.
+// Ask again before giving up a lease that still has minutes to run.
 func (l *fleetLease) check(ctx context.Context, renew bool) (int64, string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	for attempt := 1; ; attempt++ {
+		tip, hash, err := l.sweep(ctx, renew)
+		if !errors.Is(err, errMinerTips) || attempt == 3 {
+			return tip, hash, err
+		}
+	}
+}
+func (l *fleetLease) sweep(ctx context.Context, renew bool) (int64, string, error) {
 	var tip int64
 	var hash string
 	for _, t := range miningTargets(l.p) {
@@ -45,7 +58,7 @@ func (l *fleetLease) check(ctx context.Context, renew bool) (int64, string, erro
 			return 0, "", errors.New("fleet mining lease lost; no further withdrawal")
 		}
 		if tip != 0 && (o.Chain.CoreHeight != tip || o.Chain.CoreHash != hash) {
-			return 0, "", errors.New("paused miners disagree on Core tip")
+			return 0, "", errMinerTips
 		}
 		tip, hash = o.Chain.CoreHeight, o.Chain.CoreHash
 	}

@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 )
@@ -23,6 +24,19 @@ func referenceHeight(s Snapshot) int64 {
 	return n
 }
 
+// agreementHealth is the batch gate that asks for no new block: one sample for
+// health and identity, then one that reads every validator's block at a height
+// they have all reached. A host reports a Platform block hash only for such a
+// reference height, so a single unreferenced sample can never show agreement.
+func (r Runner) agreementHealth(ctx context.Context, baseline Snapshot, p Plan, label string) Health {
+	first := Observe(ctx, baseline.Fleet, r.Remote, 0)
+	second := first
+	if reference := referenceHeight(first); reference > 0 {
+		second = Observe(ctx, baseline.Fleet, r.Remote, reference)
+	}
+	return assessHealth(baseline, first, second, &p, label, false)
+}
+
 // Poll from a fixed baseline, not a succession of short windows that each
 // demand their own block. A slow block never becomes an arbitrary sleep floor.
 func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
@@ -33,18 +47,31 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 		baseline = r.rolloutSnapshot(p)
 	}
 	if p.Rollout != nil && len(r.batchTargets) > 0 {
-		current := Observe(ctx, baseline.Fleet, r.Remote, 0)
-		return assessHealth(baseline, current, current, &p, "target readiness", false), ctx.Err()
+		return r.agreementHealth(ctx, baseline, p, "target readiness"), ctx.Err()
 	}
 	r.report("managed health gate waiting: sampling selected targets for readiness and chain progress")
 	first := Observe(ctx, baseline.Fleet, r.Remote, 0)
+	first.Nodes = maps.Clone(first.Nodes)
 	previous := first
 	reference := referenceHeight(first)
+	targets := map[string]Target{}
+	for _, t := range baseline.Fleet.Targets {
+		targets[t.Name] = t
+	}
 	for {
 		second := Observe(ctx, baseline.Fleet, r.Remote, reference)
 		// Detect regressions between polls even if still above the original sample.
 		continuity := assessHealth(baseline, previous, second, &p, "readiness", false)
 		for _, problem := range continuity.Problems {
+			// A host that could not be observed this round proves nothing about
+			// the chain: its empty answer is not a fork or a stall. It stays
+			// unhealthy and is sampled again; only an observed regression ends
+			// the wait.
+			if name, _, found := strings.Cut(problem, ": "); found {
+				if t, known := targets[name]; known && second.Nodes[name].Healthy(t) != nil {
+					continue
+				}
+			}
 			if strings.Contains(problem, "identity/configuration/protocol changed") || strings.Contains(problem, "consensus block disagreement") || strings.Contains(problem, "not advancing") || strings.Contains(problem, "PoSe penalty increased") {
 				return continuity, errors.New("readiness continuity failed: " + problem)
 			}
@@ -59,6 +86,17 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 			if p.Selects(t) && (second.Nodes[t.Name].Chain.MasternodeState == "POSE_BANNED" || second.Nodes[t.Name].Chain.MasternodeState == "REMOVED") {
 				return h, errors.New("masternode banned or removed")
 			}
+		}
+		// A baseline that failed to observe a host carries that failure into
+		// every later round and could never pass: start that host's baseline
+		// from its first clean observation instead.
+		for name, t := range targets {
+			if first.Nodes[name].Healthy(t) != nil && second.Nodes[name].Healthy(t) == nil {
+				first.Nodes[name] = second.Nodes[name]
+			}
+		}
+		if reference == 0 {
+			reference = referenceHeight(second)
 		}
 		previous = second
 		if err := r.wait(ctx, readinessPoll); err != nil {
@@ -75,9 +113,7 @@ func (r Runner) withdrawalHealth(ctx context.Context, p Plan) (Health, error) {
 		return r.planHealth(ctx, p)
 	}
 	if p.Rollout != nil {
-		baseline := r.rolloutSnapshot(p)
-		current := Observe(ctx, baseline.Fleet, r.Remote, 0)
-		return assessHealth(baseline, current, current, &p, "batch readiness", false), ctx.Err()
+		return r.agreementHealth(ctx, r.rolloutSnapshot(p), p, "batch readiness"), ctx.Err()
 	}
 	first := Observe(ctx, p.Snapshot.Fleet, r.Remote, 0)
 	second := Observe(ctx, p.Snapshot.Fleet, r.Remote, referenceHeight(first))

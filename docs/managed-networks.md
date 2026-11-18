@@ -16,7 +16,9 @@ that the native devnet creator originally made them.
 - `managed-plan`: resolves candidates once to architecture-specific digests and
   binds original state, network, targets, component scope and previous operation.
 - `managed-upgrade`: stages artifacts on up to 16 hosts concurrently, then
-  withdraws one selected host at a time;
+  withdraws one selected host at a time (or, when the plan binds
+  `--concurrency`, one journaled batch at a time; see
+  [Reviewed rollout controls](upgrades.md#reviewed-rollout-controls));
   preserves unselected workloads, configuration and existing mounts. Whole-fleet
   health, protocol, identities and quorum availability gate further withdrawals.
 - `managed-deploy`: starts captured, stopped workloads with the **same images**.
