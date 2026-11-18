@@ -29,6 +29,13 @@ var errMinerTips = errors.New("paused miners disagree on Core tip")
 func (l *fleetLease) check(ctx context.Context, renew bool) (int64, string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if renew {
+		// The renewal's time starts here, not while it waited for the lock
+		// behind an admission check: that wait is not a lost lease.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+	}
 	for attempt := 1; ; attempt++ {
 		tip, hash, err := l.sweep(ctx, renew)
 		if !errors.Is(err, errMinerTips) || attempt == 3 {
@@ -37,7 +44,7 @@ func (l *fleetLease) check(ctx context.Context, renew bool) (int64, string, erro
 	}
 }
 func (l *fleetLease) sweep(ctx context.Context, renew bool) (int64, string, error) {
-	var tip int64
+	var tip, expiry int64
 	var hash string
 	for _, t := range miningTargets(l.p) {
 		action := "mining_status"
@@ -64,9 +71,17 @@ func (l *fleetLease) sweep(ctx context.Context, renew bool) (int64, string, erro
 			return 0, "", errMinerTips
 		}
 		tip, hash = o.Chain.CoreHeight, o.Chain.CoreHash
+		if expiry == 0 || m.ExpiresAt < expiry {
+			expiry = m.ExpiresAt
+		}
 	}
 	if tip < 1 || !digestRE.MatchString(hash) {
 		return 0, "", errors.New("paused Core checkpoint missing")
+	}
+	// Each lease was checked when its miner answered. A slow later answer
+	// must not outlast an earlier one: all of them hold at the same moment.
+	if expiry < time.Now().Add(2*time.Minute).Unix() {
+		return 0, "", errors.New("fleet mining lease lost; no further withdrawal")
 	}
 	return tip, hash, nil
 }
@@ -86,9 +101,7 @@ func (l *fleetLease) keep(ctx context.Context, interval time.Duration) (context.
 			case <-run.Done():
 				return
 			case <-ticker.C:
-				renew, end := context.WithTimeout(run, 90*time.Second)
-				_, _, err := l.check(renew, true)
-				end()
+				_, _, err := l.check(run, true)
 				if err != nil {
 					cancel(fmt.Errorf("fleet mining renewal: %w", err))
 					return

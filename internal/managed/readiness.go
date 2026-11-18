@@ -56,11 +56,29 @@ func (r Runner) readinessHealth(ctx context.Context, p Plan) (Health, error) {
 	previous.Nodes = maps.Clone(first.Nodes)
 	reference := referenceHeight(first)
 	targets := map[string]Target{}
+	validators := false
 	for _, t := range baseline.Fleet.Targets {
 		targets[t.Name] = t
+		validators = validators || t.Role == "validator"
 	}
 	for {
 		second := Observe(ctx, baseline.Fleet, r.Remote, reference)
+		if reference == 0 && validators {
+			// No validator had a Platform height in the baseline, so this
+			// sweep asked for no block and proves nothing about agreement.
+			// Adopt what it did observe and ask again at a real height.
+			for name, t := range targets {
+				if first.Nodes[name].Healthy(t) != nil && second.Nodes[name].Healthy(t) == nil {
+					first.Nodes[name] = second.Nodes[name]
+				}
+				previous.Nodes[name] = second.Nodes[name]
+			}
+			reference = referenceHeight(second)
+			if err := r.wait(ctx, readinessPoll); err != nil {
+				return assessHealth(baseline, first, second, &p, "readiness", false), err
+			}
+			continue
+		}
 		// Detect regressions between polls even if still above the original sample.
 		continuity := assessHealth(baseline, previous, second, &p, "readiness", false)
 		for _, problem := range continuity.Problems {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,7 +99,13 @@ func (r Runner) resumeAdmission(ctx context.Context, p Plan, targets []Target) e
 			return nil
 		}
 		for component, pin := range p.Images[t.Name] {
-			if !slices.Contains(o.Components[component].Digests, pin) {
+			// By digest, as verify does: Docker may list the same image under
+			// another spelling of its repository.
+			_, want, _ := strings.Cut(pin, "@")
+			if !slices.ContainsFunc(o.Components[component].Digests, func(d string) bool {
+				_, got, ok := strings.Cut(d, "@")
+				return ok && got == want
+			}) {
 				fresh = append(fresh, t)
 				break
 			}

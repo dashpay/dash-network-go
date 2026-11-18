@@ -50,8 +50,8 @@ func TestNativeMiningControlRetriesABusyHost(t *testing.T) {
 		_, e := f.run(t, u)
 		// A sample holding the host lock for a moment is not a lost lease; a
 		// host that never frees it still stops the rollout, with mining restored.
-		if (busy < hostBusyAttempts) != (e == nil) || paused {
-			t.Fatal(busy, e, paused)
+		if (busy < hostBusyAttempts) != (e == nil) || paused || refused != busy {
+			t.Fatal(busy, e, paused, refused)
 		}
 	}
 }
