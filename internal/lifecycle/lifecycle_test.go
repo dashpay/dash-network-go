@@ -415,6 +415,13 @@ func TestChangedHostAndPlanRefused(t *testing.T) {
 	if p.Validate() == nil {
 		t.Fatal("unknown recipe accepted")
 	}
+	p2, _, _, _ := setup(t)
+	p2.RecipeSHA256 = "ec93dc9fb2e5a105eed96de54aedf2336488839501a2545fba3090c6ad1190e2"
+	p2.ID = ""
+	p2.ID = hash(p2)
+	if p2.Validate() != nil {
+		t.Fatal("known genesis-preserving predecessor recipe refused")
+	}
 }
 func TestDoctorNeverHidesUnreachableOrDivergentNode(t *testing.T) {
 	for _, kind := range []string{"unreachable", "stalled", "fork", "wrong-identity", "restarting"} {
