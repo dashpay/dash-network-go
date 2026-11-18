@@ -185,3 +185,36 @@ func TestFleetLeaseNeedsACheckpointFromEveryMiner(t *testing.T) {
 		t.Fatal("one miner's tip stood in for the other's", e)
 	}
 }
+
+func TestReadinessAsksForAgreementOnlyOnceAHeightIsKnown(t *testing.T) {
+	p, r, b := migrationFixture(t)
+	p.Migration.ReadinessDriven = true
+	seen := map[string]int{}
+	b.observe = func(q Request, o *Observation) {
+		if q.Target.Role != "validator" {
+			return
+		}
+		seen[q.Target.Name]++
+		o.Problems = nil
+		// The baseline sweep reaches no validator's Platform at all.
+		if seen[q.Target.Name] == 1 {
+			o.Problems = []string{"platform-health-unavailable"}
+			o.Chain.PlatformHeight, o.Chain.DAPIHeight = 0, 0
+			return
+		}
+		o.Chain.PlatformHeight = 500 + int64(seen[q.Target.Name])
+		o.Chain.DAPIHeight = o.Chain.PlatformHeight
+	}
+	waits := 0
+	r.Wait = func(context.Context, time.Duration) error {
+		if waits++; waits > 6 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	ctx, c := deadline()
+	defer c()
+	if h, e := r.planHealth(ctx, p); e != nil || !h.Healthy {
+		t.Fatal(e, h.Problems)
+	}
+}

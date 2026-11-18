@@ -190,6 +190,10 @@ does not wait for a new block: proof that Core and Platform still advance is
 required once, after the last batch. A chain that stops between batches is
 therefore caught by the final gate, not by the next batch's admission.
 
+A managed rollout that selects only ordinary masternodes observes no validator
+at all, in its batch gates or in its final gate, so it says nothing about
+Platform agreement or advancement. Check Platform separately when that matters.
+
 Resuming a journaled batch reconciles it as written when any member is down or
 mid-replacement. When every member still serves on its previous images, the
 resume would withdraw them now, so the batch must again leave >2/3 voting power

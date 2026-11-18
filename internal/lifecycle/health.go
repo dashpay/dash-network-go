@@ -267,13 +267,18 @@ func (r Runner) rolloutHealth(ctx context.Context, p Plan, record provision.Reco
 		if err != nil {
 			return h, err
 		}
-		// A baseline that failed to observe a node carries that failure into
-		// every round and can never pass: take it again.
-		for _, s := range baseline {
-			if len(s.problems) > 0 {
-				baseline = r.sample(ctx, p, record, 0)
-				break
+		// A baseline entry that failed to observe its node carries that failure
+		// into every round and can never pass: take those entries again, and
+		// keep every clean one so alternating misses cannot starve the gate.
+		var again map[string]samples
+		for name, s := range baseline {
+			if len(s.problems) == 0 {
+				continue
 			}
+			if again == nil {
+				again = r.sample(ctx, p, record, 0)
+			}
+			baseline[name] = again[name]
 		}
 	}
 }

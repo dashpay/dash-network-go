@@ -153,7 +153,11 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 					if component == "tenderdash" && reached && slices.Contains(changes, "drive_abci") {
 						// A planned graceful stop/start around Drive preserves the
 						// Tenderdash container/image, but resets Docker's counter.
-						expectedRestarts = 0
+						// Until a journaled node's replacement has begun, it still
+						// shows the baseline count; that must not block every resume.
+						if record.Upgrade.Completed[t.Name] || x.Restarts[component] != old.Restarts[component] {
+							expectedRestarts = 0
+						}
 					}
 					if record.Runtime.Images[t.Name][component] == record.Upgrade.From[t.Name][component] && (x.Containers[component] != old.Containers[component] || x.Restarts[component] != expectedRestarts) {
 						return nil, fmt.Errorf("unselected/not-yet-upgraded service changed: %s/%s", t.Name, component)
@@ -635,21 +639,31 @@ func (e *execution) settle(targets ...node.Target) error {
 		return err
 	}
 	deadline := time.Now().Add(5 * time.Minute)
-	for _, t := range validators {
-		for {
+	for {
+		// Every validator in the same round: one that was ready a minute ago
+		// may have lost its peers while another was still starting.
+		waiting := ""
+		for _, t := range validators {
 			o, err := e.call(t, "core-status", nil)
-			if err == nil && o.Core != nil && o.Core.Synced && o.Core.MasternodeState == "READY" && o.Core.Peers >= 8 {
+			if err != nil || o.Core == nil || !o.Core.Synced || o.Core.MasternodeState != "READY" || o.Core.Peers < 8 {
+				waiting = t.Name
 				break
 			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("%s not READY and connected after its Core replacement", t.Name)
+		}
+		// An answer that arrives after the deadline is not accepted either.
+		if time.Now().After(deadline) {
+			if waiting == "" {
+				waiting = validators[0].Name
 			}
-			if err = e.pause(3 * time.Second); err != nil {
-				return err
-			}
+			return fmt.Errorf("%s not READY and connected after its Core replacement", waiting)
+		}
+		if waiting == "" {
+			return nil
+		}
+		if err := e.pause(3 * time.Second); err != nil {
+			return err
 		}
 	}
-	return nil
 }
 
 // resumeMining uses its own bounded context so it still runs after the
