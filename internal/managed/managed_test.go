@@ -432,6 +432,91 @@ func TestCoreUpgradeDoesNotPermitNativeTorRestart(t *testing.T) {
 		t.Fatal("Core scope also permitted Tor restart")
 	}
 }
+func TestARestartInPlaceIsNotDriftButAReplacementIs(t *testing.T) {
+	drive := Container{ID: "drive-1", ImageID: "sha256:drive", Image: "dashpay/drive:5", ConfigHash: "config", Running: true, StartedAt: "2026-11-18T10:00:00Z"}
+	logs := Container{ID: "logs-1", ImageID: "sha256:logs", Image: "vector", ConfigHash: "logs", Running: true, StartedAt: "2026-11-18T10:00:00Z"}
+	core := Container{ID: "core-1", ImageID: "sha256:core", Image: "dashpay/dashd:24", ConfigHash: "core", Running: true, StartedAt: "2026-11-18T10:00:00Z"}
+	base := Observation{Components: map[string]Container{"drive": drive, "core": core}, Companions: map[string]Container{"logs": logs}}
+	// Docker restarted both in place since the reviewed snapshot.
+	current := clone(base)
+	drive.StartedAt, drive.Restarts = "2026-11-18T19:10:00Z", 1
+	logs.StartedAt, logs.Restarts = "2026-11-18T19:10:00Z", 3
+	current.Components["drive"], current.Companions["logs"] = drive, logs
+	if e := Preserved(base, current, nil); e != nil {
+		t.Fatal("a restart in place was refused as drift:", e)
+	}
+	// Core outside the scope is preserved exactly, process included.
+	restarted := clone(current)
+	core.StartedAt, core.Restarts = "2026-11-18T19:10:00Z", 1
+	restarted.Components["core"] = core
+	if Preserved(base, restarted, nil) == nil {
+		t.Fatal("a Core restart outside the scope was accepted")
+	}
+	if e := Preserved(base, restarted, []string{"core"}); e != nil {
+		t.Fatal("the selected Core may restart:", e)
+	}
+	for name, change := range map[string]func(*Observation){
+		"replaced unselected service": func(o *Observation) { c := o.Components["drive"]; c.ID = "drive-2"; o.Components["drive"] = c },
+		"unselected service on another image": func(o *Observation) {
+			c := o.Components["drive"]
+			c.ImageID = "sha256:other"
+			o.Components["drive"] = c
+		},
+		"stopped unselected service": func(o *Observation) { c := o.Components["drive"]; c.Running = false; o.Components["drive"] = c },
+		"replaced companion":         func(o *Observation) { c := o.Companions["logs"]; c.ID = "logs-2"; o.Companions["logs"] = c },
+		"added companion":            func(o *Observation) { o.Companions["new"] = logs },
+		"removed companion":          func(o *Observation) { delete(o.Companions, "logs") },
+	} {
+		changed := clone(current)
+		change(&changed)
+		if Preserved(base, changed, nil) == nil {
+			t.Fatal("accepted:", name)
+		}
+	}
+}
+
+func TestAValidatorWithoutABlockIsItsOwnFaultNotAFork(t *testing.T) {
+	s, _, _, b := setup(t)
+	ctx, c := deadline()
+	defer c()
+	first := Observe(ctx, s.Fleet, b, 0)
+	second := Observe(ctx, s.Fleet, b, referenceHeight(first))
+	down, other := s.Fleet.Targets[0], s.Fleet.Targets[1]
+	if down.Role != "validator" || other.Role != "validator" {
+		t.Fatal("fixture changed")
+	}
+	// One validator's Platform cannot be read at all.
+	o := second.Nodes[down.Name]
+	o.Problems = []string{"platform-health-unavailable"}
+	o.Chain.PlatformHash, o.Chain.PlatformHeight, o.Chain.DAPIHeight = "", 0, 0
+	second.Nodes[down.Name] = o
+	h := assessHealth(s, first, second, nil, "test", false)
+	if h.Nodes[down.Name].Healthy {
+		t.Fatal("unreadable validator reported healthy")
+	}
+	for _, target := range s.Fleet.Targets[1:] {
+		if !h.Nodes[target.Name].Healthy {
+			t.Fatal("one unreadable validator degraded another:", target.Name, h.Nodes[target.Name].Problems)
+		}
+	}
+	// A validator that answers with a different block still implicates all.
+	o = second.Nodes[other.Name]
+	o.Chain.PlatformHash = h64("fork")
+	second.Nodes[other.Name] = o
+	h = assessHealth(s, first, second, nil, "test", false)
+	for _, target := range s.Fleet.Targets[2:] {
+		if target.Role == "validator" && h.Nodes[target.Name].Healthy {
+			t.Fatal("a fork left a validator healthy:", target.Name)
+		}
+	}
+	// And a healthy validator that reports no block cannot show agreement.
+	second = Observe(ctx, s.Fleet, b, 0)
+	h = assessHealth(s, first, second, nil, "test", false)
+	if h.Healthy {
+		t.Fatal("agreement accepted without a block")
+	}
+}
+
 func TestReadOnlyImportPreservesUnknownTarget(t *testing.T) {
 	s, r, _, b := setup(t)
 	b.fail = "observe"

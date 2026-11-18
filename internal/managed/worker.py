@@ -37,6 +37,19 @@ def require(value, code):
         raise Failure(code)
 
 
+def steady(c):
+    # A container restarted in place is the same workload: same container,
+    # image and configuration, still running. Docker's start time and restart
+    # counter are not compared. Preserved() in health.go applies the same rule.
+    return {k:v for k,v in c.items() if k not in ('startedAt','restarts')}
+
+def steady_all(m):
+    return {k:steady(v) for k,v in m.items()}
+
+def preserved(k,a,b):
+    # Core outside the scope is preserved exactly, process included.
+    return a==b if k=='core' else steady(a)==steady(b)
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -528,13 +541,13 @@ with open('/run/dashnet-managed.lock','a') as lock:
         if self.q.get('migration') and receipt and receipt['operationId'] == self.q.get('operationId') and receipt['after'] == files:
             files = receipt['before']
         require(files==baseline['filesHash'],'configuration-files-changed')
-        require(actual['companions']==baseline['companions'],'companion-changed')
+        require(steady_all(actual['companions'])==steady_all(baseline['companions']),'companion-changed')
         keep=lambda m:{k:v for k,v in m.items() if 'core' not in mutable or not k.startswith('dashd:')}
         require(keep(actual['nativeProcesses'])==keep(baseline['nativeProcesses']),'native-core-or-tor-changed')
         for k,b in baseline['components'].items():
             a=actual['components'][k]
             require(a['configHash']==b['configHash'],'workload-configuration-changed')
-            if k not in mutable:require(a==b,'preserved-service-changed')
+            if k not in mutable:require(preserved(k,a,b),'preserved-service-changed')
 
     def owner(self):
         owner=self.read('owner.json')
@@ -794,7 +807,7 @@ with open('/run/dashnet-managed.lock','a') as lock:
                 companions[name]=dict(id=c['Id'],imageId=c['Image'],image=c['Config']['Image'],digests=[],
                     configHash=self.config_hash(self.recipe(c)),running=c['State']['Running'],
                     startedAt=c['State']['StartedAt'],restarts=c['RestartCount'])
-        require(companions==baseline['companions'],'companion-changed')
+        require(steady_all(companions)==steady_all(baseline['companions']),'companion-changed')
         keep=lambda m:{k:v for k,v in m.items() if 'core' not in pins or not k.startswith('dashd:')}
         require(keep(self.native_processes())==keep(baseline['nativeProcesses']),'native-core-or-tor-changed')
         file_sources={}
@@ -812,7 +825,7 @@ with open('/run/dashnet-managed.lock','a') as lock:
                 continue
             a=self.summary(c)
             require(a['configHash']==b['configHash'],'workload-configuration-changed')
-            if k not in pins:require(a==b,'preserved-service-changed')
+            if k not in pins:require(preserved(k,a,b),'preserved-service-changed')
             elif k in marker['completed']:require(c['Id']==marker['completed'][k],'applied-container-replaced')
             else:
                 desired=self.engine.image(pins[k]);require(desired is not None,'image-not-staged')

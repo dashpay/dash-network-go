@@ -181,7 +181,12 @@ batch for recovery. Workers finish before the claim is released. Each batch
 waits for changed services to be ready, not a fixed four-minute sleep. Ordinary
 managed masternodes do not trigger scans of unrelated fleet services. There is
 one selected-target progression check at the end. Validator batches are trimmed
-to preserve observed >2/3 remaining Platform voting power.
+to preserve observed >2/3 remaining Platform voting power: a batch too large for
+the quorum gives up validators, and the ordinary nodes in it still go ahead.
+
+With a concurrency above one, the first node of a rollout is replaced alone and
+must pass its gate before any batch of the requested size starts. An image that
+cannot start, or a recipe fault, then costs one node. The plan is unchanged.
 
 The gates are per batch, not per node. Before a batch is withdrawn, and again
 after it is applied, its members must be healthy and every validator must
@@ -189,6 +194,14 @@ report the same Platform block at a height they have all reached. That check
 does not wait for a new block: proof that Core and Platform still advance is
 required once, after the last batch. A chain that stops between batches is
 therefore caught by the final gate, not by the next batch's admission.
+
+A native rollout gives the nodes a batch replaced `upgrade --ready-timeout`
+(thirty minutes by default) to serve again, since a new release may migrate its
+databases on first start; every other gate has ten minutes. A gate that runs out
+of time reports `health gate not passed within …` and what it was still waiting
+for. A node that fails a single probe after the gate has seen it healthy is
+sampled again within that time; a node that answers with something the upgrade
+must not accept (another genesis, a replaced Core) still stops the rollout.
 
 A managed rollout that selects only ordinary masternodes observes no validator
 at all, in its batch gates or in its final gate, so it says nothing about

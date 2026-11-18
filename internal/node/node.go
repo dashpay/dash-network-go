@@ -47,8 +47,17 @@ func RecipeDigest() string { s := sha256.Sum256([]byte(recipe)); return hex.Enco
 // claim is about this exact recipe: like UpgradeRecipeCompatible, the
 // admission ends by itself with the next change to it.
 func RecipeCompatible(digest string) bool {
-	return digest == RecipeDigest() || (digest == "ec93dc9fb2e5a105eed96de54aedf2336488839501a2545fba3090c6ad1190e2" &&
-		RecipeDigest() == "dc1a2db706bf16f1889af77016c3f8169056f60a3481bef4a0eeae2223351ce4")
+	return digest == RecipeDigest() || slices.Contains(AcceptedRecipes(), digest)
+}
+
+// AcceptedRecipes lists the earlier deployment recipes RecipeCompatible admits
+// besides this build's own. `dashnet recipes` prints it, so the console can
+// tell that this build operates an existing network without knowing the rule.
+func AcceptedRecipes() []string {
+	if RecipeDigest() == "dc1a2db706bf16f1889af77016c3f8169056f60a3481bef4a0eeae2223351ce4" {
+		return []string{"ec93dc9fb2e5a105eed96de54aedf2336488839501a2545fba3090c6ad1190e2"}
+	}
+	return nil
 }
 
 func ObservationDigest() string {

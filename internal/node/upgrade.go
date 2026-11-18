@@ -7,6 +7,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"slices"
 
 	"github.com/dashpay/dash-network-go/internal/provision"
 	"github.com/dashpay/dash-network-go/internal/spec"
@@ -25,13 +26,18 @@ func UpgradeDigest() string {
 // recipes are unchanged. This admits an observer-only decoding correction on
 // resume without rebinding the reviewed plan or relaxing its content hash.
 func UpgradeRecipeCompatible(digest string) bool {
-	if digest == UpgradeDigest() {
-		return true
-	}
+	return digest == UpgradeDigest() || slices.Contains(AcceptedUpgradeRecipes(), digest)
+}
+
+// AcceptedUpgradeRecipes lists the earlier upgrade recipes
+// UpgradeRecipeCompatible admits besides this build's own.
+func AcceptedUpgradeRecipes() []string {
 	mutation := sha256.Sum256([]byte(upgradeRecipe))
-	return digest == "2244f28e6ae19aec2c88afec6decf657db6bf0fd66adafc7edd12b46f6a46dc5" &&
-		RecipeDigest() == "dc1a2db706bf16f1889af77016c3f8169056f60a3481bef4a0eeae2223351ce4" &&
-		hex.EncodeToString(mutation[:]) == "35d493b735e933fd4315cddc6ce363eef411aaf6ef450cddfa2a58f6464f733c"
+	if RecipeDigest() == "dc1a2db706bf16f1889af77016c3f8169056f60a3481bef4a0eeae2223351ce4" &&
+		hex.EncodeToString(mutation[:]) == "35d493b735e933fd4315cddc6ce363eef411aaf6ef450cddfa2a58f6464f733c" {
+		return []string{"2244f28e6ae19aec2c88afec6decf657db6bf0fd66adafc7edd12b46f6a46dc5"}
+	}
+	return nil
 }
 
 type ImageChange struct {

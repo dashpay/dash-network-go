@@ -86,6 +86,51 @@ func canWithdrawBatch(s Snapshot, p Plan, targets []Target) error {
 	return nil
 }
 
+// canaryPending reports a rollout that has not yet completed a single node.
+// Its first batch is one node whatever the requested concurrency: an image
+// that cannot start, or a recipe fault, then costs one host and not a batch.
+func canaryPending(p Plan, record Record) bool {
+	for name, images := range p.Images {
+		if len(images) > 0 && record.Completed[name] {
+			return false
+		}
+	}
+	return true
+}
+
+// lastVoter is the last batch member whose withdrawal removes Platform voting
+// power, or -1. A batch too large for the observed quorum gives up validators,
+// never the ordinary nodes that merely follow them in fleet order.
+func lastVoter(p Plan, targets []Target) int {
+	for i := len(targets) - 1; i >= 0; i-- {
+		t := targets[i]
+		if t.Role != "validator" {
+			continue
+		}
+		for _, component := range []string{"core", "drive", "tenderdash"} {
+			if p.Images[t.Name][component] != "" {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// admitBatch reduces a proposed batch until the observed quorum survives it.
+func admitBatch(s Snapshot, p Plan, targets []Target) ([]Target, error) {
+	for {
+		err := canWithdrawBatch(s, p, targets)
+		if err == nil {
+			return targets, nil
+		}
+		voter := lastVoter(p, targets)
+		if len(targets) == 1 || voter < 0 {
+			return nil, err
+		}
+		targets = slices.Delete(slices.Clone(targets), voter, voter+1)
+	}
+}
+
 // resumeAdmission protects a journaled batch that was never withdrawn. The
 // journal records intent only: a member still healthy on its previous images
 // would be taken down by the resume, in a fleet that may have degraded since
@@ -193,16 +238,24 @@ func (r Runner) executeRollout(ctx context.Context, p Plan, record *Record, save
 				return
 			}
 		} else {
+			limit := p.Rollout.Concurrency
+			canary := limit > 1 && canaryPending(p, *record)
+			if canary {
+				limit = 1
+			}
 			for _, t := range p.Snapshot.Fleet.Targets {
 				if !record.Completed[t.Name] {
 					targets = append(targets, t)
-					if len(targets) == p.Rollout.Concurrency {
+					if len(targets) == limit {
 						break
 					}
 				}
 			}
 			if len(targets) == 0 {
 				break
+			}
+			if canary {
+				r.report(fmt.Sprintf("managed canary %s: the other targets follow in batches of up to %d", targets[0].Name, p.Rollout.Concurrency))
 			}
 			r.batchTargets = nil
 			for _, t := range targets {
@@ -218,15 +271,8 @@ func (r Runner) executeRollout(ctx context.Context, p Plan, record *Record, save
 			if !r.rolloutHealthy(h, p) {
 				return errors.New("fleet unhealthy before batch withdrawal")
 			}
-			for {
-				err = canWithdrawBatch(h.Snapshot, p, targets)
-				if err == nil {
-					break
-				}
-				if len(targets) == 1 {
-					return
-				}
-				targets = targets[:len(targets)-1]
+			if targets, err = admitBatch(h.Snapshot, p, targets); err != nil {
+				return
 			}
 			record.PendingTargets = nil
 			for _, t := range targets {

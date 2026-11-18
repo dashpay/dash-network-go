@@ -26,7 +26,9 @@ func observeTargets(ctx context.Context, f Fleet, remote Backend, reference int6
 	nodes := map[string]Observation{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, 4)
+	// Observations are read-only and independent per host: sample as many at
+	// once as staging pulls images. A gate is several sweeps of the fleet.
+	limit := make(chan struct{}, stagingConcurrency)
 	for _, t := range targets {
 		wg.Add(1)
 		go func(t Target) {
@@ -213,10 +215,17 @@ func assessHealthProgress(s, first, second Snapshot, plan *Plan, label string, p
 			if plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && b.Chain.PosePenalty > s.Nodes[t.Name].Chain.PosePenalty {
 				h.Problems = append(h.Problems, t.Name+": PoSe penalty increased")
 			}
-			if !digestRE.MatchString(b.Chain.PlatformHash) || (block != "" && block != b.Chain.PlatformHash) {
+			// A validator whose own Platform could not be read reports no block
+			// at all. That is its fault alone, and it is already listed above.
+			// Only a block that differs, or a healthy validator without one,
+			// is a disagreement that implicates the whole set.
+			reported := digestRE.MatchString(b.Chain.PlatformHash)
+			if (!reported && b.Healthy(t) == nil) || (reported && block != "" && block != b.Chain.PlatformHash) {
 				h.Problems = append(h.Problems, t.Name+": consensus block disagreement")
 			}
-			block = b.Chain.PlatformHash
+			if reported {
+				block = b.Chain.PlatformHash
+			}
 		}
 		problems := slices.Clone(h.Problems[start:])
 		status := "healthy"
@@ -317,8 +326,31 @@ func nativePreserved(base, current map[string]string, selected []string) bool {
 	}
 	return hash(filter(base)) == hash(filter(current))
 }
+
+// sameWorkload compares what an operation promises to leave alone: the same
+// container, image and configuration, still running. A container that Docker
+// or its operator restarted in place is the same workload; its start time and
+// restart counter are not compared. Core is the exception: outside the scope
+// its process is preserved exactly, so a Core that restarted since the review
+// (and may still be reconnecting to its quorums) stops the operation. The
+// host worker applies the same rule.
+func sameWorkload(a, b Container) bool {
+	a.StartedAt, a.Restarts = b.StartedAt, b.Restarts
+	return hash(a) == hash(b)
+}
+func sameCompanions(base, current map[string]Container) bool {
+	if len(base) != len(current) {
+		return false
+	}
+	for name, b := range base {
+		if a, ok := current[name]; !ok || !sameWorkload(a, b) {
+			return false
+		}
+	}
+	return true
+}
 func Preserved(base, current Observation, selected []string) error {
-	if base.FilesHash != current.FilesHash || hash(base.Companions) != hash(current.Companions) || !nativePreserved(base.NativeProcesses, current.NativeProcesses, selected) {
+	if base.FilesHash != current.FilesHash || !sameCompanions(base.Companions, current.Companions) || !nativePreserved(base.NativeProcesses, current.NativeProcesses, selected) {
 		return errors.New("configuration/companion drift")
 	}
 	for c, b := range base.Components {
@@ -326,7 +358,7 @@ func Preserved(base, current Observation, selected []string) error {
 		if !ok || a.ConfigHash != b.ConfigHash {
 			return errors.New("workload configuration drift")
 		}
-		if !slices.Contains(selected, c) && hash(a) != hash(b) {
+		if !slices.Contains(selected, c) && (c == "core" && hash(a) != hash(b) || !sameWorkload(a, b)) {
 			return fmt.Errorf("unselected %s changed", c)
 		}
 	}

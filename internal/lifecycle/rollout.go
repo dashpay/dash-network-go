@@ -304,6 +304,17 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 				}
 			}
 		} else {
+			// The first node of a rollout goes alone, whatever the requested
+			// concurrency: an image that cannot start, or a recipe fault,
+			// then costs one node and not a batch.
+			limit := u.Rollout.Concurrency
+			canary := limit > 1
+			for _, done := range e.r.Upgrade.Completed {
+				canary = canary && !done
+			}
+			if canary {
+				limit = 1
+			}
 			for _, t := range upgradeOrder(e.p, u.Scope) {
 				if e.r.Upgrade.Completed[t.Name] {
 					continue
@@ -312,9 +323,12 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 					break
 				}
 				targets = append(targets, t)
-				if len(targets) == u.Rollout.Concurrency || t.Name == e.p.Miner().Name {
+				if len(targets) == limit || t.Name == e.p.Miner().Name {
 					break
 				}
+			}
+			if canary && len(targets) > 0 {
+				e.report(fmt.Sprintf("upgrade canary %s: the other nodes follow in batches of up to %d", targets[0].Name, u.Rollout.Concurrency))
 			}
 		}
 		if len(targets) == 0 {
@@ -350,19 +364,27 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 			if err = liveScope(e.ctx, e.p, e.r, e.runner.Cloud); err != nil {
 				return
 			}
-			if health, err = e.verifyUpgrade(); err != nil {
+			if health, err = e.batchGate(0); err != nil {
 				return
 			}
 			observed := e.runner.sample(e.ctx, e.p, e.r, 0)
+			// A batch too large for the observed quorum gives up validators,
+			// never the other nodes that follow them in the upgrade order.
 			for {
 				err = e.batchAdmission(targets, observed)
 				if err == nil {
 					break
 				}
-				if len(targets) == 1 {
+				voter := -1
+				for i, t := range targets {
+					if t.Role == "validator" {
+						voter = i
+					}
+				}
+				if len(targets) == 1 || voter < 0 {
 					return
 				}
-				targets = targets[:len(targets)-1]
+				targets = slices.Delete(targets, voter, voter+1)
 			}
 			for _, t := range targets {
 				e.r.Upgrade.PendingNodes = append(e.r.Upgrade.PendingNodes, t.Name)
@@ -428,7 +450,7 @@ func (e *execution) upgradeBatches(u UpgradePlan) (health Health, err error) {
 		if err = e.save(); err != nil {
 			return
 		}
-		if health, err = e.verifyUpgrade(); err != nil {
+		if health, err = e.batchGate(e.runner.readyTimeout()); err != nil {
 			return
 		}
 		for _, t := range targets {

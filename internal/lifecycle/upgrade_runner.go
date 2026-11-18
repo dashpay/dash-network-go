@@ -37,6 +37,10 @@ func preservedCore(c *node.Core, b provision.Preservation) bool {
 	return c != nil && c.ContainerID == b.CoreID && c.StartedAt == b.CoreStarted && c.ConfigSHA256 == b.CoreConfig && c.Genesis == b.CoreGenesis
 }
 
+// errUnobserved marks evidence that failed because a node did not answer, as
+// opposed to a node that answered with something the upgrade must not accept.
+var errUnobserved = errors.New("node not observed")
+
 func missingUpgradeObservation(message, target string, problems []string) error {
 	if len(problems) > 0 {
 		// sample() already sanitizes remote failures. Retain those reasons so
@@ -79,7 +83,10 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			baseline[t.Name] = record.Upgrade.Baseline[t.Name]
 			continue
 		}
-		if s.core == nil || s.core.Genesis != record.Deployment.CoreGenesis {
+		if s.core == nil {
+			return nil, fmt.Errorf("%w: %w", errUnobserved, missingUpgradeObservation("missing/mismatched Core", t.Name, s.problems))
+		}
+		if s.core.Genesis != record.Deployment.CoreGenesis {
 			return nil, missingUpgradeObservation("missing/mismatched Core", t.Name, s.problems)
 		}
 		if _, err := time.Parse(time.RFC3339Nano, s.core.StartedAt); err != nil {
@@ -104,7 +111,7 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 					baseline[t.Name] = b
 					continue
 				}
-				return nil, missingUpgradeObservation("Platform observation missing", t.Name, s.problems)
+				return nil, fmt.Errorf("%w: %w", errUnobserved, missingUpgradeObservation("Platform observation missing", t.Name, s.problems))
 			}
 			// Platform quorums are 12 members; one that formed with fewer (at
 			// least the minimum of 9, e.g. after a member missed a DKG) is live.
@@ -293,9 +300,38 @@ func (e *execution) stagePlatform(u UpgradePlan) error {
 	}
 }
 
+// batchGate is a rollout's gate before and after a batch: every node healthy,
+// with its identity, and every validator on the same recent Platform block.
+// It does not wait for a new Core block; proof that the chain still advances
+// is taken once, after the last batch. The gate after a batch allows the
+// replaced nodes their first start.
+func (e *execution) batchGate(within time.Duration) (Health, error) {
+	e.runner.agreementOnly, e.runner.gateTimeout = true, within
+	defer func() { e.runner.agreementOnly, e.runner.gateTimeout = false, 0 }()
+	return e.verifyUpgrade()
+}
+
+func (r Runner) readyTimeout() time.Duration {
+	if r.ReadyTimeout > 0 {
+		return r.ReadyTimeout
+	}
+	return 30 * time.Minute
+}
+
 func (e *execution) verifyUpgrade() (Health, error) {
-	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Minute)
+	limit := max(gateLimit, e.runner.gateTimeout)
+	ctx, cancel := context.WithTimeout(e.ctx, limit)
 	defer cancel()
+	// The gate's own deadline is reported as such, with what it waited for.
+	expired := func(h Health) error {
+		if e.ctx.Err() != nil {
+			return e.ctx.Err()
+		}
+		if len(h.Problems) == 0 {
+			return fmt.Errorf("health gate not passed within %s: no health sample completed", limit)
+		}
+		return fmt.Errorf("health gate not passed within %s: %s", limit, strings.Join(h.Problems, "; "))
+	}
 	for {
 		check := e.runner.Doctor
 		if e.runner.readinessDriven {
@@ -303,36 +339,49 @@ func (e *execution) verifyUpgrade() (Health, error) {
 		}
 		h, err := check(ctx, e.p, e.r)
 		if err != nil {
+			if e.runner.readinessDriven && ctx.Err() != nil {
+				err = expired(h)
+			}
 			return h, err
 		}
 		if h.Healthy {
 			observed := e.runner.sample(ctx, e.p, e.r, 0)
-			if _, err = upgradeEvidence(e.p, e.r, observed, ""); err != nil {
+			_, err = upgradeEvidence(e.p, e.r, observed, "")
+			switch {
+			case errors.Is(err, errUnobserved) && e.runner.readinessDriven && ctx.Err() == nil:
+				// One failed probe of a node the gate has just seen healthy is
+				// not evidence against it: sample again, within the gate's time.
+				h.Healthy, h.Problems = false, []string{err.Error()}
+			case err != nil:
 				return h, err
-			}
-			// Evidence tolerates a silent node that is still being replaced.
-			// Completion does not: the journal entry is all a retry has to
-			// reconcile it, so every such node must answer in this sample.
-			var silent []string
-			for _, t := range e.p.Targets {
-				if e.r.Upgrade == nil || (t.Name != e.r.Upgrade.CurrentNode && !slices.Contains(e.r.Upgrade.PendingNodes, t.Name)) {
-					continue
+			default:
+				// Evidence tolerates a silent node that is still being replaced.
+				// Completion does not: the journal entry is all a retry has to
+				// reconcile it, so every such node must answer in this sample.
+				var silent []string
+				for _, t := range e.p.Targets {
+					if e.r.Upgrade == nil || (t.Name != e.r.Upgrade.CurrentNode && !slices.Contains(e.r.Upgrade.PendingNodes, t.Name)) {
+						continue
+					}
+					if s := observed[t.Name]; s.core == nil || (t.Role == "validator" && s.platform == nil) {
+						silent = append(silent, t.Name+": not observed after replacement")
+					}
 				}
-				if s := observed[t.Name]; s.core == nil || (t.Role == "validator" && s.platform == nil) {
-					silent = append(silent, t.Name+": not observed after replacement")
+				if len(silent) == 0 {
+					return h, nil
 				}
+				h.Healthy, h.Problems = false, silent
 			}
-			if len(silent) == 0 {
-				return h, nil
-			}
-			h.Healthy, h.Problems = false, silent
 		}
 		e.report("upgrade health gate waiting: " + strings.Join(h.Problems, "; "))
-		if err = ctx.Err(); err != nil {
-			return h, err
+		if ctx.Err() != nil {
+			return h, expired(h)
 		}
 		if e.runner.Wait != nil {
 			if err = e.runner.Wait(ctx); err != nil {
+				if ctx.Err() != nil {
+					err = expired(h)
+				}
 				return h, err
 			}
 		} else {
@@ -340,7 +389,7 @@ func (e *execution) verifyUpgrade() (Health, error) {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return h, ctx.Err()
+				return h, expired(h)
 			case <-timer.C:
 			}
 		}
