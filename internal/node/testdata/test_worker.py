@@ -172,7 +172,8 @@ class Tests(unittest.TestCase):
             dict(pro_tx_hash="A" * 64, voting_power="100"),
             dict(pro_tx_hash="B" * 64, voting_power="100")])
         with patch.object(worker.Worker, "platform_status", return_value={}):
-            for quorum_type in [107, "107", "llmq_devnet_platform"]:
+            for quorum_type in [107, 107.0, " 107 ", "107.0", "LLMQ-DEVNET-PLATFORM", "devnet_platform",
+                                 {"name": "llmq_devnet_platform"}, {"type": "enum", "value": 107}]:
                 current = dict(value, quorum_type=quorum_type)
                 for wrapped in [current, dict(result=current)]:
                     w.opener = Response(wrapped)
@@ -180,7 +181,9 @@ class Tests(unittest.TestCase):
                     self.assertEqual(observed["protocol"], 14)
                     self.assertEqual(observed["validators"], ["a" * 64, "b" * 64])
             for invalid in [dict(value, total="3"), dict(value, quorum_type=101),
-                            dict(error=dict(code=-1)), []]:
+                            *[dict(value, quorum_type=q) for q in [True, False, None, 101, "101", {},
+                              {"name": "llmq_devnet_platform", "value": 101}, {"type": "enum"}]],
+                            dict(error=dict(code=-1)), [], dict(result=None)]:
                 w.opener = Response(invalid)
                 with self.assertRaises(worker.Failure):
                     w.platform_status()

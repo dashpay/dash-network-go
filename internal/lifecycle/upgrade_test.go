@@ -618,3 +618,25 @@ func TestCoreUpgradeRefusesFleetsWithLargerQuorumTypes(t *testing.T) {
 		t.Fatal("core scope accepted for a fleet that forms llmq_50_60 and larger", err)
 	}
 }
+
+func TestObserverOnlyUpgradeRecipeCompatibility(t *testing.T) {
+	f := upgradeSetup(t)
+	u := f.change(t, "platform", "b")
+	u.RecipeSHA256 = "2244f28e6ae19aec2c88afec6decf657db6bf0fd66adafc7edd12b46f6a46dc5"
+	u.ID = ""
+	u.ID = hash(u)
+	if err := u.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	altered := u
+	altered.ID = strings.Repeat("0", 64)
+	if altered.Validate() == nil {
+		t.Fatal("altered plan hash accepted")
+	}
+	u.RecipeSHA256 = strings.Repeat("0", 64)
+	u.ID = ""
+	u.ID = hash(u)
+	if u.Validate() == nil {
+		t.Fatal("unknown recipe accepted")
+	}
+}
