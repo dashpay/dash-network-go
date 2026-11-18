@@ -26,7 +26,9 @@ func observeTargets(ctx context.Context, f Fleet, remote Backend, reference int6
 	nodes := map[string]Observation{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, 4)
+	// Observations are read-only and independent per host: sample as many at
+	// once as staging pulls images. A gate is several sweeps of the fleet.
+	limit := make(chan struct{}, stagingConcurrency)
 	for _, t := range targets {
 		wg.Add(1)
 		go func(t Target) {

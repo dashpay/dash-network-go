@@ -41,7 +41,9 @@ func (r Runner) sample(ctx context.Context, p Plan, record provision.Record, ref
 	result := map[string]samples{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, 4)
+	// Observations are read-only and independent per node: sample as many at
+	// once as a deploy inspects. A gate is several sweeps of the network.
+	limit := make(chan struct{}, concurrency("inspect"))
 	for _, t := range p.Targets {
 		wg.Add(1)
 		go func(t node.Target) {
