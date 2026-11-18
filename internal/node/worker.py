@@ -572,17 +572,36 @@ class Worker:
         if not validator:
             return
         put("platform.drive.abci.docker.image", self.images["drive"])
-        put("platform.drive.abci.epochTime", int(c.get("platformEpochSeconds") or 3600))
+        # Existing chains keep their Platform timing and quorum policy. A
+        # release migration may add new non-consensus options, but rendering a
+        # new dashmate config must not silently change the chain's epoch or
+        # quorum parameters. A config alone is not enough to identify an
+        # existing chain: the persisted Platform identity is the boundary.
+        genesis_path = self.home / self.config_name / "platform/drive/tenderdash/genesis.json"
+        existing_chain = self.read("platform/identity.json") is not None
+        live_config = None
+        live_config_path = self.home / "config.json"
+        if existing_chain and live_config_path.is_file():
+            try:
+                live_config = json.loads(live_config_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                self.require(False, "live-config-unreadable")
+        live_platform = ((live_config or {}).get("configs", {}).get(self.config_name, {}).get("platform", {}) or {})
+        live_abci = live_platform.get("drive", {}).get("abci", {}) or {}
+        requested_epoch = int(c.get("platformEpochSeconds") or 3600)
+        live_epoch = int(live_abci.get("epochTime", requested_epoch))
+        if existing_chain and live_epoch != requested_epoch:
+            code = "upgrade-config-changed" if self.q.get("action", self.stage).startswith("upgrade") else "immutable-platform-config-changed"
+            self.require(False, code)
+        put("platform.drive.abci.epochTime", live_epoch)
         # dashmate has no devnet preset: these are Core's llmq_devnet* settings.
         for name, kind, window, signers, rotation in [
             ("validatorSet", 107, 24, 4, False),
             ("chainLock", 101, 24, 4, False),
             ("instantLock", 105, 48, 2, True),
         ]:
-            put(
-                "platform.drive.abci." + name + ".quorum",
-                dict(llmqType=kind, dkgInterval=window, activeSigners=signers, rotation=rotation),
-            )
+            default = dict(llmqType=kind, dkgInterval=window, activeSigners=signers, rotation=rotation)
+            put("platform.drive.abci." + name + ".quorum", live_abci.get(name, {}).get("quorum", default))
         put("platform.dapi.rsDapi.docker.image", self.images["dapi"])
         put("platform.gateway.docker.image", self.images["gateway"])
         put("platform.gateway.listeners.dapiAndDrive.port", p["gateway"])
@@ -609,18 +628,34 @@ class Worker:
         if "platformNodeID" in s:
             put(td + "node.id", s["platformNodeID"])
             put(td + "node.key", s["nodePrivateKey"])
-        genesis = d["platform"]["drive"]["tenderdash"]["genesis"]
-        genesis.update(
-            chain_id=c["platformChainId"],
-            genesis_time=c["genesisTime"],
-            validator_quorum_type=107,
-        )
-        genesis["consensus_params"]["version"] = dict(
-            app_version=str(c["initialProtocolVersion"])
-        )
+        if existing_chain:
+            # Tenderdash genesis is chain state, not a release-owned config
+            # template. Preserve it byte-for-byte in the new render: this
+            # keeps chain ID, genesis time, app/protocol version, consensus
+            # params and the initial Core ChainLock anchor unchanged.
+            try:
+                genesis = json.loads(genesis_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                self.require(False, "live-platform-genesis-unreadable")
+        else:
+            genesis = d["platform"]["drive"]["tenderdash"]["genesis"]
+            genesis.update(
+                chain_id=c["platformChainId"],
+                genesis_time=c["genesisTime"],
+                validator_quorum_type=107,
+            )
+            genesis["consensus_params"]["version"] = dict(
+                app_version=str(c["initialProtocolVersion"])
+            )
+            _, platform = self.inputs()
+            if platform:
+                genesis["initial_core_chain_locked_height"] = platform["genesisCoreHeight"]
+        if existing_chain:
+            self.require(genesis.get("chain_id") == c["platformChainId"], "immutable-platform-config-changed")
+            self.require(genesis.get("genesis_time") == c["genesisTime"], "immutable-platform-config-changed")
+        d["platform"]["drive"]["tenderdash"]["genesis"] = genesis
         _, platform = self.inputs()
         if platform:
-            genesis["initial_core_chain_locked_height"] = platform["genesisCoreHeight"]
             put(
                 td + "p2p.persistentPeers",
                 [
