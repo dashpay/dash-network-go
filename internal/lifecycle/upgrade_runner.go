@@ -108,15 +108,18 @@ func upgradeEvidence(p Plan, record provision.Record, observed map[string]sample
 			}
 			// Platform quorums are 12 members; one that formed with fewer (at
 			// least the minimum of 9, e.g. after a member missed a DKG) is live.
-			// InitialProtocolVersion is the bootstrap version, not a cap on a
-			// forward image-only upgrade. Permit the next protocol activation
-			// (PV14 -> PV15) observed at an epoch boundary, but never accept a
-			// regression or an arbitrary future protocol. dashnet does not set or
-			// migrate the protocol; it only observes what the network reports.
+			// A reset/upgrade plan may carry the protocol the release is
+			// intended to activate (PV15) while the live chain still reports
+			// the immediately preceding protocol (PV14). Conversely, after an
+			// epoch activation, a plan created at PV14 can observe PV15. Permit
+			// only that one-step transition in either direction; never accept an
+			// arbitrary protocol. dashnet does not set or migrate protocol state.
 			protocolOK := x.Protocol == p.InitialProtocolVersion ||
+				(p.InitialProtocolVersion > 1 && x.Protocol == p.InitialProtocolVersion-1) ||
 				(p.InitialProtocolVersion < ^uint32(0) && x.Protocol == p.InitialProtocolVersion+1)
-			if !protocolOK || len(x.Validators) < platformQuorumMinimum || len(x.Validators) > 12 {
-				return nil, fmt.Errorf("unsupported live protocol or quorum size at %s", t.Name)
+			quorumOK := len(x.Validators) >= platformQuorumMinimum && len(x.Validators) <= 12
+			if !protocolOK || !quorumOK {
+				return nil, fmt.Errorf("unsupported live protocol or quorum size at %s (read protocol=%d expected=%d±1 quorum=%d expected=%d..12)", t.Name, x.Protocol, p.InitialProtocolVersion, len(x.Validators), platformQuorumMinimum)
 			}
 			seen := map[string]bool{}
 			for _, id := range x.Validators {
