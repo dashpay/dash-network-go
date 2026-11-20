@@ -274,6 +274,22 @@ class Worker:
         require(len(files)<=200,'configuration-file-count')
         return fingerprint(files)
 
+    @staticmethod
+    def preserved(name, actual, baseline, selected):
+        """An unselected service must be the baseline service, with one exception.
+
+        Tenderdash exits when Core's RPC goes away and Docker restarts it, so a
+        Core replacement moves Tenderdash's start time and restart count. Its
+        container, image and configuration must still be the baseline ones.
+        Nothing else may restart, and Tenderdash only when Core is selected.
+        """
+        if actual == baseline:
+            return True
+        if name != 'tenderdash' or 'core' not in selected:
+            return False
+        fixed = lambda v: {k: x for k, x in v.items() if k not in ('running', 'startedAt', 'restarts')}
+        return fixed(actual) == fixed(baseline) and actual['restarts'] >= baseline['restarts']
+
     def summary(self, c):
         image=self.engine.image(c['Image']);require(image is not None,'missing-image')
         require(image['Architecture']==self.t['architecture'] and image['Os']=='linux','image-architecture')
@@ -534,7 +550,7 @@ with open('/run/dashnet-managed.lock','a') as lock:
         for k,b in baseline['components'].items():
             a=actual['components'][k]
             require(a['configHash']==b['configHash'],'workload-configuration-changed')
-            if k not in mutable:require(a==b,'preserved-service-changed')
+            if k not in mutable:require(self.preserved(k,a,b,mutable),'preserved-service-changed')
 
     def owner(self):
         owner=self.read('owner.json')
@@ -812,7 +828,7 @@ with open('/run/dashnet-managed.lock','a') as lock:
                 continue
             a=self.summary(c)
             require(a['configHash']==b['configHash'],'workload-configuration-changed')
-            if k not in pins:require(a==b,'preserved-service-changed')
+            if k not in pins:require(self.preserved(k,a,b,pins),'preserved-service-changed')
             elif k in marker['completed']:require(c['Id']==marker['completed'][k],'applied-container-replaced')
             else:
                 desired=self.engine.image(pins[k]);require(desired is not None,'image-not-staged')

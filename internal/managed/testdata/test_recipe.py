@@ -31,6 +31,19 @@ class RecipeTest(unittest.TestCase):
             source.write_text(json.dumps({'configs':{'testnet':{'core':{'rpc':{'users':{'fixture':{'password':'wrong'}}}}}}}))
             with self.assertRaises(worker.Failure):w.configuration_digest(path)
 
+    def test_core_replacement_permits_only_tenderdash_self_restart(self):
+        base=dict(id='td',imageId='image',image='tenderdash',digests=['d'],configHash='config',running=True,startedAt='before',restarts=1)
+        after=dict(base,startedAt='after',restarts=2)
+        ok=worker.Worker.preserved
+        self.assertTrue(ok('tenderdash',dict(base),base,{'core':'pin'}))
+        self.assertTrue(ok('tenderdash',after,base,{'core':'pin'}))
+        self.assertTrue(ok('tenderdash',dict(after,running=False),base,{'core':'pin'}))
+        self.assertFalse(ok('tenderdash',after,base,()))
+        self.assertFalse(ok('tenderdash',after,base,{'dapi':'pin'}))
+        self.assertFalse(ok('drive',after,base,{'core':'pin'}))
+        for change in [dict(id='replaced'),dict(imageId='other'),dict(digests=['other']),dict(configHash='other'),dict(restarts=0)]:
+            self.assertFalse(ok('tenderdash',dict(after,**change),base,{'core':'pin'}))
+
     def test_join_profile_exports_only_public_chain_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'dash.conf'

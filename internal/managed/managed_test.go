@@ -432,6 +432,48 @@ func TestCoreUpgradeDoesNotPermitNativeTorRestart(t *testing.T) {
 		t.Fatal("Core scope also permitted Tor restart")
 	}
 }
+func TestCoreUpgradePermitsOnlyTenderdashSelfRestart(t *testing.T) {
+	td := Container{ID: "td", ImageID: "image", Image: "tenderdash", Digests: []string{"d"}, ConfigHash: "config", Running: true, StartedAt: "before", Restarts: 1}
+	base := Observation{Components: map[string]Container{"tenderdash": td, "drive": {ID: "drive", ConfigHash: "config", Running: true, StartedAt: "before"}}}
+	restarted := func(name string) Observation {
+		o := clone(base)
+		c := o.Components[name]
+		c.StartedAt, c.Restarts = "after", c.Restarts+1
+		o.Components[name] = c
+		return o
+	}
+	if e := Preserved(base, restarted("tenderdash"), []string{"core"}); e != nil {
+		t.Fatal(e)
+	}
+	if Preserved(base, restarted("tenderdash"), nil) == nil || Preserved(base, restarted("tenderdash"), []string{"dapi"}) == nil {
+		t.Fatal("Tenderdash restart accepted without a Core replacement")
+	}
+	if Preserved(base, restarted("drive"), []string{"core"}) == nil {
+		t.Fatal("Core scope also permitted a Drive restart")
+	}
+	for _, change := range []func(*Container){
+		func(c *Container) { c.ID = "replaced" },
+		func(c *Container) { c.ImageID = "other" },
+		func(c *Container) { c.Digests = []string{"other"} },
+		func(c *Container) { c.Running = false },
+		func(c *Container) { c.Restarts = 0 },
+	} {
+		o := restarted("tenderdash")
+		c := o.Components["tenderdash"]
+		change(&c)
+		o.Components["tenderdash"] = c
+		if Preserved(base, o, []string{"core"}) == nil {
+			t.Fatal("replaced, stopped or rewound Tenderdash accepted")
+		}
+	}
+}
+func TestPreviousRecipePlanStaysResumable(t *testing.T) {
+	previous := "c699cb84115ba5008933d5e816e1e64dce71317b0ada10785d73d4791e3fe639"
+	current := RecipeDigest() == "dd1ba27b4d6cd1492f631eb01d1bccb7896511d18fedc381c84543d92af91308"
+	if !recipeAccepted(RecipeDigest()) || recipeAccepted(previous) != current || recipeAccepted(strings.Repeat("0", 64)) {
+		t.Fatal("recipe acceptance is not limited to this recipe and its pinned predecessor")
+	}
+}
 func TestReadOnlyImportPreservesUnknownTarget(t *testing.T) {
 	s, r, _, b := setup(t)
 	b.fail = "observe"

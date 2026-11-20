@@ -328,13 +328,24 @@ func Build(s Snapshot, operation, scope, previous string, images Images, now tim
 	p.ID = hash(p)
 	return p, p.Validate()
 }
+
+// A plan made by the previous executor stays valid under this one. The two
+// recipes differ only in accepting Tenderdash's own restart during a Core
+// replacement, and an operation that check stopped must resume under the plan
+// it journaled. Both digests are pinned, so the allowance ends with this recipe.
+func recipeAccepted(digest string) bool {
+	return digest == RecipeDigest() ||
+		(digest == "c699cb84115ba5008933d5e816e1e64dce71317b0ada10785d73d4791e3fe639" &&
+			RecipeDigest() == "dd1ba27b4d6cd1492f631eb01d1bccb7896511d18fedc381c84543d92af91308")
+}
+
 func (p Plan) Validate() error {
 	if err := p.validateRollout(); err != nil {
 		return err
 	}
 	c := p
 	c.ID = ""
-	if p.APIVersion != spec.Version || p.Kind != "ExistingOperation" || p.ID != hash(c) || p.Recipe != RecipeDigest() || p.CreatedAt.IsZero() {
+	if p.APIVersion != spec.Version || p.Kind != "ExistingOperation" || p.ID != hash(c) || !recipeAccepted(p.Recipe) || p.CreatedAt.IsZero() {
 		return errors.New("managed plan altered or executor recipe changed")
 	}
 	if err := p.Snapshot.CompleteTargets(p.Targets); err != nil {
