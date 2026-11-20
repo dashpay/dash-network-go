@@ -317,6 +317,17 @@ func nativePreserved(base, current map[string]string, selected []string) bool {
 	}
 	return hash(filter(base)) == hash(filter(current))
 }
+
+// Tenderdash exits when Core's RPC goes away and Docker restarts it, so a Core
+// replacement moves Tenderdash's start time and restart count. It must be the
+// same running container, image and configuration; no other service may restart.
+func dependentRestart(component string, base, current Container, selected []string) bool {
+	if component != "tenderdash" || !slices.Contains(selected, "core") || !current.Running || current.Restarts < base.Restarts {
+		return false
+	}
+	current.StartedAt, current.Restarts = base.StartedAt, base.Restarts
+	return hash(current) == hash(base)
+}
 func Preserved(base, current Observation, selected []string) error {
 	if base.FilesHash != current.FilesHash || hash(base.Companions) != hash(current.Companions) || !nativePreserved(base.NativeProcesses, current.NativeProcesses, selected) {
 		return errors.New("configuration/companion drift")
@@ -326,7 +337,7 @@ func Preserved(base, current Observation, selected []string) error {
 		if !ok || a.ConfigHash != b.ConfigHash {
 			return errors.New("workload configuration drift")
 		}
-		if !slices.Contains(selected, c) && hash(a) != hash(b) {
+		if !slices.Contains(selected, c) && hash(a) != hash(b) && !dependentRestart(c, b, a, selected) {
 			return fmt.Errorf("unselected %s changed", c)
 		}
 	}
