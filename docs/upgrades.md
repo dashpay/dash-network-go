@@ -184,11 +184,18 @@ one selected-target progression check at the end. Validator batches are trimmed
 to preserve observed >2/3 remaining Platform voting power.
 
 The gates are per batch, not per node. Before a batch is withdrawn, and again
-after it is applied, its members must be healthy and every validator must
+after it is applied, its members must be healthy and the validators must
 report the same Platform block at a height they have all reached. That check
 does not wait for a new block: proof that Core and Platform still advance is
 required once, after the last batch. A chain that stops between batches is
 therefore caught by the final gate, not by the next batch's admission.
+
+Two different blocks at that height are a fork: every validator is then
+unhealthy and the run stops. A managed validator outside the batch that reports
+no block at all (its Platform is down or behind, or the host cannot be reached)
+is unhealthy by itself and does not stop the batch. It still counts as lost
+voting power: the batch is admitted only if more than 2/3 of every quorum
+reported by the other validators stays with healthy managed validators.
 
 A managed rollout that selects only ordinary masternodes observes no validator
 at all, in its batch gates or in its final gate, so it says nothing about

@@ -213,10 +213,18 @@ func assessHealthProgress(s, first, second Snapshot, plan *Plan, label string, p
 			if plan != nil && plan.Migration != nil && plan.Migration.ReadinessDriven && b.Chain.PosePenalty > s.Nodes[t.Name].Chain.PosePenalty {
 				h.Problems = append(h.Problems, t.Name+": PoSe penalty increased")
 			}
-			if !digestRE.MatchString(b.Chain.PlatformHash) || (block != "" && block != b.Chain.PlatformHash) {
+			// Only two blocks that differ at the same height show a fork, and
+			// that puts every validator in doubt. A validator that reports no
+			// block (its Platform is down or behind, or the sample asked for no
+			// height) is unhealthy by itself: its silence says nothing about
+			// the block the others hold.
+			if !digestRE.MatchString(b.Chain.PlatformHash) {
+				h.Problems = append(h.Problems, t.Name+": Platform block unavailable")
+			} else if block == "" {
+				block = b.Chain.PlatformHash
+			} else if block != b.Chain.PlatformHash {
 				h.Problems = append(h.Problems, t.Name+": consensus block disagreement")
 			}
-			block = b.Chain.PlatformHash
 		}
 		problems := slices.Clone(h.Problems[start:])
 		status := "healthy"
@@ -270,6 +278,11 @@ func laggingCore(f Fleet, first, second Snapshot, focus []string) []Target {
 
 // Count only observed healthy owned validators, not guessed availability of
 // unrelated public-testnet operators. Every observed quorum must retain >2/3.
+//
+// A validator that is itself unhealthy and reports no quorum (its Platform is
+// down, or the host could not be reached) is not a witness. It already counts
+// as lost voting power in every quorum the others report; its silence must not
+// also stop every withdrawal in the fleet for as long as it stays down.
 func CanWithdraw(s Snapshot, target Target) error {
 	if target.Role != "validator" {
 		return nil
@@ -280,14 +293,19 @@ func CanWithdraw(s Snapshot, target Target) error {
 			healthy[strings.ToLower(s.Nodes[t.Name].Chain.ProTxHash)] = true
 		}
 	}
+	witnesses := 0
 	for _, t := range s.Fleet.Targets {
 		if t.Role != "validator" {
 			continue
 		}
 		powers := s.Nodes[t.Name].Chain.VotingPower
 		if len(powers) == 0 {
+			if s.Nodes[t.Name].Healthy(t) != nil {
+				continue
+			}
 			return errors.New("quorum membership unavailable")
 		}
+		witnesses++
 		total, remaining := int64(0), int64(0)
 		for id, power := range powers {
 			if !digestRE.MatchString(id) || power <= 0 || power > 1000000000 {
@@ -301,6 +319,9 @@ func CanWithdraw(s Snapshot, target Target) error {
 		if remaining <= 2*total/3 {
 			return fmt.Errorf("withdrawing %s lacks observed >2/3 voting power in quorum reported by %s", target.Name, t.Name)
 		}
+	}
+	if witnesses == 0 {
+		return errors.New("quorum membership unavailable")
 	}
 	return nil
 }
